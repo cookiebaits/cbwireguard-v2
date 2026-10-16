@@ -1,0 +1,10 @@
+{
+  "name": "Cookie's WireGuard Manager",
+  "description": "Hyper-secure, optimized WireGuard VPN server management dashboard featuring Geo-IP and Anti-VPN shielding, split-tunneling, peer QR code generation, and AES-256 encrypted backups.",
+  "requestFeedback": false,
+  "userFacing": true,
+  "permissions": [],
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
