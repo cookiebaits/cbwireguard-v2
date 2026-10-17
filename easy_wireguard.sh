@@ -249,7 +249,7 @@ function installWireGuard() {
 
 	# Check for background apt/dpkg locks (e.g. unattended-upgrades on fresh VPS)
 	for i in {1..10}; do
-		if fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
+		if fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1; then
 			echo -e "${YELLOW}[*] Waiting for background system updates to finish... (${i}/10)${NC}"
 			sleep 2
 		else
