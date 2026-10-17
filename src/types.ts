@@ -18,6 +18,33 @@ export interface ServerState {
   onlinePeersCount: number;
   totalRx: number;
   totalTx: number;
+  webPort?: number;
+  isRealSystemData?: boolean;
+  stealthScore?: number;
+  stealthRating?: string;
+}
+
+export interface StealthConfig {
+  ttlNormalization: boolean;
+  mssClamping: boolean;
+  pmtuProbing: boolean;
+  quicPortCloaking: boolean;
+  ipv6LeakShield: boolean;
+  bbrPacing: boolean;
+  tosNormalization: boolean;
+  udpFragmentationDefense: boolean;
+  overallScore: number;
+  rating: string;
+}
+
+export interface StealthAuditItem {
+  id: string;
+  name: string;
+  category: 'packet' | 'routing' | 'dns' | 'identity';
+  status: 'passed' | 'warning' | 'failed';
+  metric: string;
+  description: string;
+  recommendation?: string;
 }
 
 export interface Peer {
@@ -91,4 +118,17 @@ export interface LogEntry {
   level: 'info' | 'warn' | 'error' | 'shield';
   service: string;
   message: string;
+}
+
+export interface AuthSecurityState {
+  accessGranted: boolean;
+  clientIp: string;
+  isVpnConnected: boolean;
+  vpnSubnet: string;
+  vpnRequiredMode: boolean;
+  whitelistedIps: string[];
+  serverPublicIp: string;
+  webPort?: number;
+  encryptedMode: boolean;
+  reason: string;
 }

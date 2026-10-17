@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Wifi, Plus, QrCode, Download, Trash2, Power, Edit2, Search, Check, X, ShieldAlert } from 'lucide-react';
+import { Wifi, Plus, QrCode, Download, Trash2, Power, Edit2, Search, Check, X, Lock, ShieldCheck, Cpu } from 'lucide-react';
 import { Peer } from '../types';
 
 interface PeersTabProps {
@@ -7,6 +7,7 @@ interface PeersTabProps {
   onSelectPeerForQr: (peer: Peer) => void;
   onOpenAddPeer: () => void;
   onRefresh: () => void;
+  isRealSystemData?: boolean;
 }
 
 export const PeersTab: React.FC<PeersTabProps> = ({
@@ -14,6 +15,7 @@ export const PeersTab: React.FC<PeersTabProps> = ({
   onSelectPeerForQr,
   onOpenAddPeer,
   onRefresh,
+  isRealSystemData = false,
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [filter, setFilter] = useState<'all' | 'online' | 'idle' | 'disabled'>('all');
@@ -36,7 +38,10 @@ export const PeersTab: React.FC<PeersTabProps> = ({
     try {
       await fetch(`/api/clients/${peer.id}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-cookie-auth-token': localStorage.getItem('cookie_wg_auth_token') || '',
+        },
         body: JSON.stringify({ enabled: !peer.enabled }),
       });
       onRefresh();
@@ -47,7 +52,12 @@ export const PeersTab: React.FC<PeersTabProps> = ({
 
   const handleDeletePeer = async (id: string) => {
     try {
-      await fetch(`/api/clients/${id}`, { method: 'DELETE' });
+      await fetch(`/api/clients/${id}`, {
+        method: 'DELETE',
+        headers: {
+          'x-cookie-auth-token': localStorage.getItem('cookie_wg_auth_token') || '',
+        },
+      });
       setDeleteConfirmId(null);
       onRefresh();
     } catch (e) {
@@ -68,7 +78,10 @@ export const PeersTab: React.FC<PeersTabProps> = ({
     try {
       await fetch(`/api/clients/${editingPeer.id}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-cookie-auth-token': localStorage.getItem('cookie_wg_auth_token') || '',
+        },
         body: JSON.stringify({
           name: editName,
           allowedIps: editAllowedIps,
@@ -94,6 +107,40 @@ export const PeersTab: React.FC<PeersTabProps> = ({
 
   return (
     <div className="space-y-6">
+      {/* Zero Plain-Text & Live Kernel Status Banner */}
+      <div className="bg-gradient-to-r from-[#0f172a] via-[#151f38] to-[#0f172a] border border-slate-800 rounded-2xl p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <div className="p-2.5 rounded-xl bg-purple-500/10 text-purple-400 border border-purple-500/20 shrink-0">
+            <Lock className="w-5 h-5" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-xs font-bold text-white">Zero Plain-Text Architecture</span>
+              <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-semibold">
+                Curve25519 Masked
+              </span>
+              {isRealSystemData ? (
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20 font-semibold flex items-center gap-1">
+                  <Cpu className="w-3 h-3 text-blue-400" />
+                  Live Linux wg0 Kernel Socket
+                </span>
+              ) : (
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-purple-500/10 text-purple-300 border border-purple-500/20 font-semibold">
+                  Secure Host Sync
+                </span>
+              )}
+            </div>
+            <p className="text-[11px] text-slate-400 mt-0.5">
+              Client private keys and sensitive tokens are strictly masked in the interface. Configs and QR codes are compiled on-demand in-memory.
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2 shrink-0 text-xs font-mono text-slate-400">
+          <span>Subnet: <strong className="text-emerald-400">10.18.0.0/24</strong></span>
+        </div>
+      </div>
+
       {/* Top Action Bar */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-[#0f172a] border border-slate-800 p-4 rounded-2xl">
         <div className="flex items-center gap-3 flex-1 max-w-md">
@@ -191,6 +238,9 @@ export const PeersTab: React.FC<PeersTabProps> = ({
                           : 'bg-slate-800 text-slate-400 border-slate-700'
                       }`}>
                         {!peer.enabled ? 'Disabled' : peer.isOnline ? 'Online' : 'Idle'}
+                      </span>
+                      <span className="text-[10px] font-mono text-slate-500">
+                        Pub: {peer.publicKey.slice(0, 8)}...
                       </span>
                     </div>
 

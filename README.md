@@ -1,102 +1,98 @@
-# 🍪 Cookie's Easy WireGuard Server
+# 🍪 Cookie's Easy WireGuard VPS Stealth Server & Web Manager
 
-> A heavily optimized, hyper-secure, and lightning-fast deployment script to configure and manage a WireGuard VPN server on Ubuntu.
-
-This wrapper dynamically pulls the latest scripts from GitHub, ensuring your server is always running the most up-to-date and secure code. Guaranteed to work on **Ubuntu 20.04 and newer**.
-
----
-
-## 📑 Table of Contents
-- [Key Feature Upgrades](#-key-feature-upgrades)
-- [Installation (Step 1)](#%EF%B8%8F-installation-step-1)
-- [Setting up the Server (Option 1)](#%E2%9A%99%EF%B8%8F-setting-up-the-server-option-1)
-- [Adding a New Client (Option 2)](#-adding-a-new-client-option-2)
-- [Managing Clients (Options 3 & 4)](#-managing-clients-options-3--4)
-- [Backup & Restore Manager (Option 5)](#-backup--restore-manager-option-5)
-- [Geo-IP & Anti-VPN Shield (Option 7)](#-geo-ip--anti-vpn-shield-option-7)
-- [Removing the Server (Option r)](#%EF%B8%8F-removing-the-server-option-r)
+> A hyper-optimized WireGuard VPN server and real-time web management console engineered for personal VPS deployments (Ubuntu 20.04/22.04/24.04 LTS & Debian 11/12).
+> Designed to make personal VPS traffic **indistinguishable from standard residential desktop browsing** while unblocking strict streaming, banking, and AI services without proxy overhead.
 
 ---
 
-## 🚀 Key Feature Upgrades
+## 🚀 Quick VPS Installation
 
-- **Geo-IP & Anti-VPN Firewall Shield:** Restricts incoming WireGuard connections strictly to the **USA and Canada**, while blocking commercial VPNs (NordVPN, ExpressVPN, etc.), datacenter subnets, and cloud hosting providers (AWS, GCP, DigitalOcean, Hetzner, M247) to prevent attackers from stacking VPNs or disguising foreign traffic.
-- **Enhanced Stealth & Bypassing:** Dynamically configure MTU, DNS, and AllowedIPs (split-tunneling) to bypass streaming service detection and restrictive firewalls.
-- **Dokploy Traefik Integration:** Seamlessly funnels UDP WireGuard traffic through a proxy bridge if standard port 443 is in use by a Traefik reverse proxy.
-- **Domain-Based Split Tunneling:** Bypass specific domains from the VPN tunnel in real-time.
-- **Hardened Security & Sanitization:** Inputs are strictly sanitized to prevent injection attacks, and sensitive cryptographic operations are protected from process list monitoring.
-- **Location Spoofing Prevention:** Blackholes IPv6 traffic natively (`::/1, 8000::/1`) to prevent location leaks while preserving host networking.
-- **Maximized Throughput & MSS Clamping:** Injects Kernel-level BBR, FQ queueing, and `tcp_mtu_probing`, paired with robust `TCPMSS` clamping to eliminate packet fragmentation and resolve strict site hangs.
-- **Zero-Downtime Hot Reloading:** Adding a new peer instantly injects them into the live server. Existing users are never disconnected when the configuration updates.
-- **Military-Grade Security:** Enforces strict execution rules (`set -euo pipefail`), root-only directory locks (`chmod 700`), and secure unprivileged port generation.
-- **Encrypted Backups:** All backups are now AES-256 encrypted using OpenSSL.
-- **Smart IP Tracking:** Intelligently scans the server to dynamically assign IP addresses, preventing crashes from corrupted or empty lines.
-- **Unified Backup Manager:** Securely create, list, restore, and destroy server backups from a single interactive menu.
-- **Hyper-Fast Installation:** Streamlined setup without bloated package manager updates.
+Run this single command in your VPS root terminal to auto-detect your server's public IP, configure stealth kernel modules, assign non-default ports, and deploy the live web console:
 
----
-
-## 🚀 Quick Installation
-
-Run this single command to download and launch the installer:
-
+### 1️⃣ Primary One-Liner (`easy_wireguard.sh`):
 ```bash
 curl -sSfL https://raw.githubusercontent.com/cookiebaits/cbwireguard-v2/main/easy_wireguard.sh -o easy_wireguard.sh && chmod +x easy_wireguard.sh && sudo ./easy_wireguard.sh
 ```
 
+### 2️⃣ Alternate One-Liner (`install.sh`):
+```bash
+curl -sSfL https://raw.githubusercontent.com/cookiebaits/cbwireguard-v2/main/install.sh -o install.sh && chmod +x install.sh && sudo ./install.sh
+```
+
+### 3️⃣ Wget Command:
+```bash
+wget -O easy_wireguard.sh https://raw.githubusercontent.com/cookiebaits/cbwireguard-v2/main/easy_wireguard.sh && chmod +x easy_wireguard.sh && sudo ./easy_wireguard.sh
+```
+
+During installation, the script automatically:
+1. Auto-detects your VPS **`SERVER_PUBLIC_IP`** using public IP lookup services.
+2. Prompts for your preferred WireGuard listen port (**`WG_DEFAULT_PORT`**, defaults to **443** for HTTP/3 QUIC cloaking or randomized high ports).
+3. Assigns a unique, non-default internal Web Management Console port (**`WEB_PORT`**, options include **51821**, **54321**, **51830**, or random high ports).
+4. Auto-generates a Master Security Passkey saved securely in `/etc/wireguard/admin.key`.
+5. Injects kernel-level TTL=64 normalization, TCP MSS clamping, Google BBR congestion control, and IPv6 leak shields.
+6. Auto-creates your first peer, renders a high-fidelity terminal QR code for mobile setup, and prints your management URL.
+
 ---
 
-## ⚙️ Step 2: Setting up the Server (Option 1)
-The script will ask you to define your ports:
+## 🌐 Simple Internal Web Management Console
 
-WireGuard VPN Port: Enter a custom port (1024-65535) or leave it blank to let the script generate a secure, randomized high port.
+The web console is hosted directly on your VPS on a dedicated internal management port (e.g., `51821` or chosen port).
 
-SSH Port: Enter your custom SSH port (or leave blank for the default 22) so the firewall doesn't lock you out.
+### 📱 Accessing the Management Website from Terminal Output
 
-Note: The script will automatically install dependencies, generate locked-down encryption keys, optimize your IP forwarding, and boot the server. (Internal IP scope: 10.18.0.x/24).
+At the end of `./install.sh`, your terminal explicitly outputs your simple internal URL:
 
-## 📱 Step 3: Adding a New Client (Option 2)
-Create a new peer instantly:
+```text
+=================================================================
+🌐 WIREGUARD INTERNAL WEB MANAGEMENT CONSOLE
+=================================================================
+  Internal Tunnel URL (Requires Active WireGuard Connection):
+    👉 http://10.18.0.1:51821
+  Master Security Passkey (For admin access):
+    🔑 <ADMIN_PASSKEY>
+=================================================================
+```
 
-Enter a device name (alphanumeric characters only).
+### 🔒 Simple Internal Access Control
+- **WireGuard Internal Subnet (`10.18.0.0/24`)**: Direct access is open when connected to your WireGuard tunnel (`http://10.18.0.1:51821`).
+- **Master Passkey Backup**: If accessing from outside the tunnel, enter the **Master Security Passkey** in the Security Gatekeeper modal to authorize your session.
+- **Zero Demo Data**: The dashboard pulls actual live kernel data (`wg show wg0 dump`) directly from your WireGuard interface.
+- **Zero Plain-Text Credentials**: Sensitive private and preshared keys are masked in API responses and UI fields (`••••••••••••••••••••••••••••••••`). Backups are AES-256 encrypted using OpenSSL PBKDF2.
 
-Choose if you want the output rendered as a QR code or printed as raw text.
+---
 
-The script will generate the .conf file and inject the user into the active server without restarting the interface. If you chose QR output, scan the terminal with the WireGuard mobile app.
+## 🛡️ VPS Stealth & Traffic Unblocking Architecture
 
-## 🔍 Step 4: Managing Clients (Options 3 & 4)
-[3] Show Client QR: Enter the exact name of a previously created device. The script will instantly render a high-fidelity (ansiutf8) QR code in your terminal.
+Standard WireGuard deployments on personal VPS hosts frequently trigger anti-fraud, banking, or streaming blocks due to datacenter IP signatures. Cookie's WireGuard addresses this natively at the Linux kernel level:
 
-[4] List Configured Clients: Prints a clean list of every active peer currently configured on your server so you don't have to guess their names.
+| Stealth Layer | Problem Solved | Linux Kernel Implementation |
+|---|---|---|
+| **TTL Hop Normalization** | Conceals VPS proxy hops. Prevents banks & streaming sites from detecting intermediate NAT routers. | `iptables -t mangle -A POSTROUTING -o eth0 -j TTL --ttl-set 64` |
+| **TCP MSS Clamping (PMTU 1420)** | Eliminates TLS ClientHello fragmentation with DF flags that stall HTTPS connections and trigger DPI. | `iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu` |
+| **PLPMTUD Probing** | Dynamically probes Path MTU across restrictive mobile carriers and hotel Wi-Fi networks. | `net.ipv4.tcp_mtu_probing = 1` |
+| **HTTP/3 QUIC Port Cloaking** | Runs over UDP 443, making WireGuard traffic look like standard Google/Cloudflare web video streams. | Configurable `ListenPort = 443` or randomized high ports |
+| **WebRTC & IPv6 Leak Blackhole** | Stops modern browsers (Chrome/Safari) from leaking origin IPv6 addresses via WebRTC STUN queries. | `AllowedIPs = 0.0.0.0/1, 128.0.0.0/1, ::/1, 8000::/1` |
+| **Google BBR + FQ Pacing** | Eliminates datacenter bufferbloat and latency spikes, delivering smooth residential-like throughput. | `net.core.default_qdisc = fq` & `net.ipv4.tcp_congestion_control = bbr` |
+| **TOS / DSCP DPI Camouflage** | Clears non-standard Type of Service bits, removing unique WireGuard packet markers. | `iptables -t mangle -A POSTROUTING -j TOS --set-tos 0x00` |
+| **Domain Split-Tunneling** | Routes Netflix, Disney+, Hulu, Chase, and OpenAI around datacenter ASN blocks directly. | Pre-configured subnet CIDR routing tables |
 
-## 💾 Step 5: Backup & Restore Manager (Option 5)
-Selecting this opens the dedicated Backup Sub-Menu:
+---
 
-Create: Archives your current /etc/wireguard configurations into an **AES-256 encrypted** (chmod 600) .tar.gz.enc file.
+## 📱 Live Peer Management & Hot-Reloading
 
-Restore: Scans the directory for existing backups, prompts for the password, and restores the configuration.
+1. **Add Peers**: Click **"+ Add Peer"** in the web interface, enter a device name, choose split or full tunnel, and click **Show QR** to scan with iOS/Android WireGuard apps.
+2. **Zero-Downtime Injection**: New peers are added directly to the active WireGuard interface via `wg set wg0 peer ...` without restarting the service or interrupting existing connections.
+3. **Live Telemetry**: Real-time monitoring of active handshakes, transfer RX/TX byte counters, and client IP addresses.
 
-List: Shows all backups currently sitting in your directory and their file sizes.
+---
 
-Delete: Securely destroys backup archives to keep your server secure.
+## 🗄️ AES-256 Encrypted Backups
 
-## ⚙️ Step 6: Customizing Defaults (Option s)
-You can now customize global defaults for all future clients:
-- **Default MTU:** Request specifically set to 1420 to bypass MTU-based detection.
-- **Default DNS:** Set to a high-privacy, ad-blocking DNS cluster.
-- **Default Allowed IPs:** Configured as `0.0.0.0/1, 128.0.0.0/1` by default to increase stealth.
+- Backup archives (`easy-wireguard-server-*.tar.gz.enc`) are encrypted using AES-256-CBC with PBKDF2 salting.
+- Passphrase protection ensures configurations and private keys are never stored in plain-text.
 
-## 🛡️ Step 7: Geo-IP & Anti-VPN Shield (Option 7)
-Manage foreign connection restrictions and anti-VPN firewall rules:
-- **Status Check:** Displays current active firewall engine (`kernel ipset` or `iptables chains`), count of allowed US/CA subnets, count of blocked VPN/datacenter subnets, and active WireGuard port protection status.
-- **Update Databases:** Automatically fetches and caches the latest official US/CA zone files and commercial VPN/datacenter blocklists.
-- **Manual Whitelist / Blacklist:** Allows administrators to manually whitelist or blacklist custom IP addresses or CIDRs.
+---
 
-## 🗑️ Step 8: Removing the Server (Option r)
-If you need to start fresh or remove the VPN, this option executes a total system wipe.
+## 📄 License
 
-Safely stops the systemd service.
-
-Reverts the sysctl IP forwarding changes to close system vulnerabilities.
-
-Purges WireGuard and cleans up unused dependencies.
+Distributed under the terms of the project [LICENSE](LICENSE).

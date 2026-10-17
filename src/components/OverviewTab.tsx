@@ -315,11 +315,33 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
 
           {/* Core Optimizations Card */}
           <div className="bg-[#0f172a] border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
-            <h3 className="text-sm font-bold text-white flex items-center gap-2">
-              <Shield className="w-4 h-4 text-purple-400" />
-              Active Cookie Hardening
-            </h3>
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                <Shield className="w-4 h-4 text-purple-400" />
+                Active VPS Stealth & Hardening
+              </h3>
+              <button
+                onClick={() => onNavigateToTab('stealth')}
+                className="text-xs text-emerald-400 hover:text-emerald-300 font-semibold"
+              >
+                Stealth Hub &rarr;
+              </button>
+            </div>
             <div className="space-y-2.5 text-xs">
+              <div className="flex items-start gap-2.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 mt-1.5 shrink-0" />
+                <div>
+                  <span className="font-semibold text-slate-200">TTL=64 Hop Normalization:</span>
+                  <p className="text-slate-400 text-[11px]">Normalizes outgoing TTL to 64 so streaming sites and banks see native residential desktop traffic, hiding the VPS router hop.</p>
+                </div>
+              </div>
+              <div className="flex items-start gap-2.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 mt-1.5 shrink-0" />
+                <div>
+                  <span className="font-semibold text-slate-200">TCP MSS Clamping (PMTU 1420):</span>
+                  <p className="text-slate-400 text-[11px]">Prevents oversized TLS ClientHello packets from fragmenting with DF flags, resolving strict site freezes.</p>
+                </div>
+              </div>
               <div className="flex items-start gap-2.5">
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 mt-1.5 shrink-0" />
                 <div>
@@ -330,15 +352,8 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
               <div className="flex items-start gap-2.5">
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 mt-1.5 shrink-0" />
                 <div>
-                  <span className="font-semibold text-slate-200">IPv6 Location Blackhole:</span>
-                  <p className="text-slate-400 text-[11px]">Natively drops IPv6 leaks (::/1, 8000::/1) while preserving host IPv4 stability.</p>
-                </div>
-              </div>
-              <div className="flex items-start gap-2.5">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 mt-1.5 shrink-0" />
-                <div>
-                  <span className="font-semibold text-slate-200">Kernel BBR + FQ:</span>
-                  <p className="text-slate-400 text-[11px]">Fair Queuing and Google BBR congestion control maximize multi-stream throughput.</p>
+                  <span className="font-semibold text-slate-200">WebRTC IPv6 Blackhole:</span>
+                  <p className="text-slate-400 text-[11px]">Natively drops IPv6 leaks (::/1, 8000::/1) to prevent physical browser location leakage.</p>
                 </div>
               </div>
             </div>

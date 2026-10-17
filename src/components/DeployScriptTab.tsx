@@ -12,10 +12,10 @@ export const DeployScriptTab: React.FC<DeployScriptTabProps> = ({ server }) => {
   const [scriptText, setScriptText] = useState('');
   const [loading, setLoading] = useState(true);
 
-  const oneLiner = 'curl -sSfL https://raw.githubusercontent.com/cookiebaits/cbwireguard/main/easy_wireguard.sh -o easy_wireguard.sh && chmod +x easy_wireguard.sh && sudo ./easy_wireguard.sh';
+  const oneLiner = 'curl -sSfL https://raw.githubusercontent.com/cookiebaits/cbwireguard-v2/main/easy_wireguard.sh -o easy_wireguard.sh && chmod +x easy_wireguard.sh && sudo ./easy_wireguard.sh';
 
   useEffect(() => {
-    fetch('/api/bash-script')
+    fetch('/easy_wireguard.sh')
       .then(res => res.text())
       .then(text => {
         setScriptText(text);
@@ -44,7 +44,7 @@ export const DeployScriptTab: React.FC<DeployScriptTabProps> = ({ server }) => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'setup_wireguard.sh';
+    a.download = 'install.sh';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);

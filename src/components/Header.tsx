@@ -1,20 +1,24 @@
 import React from 'react';
-import { Shield, Play, Square, RotateCw, Plus, Terminal, Activity, Wifi } from 'lucide-react';
-import { ServerState } from '../types';
+import { Shield, Play, Square, RotateCw, Plus, Terminal, Activity, Wifi, EyeOff, Lock, CheckCircle2, ShieldAlert } from 'lucide-react';
+import { ServerState, AuthSecurityState } from '../types';
 
 interface HeaderProps {
   server: ServerState | null;
+  authState: AuthSecurityState | null;
   onRefresh: () => void;
   onServerAction: (action: string) => void;
   onOpenAddPeer: () => void;
+  onOpenSecurity: () => void;
   activeTab: string;
   setActiveTab: (tab: string) => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
   server,
+  authState,
   onServerAction,
   onOpenAddPeer,
+  onOpenSecurity,
   activeTab,
   setActiveTab,
 }) => {
@@ -45,13 +49,23 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
 
             <div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <h1 className="font-extrabold text-base sm:text-lg tracking-tight text-white flex items-center gap-1.5">
                   Cookie's Easy WireGuard
                 </h1>
                 <span className="text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-md bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                  v2.6 Enterprise
+                  v2.9 Stealth VPS
                 </span>
+                {server?.isRealSystemData ? (
+                  <span className="text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-md bg-blue-500/10 text-blue-400 border border-blue-500/20 flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse"></span>
+                    Live Linux Kernel (wg show)
+                  </span>
+                ) : (
+                  <span className="text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-md bg-purple-500/10 text-purple-300 border border-purple-500/20">
+                    Encrypted Daemon
+                  </span>
+                )}
               </div>
               <p className="text-xs text-slate-400 hidden sm:flex items-center gap-2 font-mono">
                 <span className="flex items-center gap-1">
@@ -70,8 +84,24 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
           </div>
 
-          {/* Quick Actions */}
+          {/* Quick Actions & Security Access Indicator */}
           <div className="flex items-center gap-2 sm:gap-2.5">
+            {/* Security Access Badge */}
+            <button
+              onClick={onOpenSecurity}
+              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold border transition ${
+                authState?.isVpnConnected
+                  ? 'bg-emerald-950/40 border-emerald-800/40 text-emerald-300 hover:bg-emerald-900/40'
+                  : 'bg-amber-950/40 border-amber-800/40 text-amber-300 hover:bg-amber-900/40'
+              }`}
+              title="Click to view IP Whitelist and Security Access details"
+            >
+              <Lock className="w-3.5 h-3.5" />
+              <span className="hidden md:inline">
+                {authState?.isVpnConnected ? 'WireGuard Subnet (10.18.0.x)' : 'Whitelisted IP'}
+              </span>
+            </button>
+
             {isRunning ? (
               <button
                 onClick={() => onServerAction('restart')}
@@ -115,12 +145,13 @@ export const Header: React.FC<HeaderProps> = ({
         <nav className="flex items-center gap-1 overflow-x-auto no-scrollbar pt-1 border-t border-slate-800/60 -mx-4 px-4 sm:mx-0 sm:px-0">
           {[
             { id: 'overview', label: 'Overview', icon: Activity },
-            { id: 'peers', label: `Clients (${server?.activePeersCount || 0})`, icon: Wifi },
+            { id: 'stealth', label: 'VPS Stealth & Unblocking', icon: EyeOff },
+            { id: 'peers', label: `Live Clients (${server?.activePeersCount || 0})`, icon: Wifi },
             { id: 'shield', label: 'Geo & Anti-VPN Shield', icon: Shield },
             { id: 'tunnel', label: 'Split Tunneling', icon: Terminal },
-            { id: 'backups', label: 'Encrypted Backups', icon: Shield },
+            { id: 'backups', label: 'Encrypted Backups', icon: Lock },
             { id: 'logs', label: 'Journalctl Logs', icon: Terminal },
-            { id: 'deploy', label: 'VPS Installer Script', icon: Play },
+            { id: 'deploy', label: 'VPS Installer (install.sh)', icon: Play },
             { id: 'settings', label: 'Settings', icon: RotateCw },
           ].map(tab => {
             const Icon = tab.icon;

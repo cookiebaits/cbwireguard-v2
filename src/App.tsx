@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Header } from './components/Header';
 import { OverviewTab } from './components/OverviewTab';
+import { StealthTab } from './components/StealthTab';
 import { PeersTab } from './components/PeersTab';
 import { GeoShieldTab } from './components/GeoShieldTab';
 import { SplitTunnelingTab } from './components/SplitTunnelingTab';
@@ -10,7 +11,8 @@ import { DeployScriptTab } from './components/DeployScriptTab';
 import { SettingsTab } from './components/SettingsTab';
 import { QrModal } from './components/QrModal';
 import { AddPeerModal } from './components/AddPeerModal';
-import { ServerState, Peer, GeoShieldState, LogEntry } from './types';
+import { SecurityGatekeeperModal } from './components/SecurityGatekeeperModal';
+import { ServerState, Peer, GeoShieldState, LogEntry, AuthSecurityState } from './types';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('overview');
@@ -20,10 +22,39 @@ export default function App() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [selectedPeerForQr, setSelectedPeerForQr] = useState<Peer | null>(null);
   const [isAddPeerOpen, setIsAddPeerOpen] = useState(false);
+  const [isSecurityModalOpen, setIsSecurityModalOpen] = useState(false);
+  const [authState, setAuthState] = useState<AuthSecurityState | null>(null);
+
+  const getAuthHeaders = (): Record<string, string> => {
+    const token = localStorage.getItem('cookie_wg_auth_token');
+    const headers: Record<string, string> = {};
+    if (token) {
+      headers['x-cookie-auth-token'] = token;
+    }
+    return headers;
+  };
+
+  const fetchAuthStatus = async () => {
+    try {
+      const res = await fetch('/api/auth/status', {
+        headers: getAuthHeaders(),
+      });
+      const data = await res.json();
+      setAuthState(data);
+    } catch (e) {
+      console.error(e);
+    }
+  };
 
   const fetchServer = async () => {
     try {
-      const res = await fetch('/api/server');
+      const res = await fetch('/api/server', {
+        headers: getAuthHeaders(),
+      });
+      if (res.status === 403) {
+        fetchAuthStatus();
+        return;
+      }
       const data = await res.json();
       setServer(data);
     } catch (e) {
@@ -33,7 +64,10 @@ export default function App() {
 
   const fetchPeers = async () => {
     try {
-      const res = await fetch('/api/clients');
+      const res = await fetch('/api/clients', {
+        headers: getAuthHeaders(),
+      });
+      if (res.status === 403) return;
       const data = await res.json();
       setPeers(data.clients);
     } catch (e) {
@@ -43,7 +77,10 @@ export default function App() {
 
   const fetchGeoShield = async () => {
     try {
-      const res = await fetch('/api/geo-shield');
+      const res = await fetch('/api/geo-shield', {
+        headers: getAuthHeaders(),
+      });
+      if (res.status === 403) return;
       const data = await res.json();
       setGeoShield(data);
     } catch (e) {
@@ -53,7 +90,10 @@ export default function App() {
 
   const fetchLogs = async () => {
     try {
-      const res = await fetch('/api/logs');
+      const res = await fetch('/api/logs', {
+        headers: getAuthHeaders(),
+      });
+      if (res.status === 403) return;
       const data = await res.json();
       setLogs(data.logs);
     } catch (e) {
@@ -62,6 +102,7 @@ export default function App() {
   };
 
   const refreshAll = () => {
+    fetchAuthStatus();
     fetchServer();
     fetchPeers();
     fetchGeoShield();
@@ -81,7 +122,10 @@ export default function App() {
     try {
       await fetch('/api/server/action', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAuthHeaders(),
+        },
         body: JSON.stringify({ action }),
       });
       refreshAll();
@@ -95,9 +139,11 @@ export default function App() {
       {/* Top Header */}
       <Header
         server={server}
+        authState={authState}
         onRefresh={refreshAll}
         onServerAction={handleServerAction}
         onOpenAddPeer={() => setIsAddPeerOpen(true)}
+        onOpenSecurity={() => setIsSecurityModalOpen(true)}
         activeTab={activeTab}
         setActiveTab={setActiveTab}
       />
@@ -116,12 +162,17 @@ export default function App() {
           />
         )}
 
+        {activeTab === 'stealth' && (
+          <StealthTab onRefresh={refreshAll} />
+        )}
+
         {activeTab === 'peers' && (
           <PeersTab
             peers={peers}
             onSelectPeerForQr={p => setSelectedPeerForQr(p)}
             onOpenAddPeer={() => setIsAddPeerOpen(true)}
             onRefresh={refreshAll}
+            isRealSystemData={server?.isRealSystemData}
           />
         )}
 
@@ -159,7 +210,7 @@ export default function App() {
           <span>Cookie's Easy WireGuard Server Suite • Hyper-Secured & Optimized</span>
           <span className="flex items-center gap-2">
             <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
-            Host: Linux Kernel WireGuard
+            {server?.isRealSystemData ? 'Socket: Real Linux Kernel (wg0)' : 'Protected Host Mode'}
           </span>
         </div>
       </footer>
@@ -177,8 +228,26 @@ export default function App() {
         onAdded={refreshAll}
         defaultMtu={server?.defaultMtu || 1420}
         defaultDns={server?.defaultDns || '94.140.14.49, 9.9.9.9'}
-        defaultAllowedIps={server?.defaultAllowedIps || '0.0.0.0/1, 128.0.0.0/1'}
+        defaultAllowedIps={server?.defaultAllowedIps || '0.0.0.0/1, 128.0.0.0/1, ::/1, 8000::/1'}
       />
+
+      {/* Security Access Lock Gatekeeper Modal (If access is restricted) */}
+      {authState && !authState.accessGranted && (
+        <SecurityGatekeeperModal
+          authState={authState}
+          onUnlocked={refreshAll}
+        />
+      )}
+
+      {/* Security Access Drawer Modal (When opened from Header badge) */}
+      {isSecurityModalOpen && authState && (
+        <SecurityGatekeeperModal
+          isDrawer={true}
+          authState={authState}
+          onUnlocked={refreshAll}
+          onClose={() => setIsSecurityModalOpen(false)}
+        />
+      )}
     </div>
   );
 }
