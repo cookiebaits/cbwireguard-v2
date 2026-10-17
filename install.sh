@@ -330,11 +330,18 @@ WG_SERVER_EOF
 	newClientInternal "${CLIENT_NAME}"
 
 	echo -e "\n${CYAN}[*] Provisioning Web Management Console runtime on port ${WEB_PORT}...${NC}"
+	echo -e "${YELLOW} -> [1/4] Checking Node.js runtime...${NC}"
 	if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
-		curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null 2>&1 || true
-		apt-get install -y -q -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" nodejs git >/dev/null 2>&1 || true
+		echo -e "${YELLOW} -> Installing Node.js & Git packages...${NC}"
+		apt-get update -y -q >/dev/null 2>&1 || true
+		apt-get install -y -q -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" nodejs npm git >/dev/null 2>&1 || true
+		if ! command -v node >/dev/null 2>&1; then
+			curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null 2>&1 || true
+			apt-get install -y -q nodejs git >/dev/null 2>&1 || true
+		fi
 	fi
 
+	echo -e "${YELLOW} -> [2/4] Setting up /opt/cbwireguard project files...${NC}"
 	mkdir -p /opt/cbwireguard
 	SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || echo ".")"
 
@@ -345,9 +352,11 @@ WG_SERVER_EOF
 	fi
 
 	cd /opt/cbwireguard
-	npm install --omit=dev >/dev/null 2>&1 || npm install >/dev/null 2>&1 || true
-	npm run build >/dev/null 2>&1 || true
 
+	echo -e "${YELLOW} -> [3/4] Installing Web Console runtime dependencies...${NC}"
+	npm install --omit=dev --no-audit --no-fund --legacy-peer-deps >/dev/null 2>&1 || true
+
+	echo -e "${YELLOW} -> [4/4] Starting Web Console service...${NC}"
 	cat << SERVICE_EOF > /etc/systemd/system/cbwireguard-web.service
 [Unit]
 Description=Cookie WireGuard Web Management Console
@@ -364,8 +373,6 @@ Restart=always
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
-
-[Service]
 LimitNOFILE=65535
 
 [Install]
@@ -443,6 +450,11 @@ PEER_EOF
 
 	echo -e "${GREEN}[✔] Peer ${CLIENT_NAME} created successfully! (${CLIENT_WG_IPV4})${NC}"
 	echo -e "${GREEN}Config file saved to: ${HOME_DIR}/${CLIENT_NAME}.conf${NC}\n"
+
+	echo -e "${CYAN}${BOLD}📋 Copy & Paste Client Configuration (${CLIENT_NAME}.conf):${NC}"
+	echo -e "${YELLOW}-----------------------------------------------------------------${NC}"
+	cat "$CLIENT_CONF_PATH"
+	echo -e "${YELLOW}-----------------------------------------------------------------${NC}\n"
 
 	if command -v qrencode &>/dev/null; then
 		echo -e "${PURPLE}${BOLD}📱 Scan QR Code with WireGuard App on iOS / Android:${NC}\n"
