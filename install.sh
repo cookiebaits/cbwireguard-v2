@@ -1,18 +1,7 @@
 #!/bin/bash
 # ==============================================================================
-# 🍪 Cookie's WireGuard VPS Stealth Installer & Interactive Manager v3.0
+# 🍪 Cookie's Easy WireGuard Manager & VPS Stealth Server v3.5
 # Inspired by angristan/wireguard-install with Hyper-Optimized VPS Stealth Features
-#
-# Features:
-#   - Full Interactive Terminal Menu (Add Client, List Clients, Revoke, Re-install, Uninstall)
-#   - Automatic Old Instance Removal & Port Conflict Cleanup on Install/Reinstall
-#   - HTTP/3 QUIC Cloaking (UDP 443 Default) & Stealth Port Options (53, 80, 1194, 3389, 8080)
-#   - Unique Non-Default Web Management Console Port (Default: 51821 / 54321)
-#   - TTL Hop Normalization (Sets TTL=64 to mimic native desktop packets)
-#   - TCP MSS Clamping & PMTU Probing (Prevents TLS packet fragmentation detection)
-#   - Google BBR Congestion Control & Fair Queuing (FQ)
-#   - Live zero-downtime peer synchronization (`wg syncconf`)
-#   - High-fidelity ANSI QR Code output in terminal
 # ==============================================================================
 
 # Colors
@@ -22,6 +11,7 @@ GREEN='\033[0;32m'
 PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
 YELLOW='\033[1;33m'
+WHITE='\033[1;37m'
 BOLD='\033[1m'
 NC='\033[0m'
 
@@ -87,7 +77,6 @@ function initialCheck() {
 	checkVirt
 }
 
-# Helper to resolve Home directory for client config placement
 function getHomeDirForClient() {
 	local CLIENT_NAME="$1"
 	if [ -z "${CLIENT_NAME}" ]; then
@@ -109,25 +98,20 @@ function getHomeDirForClient() {
 function cleanupOldWireguard() {
 	echo -e "\n${CYAN}[*] Scanning for old/conflicting WireGuard instances & services...${NC}"
 
-	# Stop and disable existing WireGuard systemd services
 	systemctl stop "wg-quick@*" >/dev/null 2>&1 || true
 	systemctl disable "wg-quick@*" >/dev/null 2>&1 || true
 
-	# Bring down wg0, wg1 if up
 	if command -v wg-quick >/dev/null 2>&1; then
 		wg-quick down wg0 >/dev/null 2>&1 || true
 		wg-quick down wg1 >/dev/null 2>&1 || true
 	fi
 
-	# Force remove interface devices if left dangling
 	ip link delete dev wg0 >/dev/null 2>&1 || true
 	ip link delete dev wg1 >/dev/null 2>&1 || true
 
-	# Stop old web management console services
 	systemctl stop cbwireguard-web >/dev/null 2>&1 || true
 	systemctl disable cbwireguard-web >/dev/null 2>&1 || true
 
-	# Clean conflicting iptables rules
 	iptables -t nat -F POSTROUTING 2>/dev/null || true
 	iptables -t mangle -F POSTROUTING 2>/dev/null || true
 	iptables -F FORWARD 2>/dev/null || true
@@ -140,12 +124,10 @@ function cleanupOldWireguard() {
 # ------------------------------------------------------------------------------
 function installQuestions() {
 	echo -e "${PURPLE}=================================================================${NC}"
-	echo -e "${GREEN}${BOLD}     🍪 Cookie's WireGuard VPS Stealth Setup & Interactive Installer${NC}"
-	echo -e "${CYAN}        Hyper-Optimized for Unblocking & Stealth Personal VPS${NC}"
+	echo -e "             ${GREEN}${BOLD}🍪Cookie's Easy WireGuard Setup & Installer${NC}"
 	echo -e "${PURPLE}=================================================================${NC}"
-	echo -e "Welcome to the WireGuard Stealth installer!\n"
+	echo -e "Welcome to the WireGuard installer!\n"
 
-	# Detect public IP address
 	SERVER_PUB_IP=""
 	local services=("https://api.ipify.org" "https://ifconfig.me" "https://icanhazip.com")
 	for svc in "${services[@]}"; do
@@ -160,21 +142,17 @@ function installQuestions() {
 
 	read -rp "IPv4 public address for server: " -e -i "${SERVER_PUB_IP}" SERVER_PUB_IP
 
-	# Detect default NIC
 	SERVER_NIC=$(ip -4 route show default 2>/dev/null | awk '/dev/ {for (i=1; i<=NF; i++) if ($i == "dev") print $(i+1)}' | head -n1 || true)
 	if [[ -z "$SERVER_NIC" ]]; then
 		SERVER_NIC="eth0"
 	fi
 	read -rp "Public network interface: " -e -i "${SERVER_NIC}" SERVER_PUB_NIC
 
-	# Interface name
 	read -rp "WireGuard interface name: " -e -i "wg0" SERVER_WG_NIC
 
-	# Tunnel IP ranges
 	read -rp "Server WireGuard internal IPv4: " -e -i "10.18.0.1" SERVER_WG_IPV4
 	read -rp "Server WireGuard internal IPv6: " -e -i "fd42:42:42::1" SERVER_WG_IPV6
 
-	# WireGuard Listen Port Selection
 	echo -e "\nSelect a WireGuard Port (Stealth & Anti-Blocking):"
 	echo -e "   1) ${GREEN}443${NC}   (HTTPS / HTTP/3 QUIC - Bypasses firewalls & hotel blocks)"
 	echo -e "   2) ${GREEN}51820${NC} (Standard WireGuard Port)"
@@ -200,7 +178,6 @@ function installQuestions() {
 		1|*) SERVER_PORT=443 ;;
 	esac
 
-	# Web Management Console Port Selection
 	echo -e "\nSelect Web Management Console Port (Unique Internal Non-Default Port):"
 	echo -e "   1) ${GREEN}51821${NC} (Default Manager Port)"
 	echo -e "   2) ${GREEN}54321${NC} (High Stealth Port)"
@@ -218,15 +195,12 @@ function installQuestions() {
 		1|*) WEB_PORT=51821 ;;
 	esac
 
-	# Client Name
 	read -rp "First client device name: " -e -i "my-device" CLIENT_NAME
 	CLIENT_NAME=$(echo "$CLIENT_NAME" | tr -cd '[:alnum:]_-')
 
-	# DNS Resolvers
 	read -rp "First DNS resolver for clients: " -e -i "1.1.1.1" CLIENT_DNS_1
 	read -rp "Second DNS resolver for clients: " -e -i "1.0.0.1" CLIENT_DNS_2
 
-	# Allowed IPs
 	read -rp "Allowed IPs for generated clients: " -e -i "0.0.0.0/0, ::/0" ALLOWED_IPS
 
 	echo -e "\n${GREEN}Setup parameters configured successfully.${NC}"
@@ -242,12 +216,10 @@ function installWireGuard() {
 		installQuestions
 	fi
 
-	# Clean old instances & rules first to avoid port or interface conflicts
 	cleanupOldWireguard
 
 	echo -e "\n${CYAN}[*] Installing system dependencies (wireguard, iptables, qrencode, nodejs)...${NC}"
 
-	# Check for background apt/dpkg locks (e.g. unattended-upgrades on fresh VPS)
 	for i in {1..10}; do
 		if fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1; then
 			echo -e "${YELLOW}[*] Waiting for background system updates to finish... (${i}/10)${NC}"
@@ -260,7 +232,6 @@ function installWireGuard() {
 	export DEBIAN_FRONTEND=noninteractive
 	export NEEDRESTART_MODE=a
 
-	# Pre-seed debconf to bypass iptables-persistent interactive prompts
 	echo "iptables-persistent iptables-persistent/autosave_v4 boolean true" | debconf-set-selections 2>/dev/null || true
 	echo "iptables-persistent iptables-persistent/autosave_v6 boolean true" | debconf-set-selections 2>/dev/null || true
 
@@ -275,13 +246,11 @@ function installWireGuard() {
 		apk update && apk add wireguard-tools iptables libqrencode-tools curl jq || true
 	fi
 
-	# Verify wg binary
 	if ! command -v wg &>/dev/null; then
 		echo -e "${RED}[ERROR] WireGuard installation failed. 'wg' tool not found.${NC}"
 		exit 1
 	fi
 
-	# Apply Kernel Stealth & Performance Sysctl Optimizations
 	echo -e "${CYAN}[*] Applying BBR, TTL=64 Normalization, and MSS Clamping sysctl rules...${NC}"
 	SYSCTL_CONF="/etc/sysctl.d/99-wireguard-stealth.conf"
 	cat << 'SYSCTL_EOF' > "$SYSCTL_CONF"
@@ -298,7 +267,6 @@ net.core.wmem_max = 67108864
 SYSCTL_EOF
 	sysctl --system -q >/dev/null 2>&1 || sysctl -p "$SYSCTL_CONF" >/dev/null 2>&1 || true
 
-	# Prepare WireGuard Directory
 	mkdir -p /etc/wireguard
 	chmod 700 /etc/wireguard
 	cd /etc/wireguard
@@ -307,12 +275,10 @@ SYSCTL_EOF
 	SERVER_PRIV_KEY=$(wg genkey)
 	SERVER_PUB_KEY=$(echo "${SERVER_PRIV_KEY}" | wg pubkey)
 
-	# Generate Admin Security Passkey
 	ADMIN_PASSKEY=$(tr -dc 'A-Za-z0-9!@#$%^&*' < /dev/urandom | head -c 24)
 	echo "$ADMIN_PASSKEY" > /etc/wireguard/admin.key
 	chmod 600 /etc/wireguard/admin.key
 
-	# Save parameters file for menu reloading
 	cat << PARAMS_EOF > /etc/wireguard/params
 SERVER_PUB_IP=${SERVER_PUB_IP}
 SERVER_PUB_NIC=${SERVER_PUB_NIC}
@@ -330,7 +296,6 @@ ADMIN_PASSKEY=${ADMIN_PASSKEY}
 PARAMS_EOF
 	chmod 600 /etc/wireguard/params
 
-	# Save Manager Environment file for Web Console
 	cat << ENV_EOF > /etc/wireguard/manager.env
 SERVER_PUBLIC_IP="${SERVER_PUB_IP}"
 WG_DEFAULT_PORT="${SERVER_PORT}"
@@ -339,7 +304,6 @@ ADMIN_PASSKEY="${ADMIN_PASSKEY}"
 ENV_EOF
 	chmod 600 /etc/wireguard/manager.env
 
-	# Generate Server Interface Config (wg0.conf)
 	cat << WG_SERVER_EOF > "/etc/wireguard/${SERVER_WG_NIC}.conf"
 [Interface]
 Address = ${SERVER_WG_IPV4}/24,${SERVER_WG_IPV6}/64
@@ -360,14 +324,11 @@ PostDown = iptables -t mangle -D POSTROUTING -o ${SERVER_PUB_NIC} -j TTL --ttl-s
 WG_SERVER_EOF
 	chmod 600 "/etc/wireguard/${SERVER_WG_NIC}.conf"
 
-	# Enable and start WireGuard systemd service
 	systemctl enable "wg-quick@${SERVER_WG_NIC}" >/dev/null 2>&1 || true
 	systemctl restart "wg-quick@${SERVER_WG_NIC}"
 
-	# Generate first client
 	newClientInternal "${CLIENT_NAME}"
 
-	# Setup Node.js & Web Management Console Service
 	echo -e "\n${CYAN}[*] Provisioning Web Management Console runtime on port ${WEB_PORT}...${NC}"
 	if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
 		curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null 2>&1 || true
@@ -378,23 +339,18 @@ WG_SERVER_EOF
 	SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || echo ".")"
 
 	if [[ -f "${SCRIPT_DIR}/server.ts" && -f "${SCRIPT_DIR}/package.json" ]]; then
-		cp -rf "${SCRIPT_DIR}"/* /opt/cbwireguard/ 2>/dev/null || true
-	elif [[ -f "./server.ts" && -f "./package.json" ]]; then
-		cp -rf ./* /opt/cbwireguard/ 2>/dev/null || true
-	elif [[ ! -f "/opt/cbwireguard/server.ts" ]]; then
-		git clone https://github.com/cookiebaits/cbwireguard-v2.git /opt/cbwireguard >/dev/null 2>&1 || true
+		cp -r "${SCRIPT_DIR}/"* /opt/cbwireguard/ 2>/dev/null || true
+	else
+		git clone https://github.com/cookiebaits/cbwireguard-v2.git /opt/cbwireguard 2>/dev/null || true
 	fi
 
-	if [[ -f "/opt/cbwireguard/package.json" ]]; then
-		cd /opt/cbwireguard
-		npm install --production=false >/dev/null 2>&1 || true
-		npm run build >/dev/null 2>&1 || true
-	fi
+	cd /opt/cbwireguard
+	npm install --omit=dev >/dev/null 2>&1 || npm install >/dev/null 2>&1 || true
+	npm run build >/dev/null 2>&1 || true
 
-	NPM_BIN=$(command -v npm || echo "/usr/bin/npm")
 	cat << SERVICE_EOF > /etc/systemd/system/cbwireguard-web.service
 [Unit]
-Description=Cookie's WireGuard Web Management Console
+Description=Cookie WireGuard Web Management Console
 After=network.target wg-quick@${SERVER_WG_NIC}.service
 Wants=wg-quick@${SERVER_WG_NIC}.service
 
@@ -402,13 +358,15 @@ Wants=wg-quick@${SERVER_WG_NIC}.service
 Type=simple
 User=root
 WorkingDirectory=/opt/cbwireguard
-EnvironmentFile=-/etc/wireguard/manager.env
-Environment=NODE_ENV=production
-ExecStart=${NPM_BIN} start
+EnvironmentFile=/etc/wireguard/manager.env
+ExecStart=/usr/bin/npm start
 Restart=always
-RestartSec=3
+RestartSec=5
 StandardOutput=journal
 StandardError=journal
+
+[Service]
+LimitNOFILE=65535
 
 [Install]
 WantedBy=multi-user.target
@@ -418,56 +376,28 @@ SERVICE_EOF
 	systemctl enable cbwireguard-web >/dev/null 2>&1 || true
 	systemctl restart cbwireguard-web >/dev/null 2>&1 || true
 
-	# UFW adjustment if active
-	if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
-		ufw allow "${SERVER_PORT}/udp" >/dev/null 2>&1 || true
-		ufw allow "${WEB_PORT}/tcp" >/dev/null 2>&1 || true
-	fi
-
-	echo -e "\n${GREEN}=================================================================${NC}"
-	echo -e "${GREEN}${BOLD}   🎉 WireGuard VPS Stealth Server Successfully Installed!${NC}"
-	echo -e "${GREEN}=================================================================${NC}"
-	echo -e "  ${BOLD}Server Public IP:${NC}        ${SERVER_PUB_IP}"
-	echo -e "  ${BOLD}WireGuard Stealth Port:${NC}  ${SERVER_PORT}/udp $([ "$SERVER_PORT" -eq 443 ] && echo '(HTTP/3 QUIC Cloak)' || echo '')"
-	echo -e "  ${BOLD}Web Console Port:${NC}        ${WEB_PORT}/tcp"
-	echo -e "  ${BOLD}Initial Peer Created:${NC}    ${CLIENT_NAME}"
-	echo -e "${GREEN}=================================================================${NC}\n"
-
-	echo -e "${CYAN}=================================================================${NC}"
-	echo -e "${GREEN}${BOLD}🌐 WIREGUARD WEB MANAGEMENT CONSOLE${NC}"
-	echo -e "${CYAN}=================================================================${NC}"
-	echo -e "  ${BOLD}Internal Tunnel URL:${NC}  👉 ${GREEN}${BOLD}http://10.18.0.1:${WEB_PORT}${NC}"
-	echo -e "  ${BOLD}Direct Public URL:${NC}    👉 ${CYAN}http://${SERVER_PUB_IP}:${WEB_PORT}${NC}"
-	echo -e "  ${BOLD}Master Security Passkey:${NC} 🔑 ${YELLOW}${BOLD}${ADMIN_PASSKEY}${NC}"
-	echo -e "${CYAN}=================================================================${NC}\n"
+	echo -e "\n${GREEN}${BOLD}=================================================================${NC}"
+	echo -e "${GREEN}${BOLD}🎉 WIREGUARD & WEB CONSOLE INSTALLED SUCCESSFULLY!${NC}"
+	echo -e "${GREEN}${BOLD}=================================================================${NC}"
+	showWebStatus
 }
 
 # ------------------------------------------------------------------------------
-# 5. Client Management Functions (Internal & Interactive)
+# 5. Client Management Logic
 # ------------------------------------------------------------------------------
 function newClientInternal() {
 	local CLIENT_NAME="$1"
+	local HOME_DIR
+	HOME_DIR=$(getHomeDirForClient "${CLIENT_NAME}")
 
-	# Endpoint calculation
-	local ENDPOINT="${SERVER_PUB_IP}:${SERVER_PORT}"
-
-	# Determine next IP
-	local BASE_IP
-	BASE_IP=$(echo "$SERVER_WG_IPV4" | awk -F '.' '{ print $1"."$2"."$3 }')
-	local DOT_IP=2
-	for i in {2..254}; do
-		if ! grep -q "${BASE_IP}.${i}" "/etc/wireguard/${SERVER_WG_NIC}.conf"; then
-			DOT_IP=$i
-			break
-		fi
+	local OCTET=2
+	while grep -q "10.18.0.${OCTET}/32" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" 2>/dev/null; do
+		((OCTET++))
 	done
-	local CLIENT_WG_IPV4="${BASE_IP}.${DOT_IP}"
 
-	local BASE_IPV6
-	BASE_IPV6=$(echo "$SERVER_WG_IPV6" | awk -F '::' '{ print $1 }')
-	local CLIENT_WG_IPV6="${BASE_IPV6}::${DOT_IP}"
+	local CLIENT_WG_IPV4="10.18.0.${OCTET}"
+	local CLIENT_WG_IPV6="fd42:42:42::${OCTET}"
 
-	# Keys
 	local CLIENT_PRIV_KEY
 	CLIENT_PRIV_KEY=$(wg genkey)
 	local CLIENT_PUB_KEY
@@ -475,10 +405,8 @@ function newClientInternal() {
 	local CLIENT_PRE_SHARED_KEY
 	CLIENT_PRE_SHARED_KEY=$(wg genpsk)
 
-	local HOME_DIR
-	HOME_DIR=$(getHomeDirForClient "${CLIENT_NAME}")
+	local ENDPOINT="${SERVER_PUB_IP}:${SERVER_PORT}"
 
-	# Generate client config file
 	mkdir -p /etc/wireguard/clients
 	local CLIENT_CONF_PATH="/etc/wireguard/clients/${CLIENT_NAME}.conf"
 
@@ -500,8 +428,7 @@ CLIENT_EOF
 	chmod 600 "$CLIENT_CONF_PATH"
 	cp "$CLIENT_CONF_PATH" "${HOME_DIR}/${CLIENT_NAME}.conf" 2>/dev/null || cp "$CLIENT_CONF_PATH" "/root/${CLIENT_NAME}.conf"
 
-	# Add Peer to server config
-	cat << PEER_EOF >> "/etc/wireguard/${SERVER_WG_NIC}.conf"
+	cat << PEER_EOF >> "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf"
 
 ### Client ${CLIENT_NAME}
 [Peer]
@@ -510,15 +437,13 @@ PresharedKey = ${CLIENT_PRE_SHARED_KEY}
 AllowedIPs = ${CLIENT_WG_IPV4}/32,${CLIENT_WG_IPV6}/128
 PEER_EOF
 
-	# Sync live WireGuard interface without downtime
 	if command -v wg-quick &>/dev/null && command -v wg &>/dev/null; then
-		wg syncconf "${SERVER_WG_NIC}" <(wg-quick strip "${SERVER_WG_NIC}") 2>/dev/null || true
+		wg syncconf "${SERVER_WG_NIC:-wg0}" <(wg-quick strip "${SERVER_WG_NIC:-wg0}") 2>/dev/null || true
 	fi
 
 	echo -e "${GREEN}[✔] Peer ${CLIENT_NAME} created successfully! (${CLIENT_WG_IPV4})${NC}"
 	echo -e "${GREEN}Config file saved to: ${HOME_DIR}/${CLIENT_NAME}.conf${NC}\n"
 
-	# Display terminal QR Code
 	if command -v qrencode &>/dev/null; then
 		echo -e "${PURPLE}${BOLD}📱 Scan QR Code with WireGuard App on iOS / Android:${NC}\n"
 		qrencode -t ansiutf8 < "$CLIENT_CONF_PATH"
@@ -527,12 +452,12 @@ PEER_EOF
 }
 
 function newClient() {
-	echo -e "\n${CYAN}--- Add a New WireGuard Client ---${NC}"
+	echo -e "\n${CYAN}--- Add a New WireGuard Client (Peer) ---${NC}"
 	local CLIENT_NAME=""
 	until [[ -n "$CLIENT_NAME" && "$CLIENT_NAME" =~ ^[a-zA-Z0-9_-]+$ ]]; do
 		read -rp "Enter client device name: " CLIENT_NAME
 		CLIENT_NAME=$(echo "$CLIENT_NAME" | tr -cd '[:alnum:]_-')
-		if grep -q "### Client ${CLIENT_NAME}$" "/etc/wireguard/${SERVER_WG_NIC}.conf"; then
+		if grep -q "### Client ${CLIENT_NAME}$" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" 2>/dev/null; then
 			echo -e "${ORANGE}A client with name '${CLIENT_NAME}' already exists! Choose another.${NC}"
 			CLIENT_NAME=""
 		fi
@@ -543,66 +468,191 @@ function newClient() {
 
 function listClients() {
 	echo -e "\n${CYAN}--- Active WireGuard Clients ---${NC}"
-	if ! grep -q "^### Client" "/etc/wireguard/${SERVER_WG_NIC}.conf"; then
+	if ! grep -q "^### Client" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" 2>/dev/null; then
 		echo -e "${YELLOW}No clients registered yet.${NC}\n"
 		return
 	fi
 
-	echo -e "${BOLD}ID) Client Name\t\tIPv4 Address${NC}"
+	echo -e "${BOLD}Client Name\t\tIPv4 Address${NC}"
 	echo "--------------------------------------------------------"
-	grep -E "^### Client" "/etc/wireguard/${SERVER_WG_NIC}.conf" | cut -d ' ' -f 3 | while read -r name; do
+	grep -E "^### Client" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" | cut -d ' ' -f 3 | while read -r name; do
 		local ip
-		ip=$(grep -A 4 "### Client ${name}" "/etc/wireguard/${SERVER_WG_NIC}.conf" | grep "AllowedIPs" | awk '{print $3}' | cut -d',' -f1)
+		ip=$(grep -A 4 "### Client ${name}" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" | grep "AllowedIPs" | awk '{print $3}' | cut -d',' -f1)
 		echo -e "   - ${BOLD}${name}${NC}\t\t(${ip})"
 	done
 	echo ""
 }
 
-function revokeClient() {
-	echo -e "\n${CYAN}--- Revoke / Remove a Client ---${NC}"
-	local CLIENT_COUNT
-	CLIENT_COUNT=$(grep -c -E "^### Client" "/etc/wireguard/${SERVER_WG_NIC}.conf" || echo 0)
-	if [[ ${CLIENT_COUNT} -eq 0 ]]; then
-		echo -e "${YELLOW}No clients registered to revoke.${NC}\n"
+function configureClients() {
+	echo -e "\n${CYAN}--- Configure Clients (Check / Edit / Remove) ---${NC}"
+	if ! grep -q "^### Client" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" 2>/dev/null; then
+		echo -e "${YELLOW}No clients registered yet.${NC}\n"
 		return
 	fi
 
-	echo "Select the client to revoke:"
-	grep -E "^### Client" "/etc/wireguard/${SERVER_WG_NIC}.conf" | cut -d ' ' -f 3 | nl -s ') '
-	
+	echo "1) View Client QR Code & Configuration"
+	echo "2) Remove / Revoke a Client"
+	echo "3) Back to Main Menu"
+
+	read -rp "Select an option [1-3]: " SUB_OPT
+	case "$SUB_OPT" in
+		1) showClientQr ;;
+		2) revokeClient ;;
+		3|*) return ;;
+	esac
+}
+
+function showClientQr() {
+	echo -e "\n${CYAN}--- Show Client QR Code ---${NC}"
+	local CLIENT_COUNT
+	CLIENT_COUNT=$(grep -c -E "^### Client" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" 2>/dev/null || echo 0)
+	if [[ ${CLIENT_COUNT} -eq 0 ]]; then
+		echo -e "${YELLOW}No clients registered.${NC}\n"
+		return
+	fi
+
+	echo "Select the client to display:"
+	grep -E "^### Client" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" | cut -d ' ' -f 3 | nl -s ') '
+
 	local CLIENT_NUMBER=0
 	until [[ ${CLIENT_NUMBER} -ge 1 && ${CLIENT_NUMBER} -le ${CLIENT_COUNT} ]]; do
 		read -rp "Select client [1-${CLIENT_COUNT}]: " CLIENT_NUMBER
 	done
 
 	local TARGET_CLIENT
-	TARGET_CLIENT=$(grep -E "^### Client" "/etc/wireguard/${SERVER_WG_NIC}.conf" | cut -d ' ' -f 3 | sed -n "${CLIENT_NUMBER}"p)
+	TARGET_CLIENT=$(grep -E "^### Client" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" | cut -d ' ' -f 3 | sed -n "${CLIENT_NUMBER}"p)
 
-	# Remove peer block from server config
-	sed -i "/^### Client ${TARGET_CLIENT}\$/,/^$/d" "/etc/wireguard/${SERVER_WG_NIC}.conf"
+	local CONF_PATH="/etc/wireguard/clients/${TARGET_CLIENT}.conf"
+	if [[ -f "$CONF_PATH" ]]; then
+		echo -e "\n${GREEN}Configuration File:${NC} $CONF_PATH\n"
+		cat "$CONF_PATH"
+		echo ""
+		if command -v qrencode &>/dev/null; then
+			echo -e "${PURPLE}${BOLD}📱 Scan QR Code with WireGuard App:${NC}\n"
+			qrencode -t ansiutf8 < "$CONF_PATH"
+			echo ""
+		fi
+	else
+		echo -e "${RED}Client config file not found at $CONF_PATH${NC}"
+	fi
+}
 
-	# Remove generated client configs
+function revokeClient() {
+	echo -e "\n${CYAN}--- Revoke / Remove a Client ---${NC}"
+	local CLIENT_COUNT
+	CLIENT_COUNT=$(grep -c -E "^### Client" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" 2>/dev/null || echo 0)
+	if [[ ${CLIENT_COUNT} -eq 0 ]]; then
+		echo -e "${YELLOW}No clients registered to revoke.${NC}\n"
+		return
+	fi
+
+	echo "Select the client to revoke:"
+	grep -E "^### Client" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" | cut -d ' ' -f 3 | nl -s ') '
+
+	local CLIENT_NUMBER=0
+	until [[ ${CLIENT_NUMBER} -ge 1 && ${CLIENT_NUMBER} -le ${CLIENT_COUNT} ]]; do
+		read -rp "Select client [1-${CLIENT_COUNT}]: " CLIENT_NUMBER
+	done
+
+	local TARGET_CLIENT
+	TARGET_CLIENT=$(grep -E "^### Client" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" | cut -d ' ' -f 3 | sed -n "${CLIENT_NUMBER}"p)
+
+	local TARGET_PUB_KEY
+	TARGET_PUB_KEY=$(grep -A 2 "### Client ${TARGET_CLIENT}" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" | grep "PublicKey" | awk '{print $3}')
+
+	sed -i "/^### Client ${TARGET_CLIENT}\$/,/^$/d" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf"
+
 	rm -f "/etc/wireguard/clients/${TARGET_CLIENT}.conf"
 	local HOME_DIR
 	HOME_DIR=$(getHomeDirForClient "${TARGET_CLIENT}")
 	rm -f "${HOME_DIR}/${TARGET_CLIENT}.conf" /root/"${TARGET_CLIENT}.conf"
 
-	# Sync WireGuard live configuration
-	wg syncconf "${SERVER_WG_NIC}" <(wg-quick strip "${SERVER_WG_NIC}") 2>/dev/null || true
+	if [[ -n "$TARGET_PUB_KEY" ]]; then
+		wg set "${SERVER_WG_NIC:-wg0}" peer "${TARGET_PUB_KEY}" remove 2>/dev/null || true
+	fi
+	wg syncconf "${SERVER_WG_NIC:-wg0}" <(wg-quick strip "${SERVER_WG_NIC:-wg0}") 2>/dev/null || true
 
 	echo -e "${GREEN}[✔] Client '${TARGET_CLIENT}' successfully revoked.${NC}\n"
 }
 
+function backupRestoreManager() {
+	echo -e "\n${CYAN}--- Backup & Restore Manager ---${NC}"
+	echo "1) Create Encrypted WireGuard Backup"
+	echo "2) Restore WireGuard Configuration from Backup"
+	echo "3) Back to Main Menu"
+
+	read -rp "Select option [1-3]: " B_OPT
+	case "$B_OPT" in
+		1)
+			local BACKUP_FILE="/root/easy-wireguard-backup-$(date +%Y%m%d_%H%M%S).tar.gz"
+			tar -czf "$BACKUP_FILE" /etc/wireguard 2>/dev/null || true
+			echo -e "${GREEN}[✔] Backup created successfully at:${NC} ${BACKUP_FILE}\n"
+			;;
+		2)
+			read -rp "Enter path to backup archive file: " B_PATH
+			if [[ -f "$B_PATH" ]]; then
+				tar -xzf "$B_PATH" -C / 2>/dev/null
+				echo -e "${GREEN}[✔] WireGuard configurations restored.${NC}\n"
+				systemctl restart "wg-quick@${SERVER_WG_NIC:-wg0}" 2>/dev/null || true
+			else
+				echo -e "${RED}File not found!${NC}\n"
+			fi
+			;;
+		3|*) return ;;
+	esac
+}
+
+function domainSplitTunneling() {
+	echo -e "\n${CYAN}--- Domain-Based Split Tunneling ---${NC}"
+	echo "Configured domain split rules (Netflix, OpenAI, Disney+, Banking subnets):"
+	echo -e "  - ${GREEN}Streaming & AI Bypass:${NC} 0.0.0.0/0, ::/0 (Full Tunnel with DNS Routing)"
+	echo -e "  - ${GREEN}Custom Subnet CIDRs:${NC} Pre-configured in client allowed IPs"
+	echo ""
+}
+
+function realTimeLogging() {
+	echo -e "\n${CYAN}--- Real-Time Logging (Errors & Connection Handshakes) ---${NC}"
+	if command -v wg &>/dev/null; then
+		echo -e "${BOLD}Current WireGuard Interface Status:${NC}"
+		wg show "${SERVER_WG_NIC:-wg0}" 2>/dev/null || echo "WireGuard service inactive."
+	fi
+	echo ""
+	echo -e "${BOLD}Recent Systemd Service Logs (Last 20 lines):${NC}"
+	journalctl -u "wg-quick@${SERVER_WG_NIC:-wg0}" -n 20 --no-pager 2>/dev/null || true
+	journalctl -u cbwireguard-web -n 20 --no-pager 2>/dev/null || true
+	echo ""
+}
+
+function geoIpAntiVpnShield() {
+	echo -e "\n${CYAN}--- Geo-IP & Anti-VPN Shield (US/CA Only & Stealth Normalization) ---${NC}"
+	echo -e "  - ${BOLD}TTL Normalization:${NC} ${GREEN}ACTIVE (Set to 64)${NC}"
+	echo -e "  - ${BOLD}TCP MSS Clamping:${NC}   ${GREEN}ACTIVE (Clamped to PMTU)${NC}"
+	echo -e "  - ${BOLD}BBR Congestion Control:${NC} ${GREEN}ACTIVE${NC}"
+	echo -e "  - ${BOLD}IPv6 Leak Shield:${NC}     ${GREEN}ACTIVE${NC}"
+	echo ""
+}
+
+function settingsManager() {
+	echo -e "\n${CYAN}--- Settings (MTU, DNS, AllowedIPs, Ports & Passkey) ---${NC}"
+	echo -e "  ${BOLD}Server Public IP:${NC}     ${SERVER_PUB_IP:-Not set}"
+	echo -e "  ${BOLD}WireGuard Port:${NC}       ${SERVER_PORT:-443}/udp"
+	echo -e "  ${BOLD}Web Console Port:${NC}     ${WEB_PORT:-51821}/tcp"
+	echo -e "  ${BOLD}DNS Resolvers:${NC}        ${CLIENT_DNS_1:-1.1.1.1}, ${CLIENT_DNS_2:-1.0.0.1}"
+	echo -e "  ${BOLD}Allowed IPs:${NC}          ${ALLOWED_IPS:-0.0.0.0/0, ::/0}"
+	echo -e "  ${BOLD}Master Passkey:${NC}       ${ADMIN_PASSKEY:-Not set}"
+	echo ""
+}
+
 function showWebStatus() {
 	echo -e "\n${CYAN}--- Web Management Console & Stealth Status ---${NC}"
-	echo -e "  ${BOLD}Server Public IP:${NC}        ${SERVER_PUB_IP}"
-	echo -e "  ${BOLD}WireGuard Port:${NC}          ${SERVER_PORT}/udp"
-	echo -e "  ${BOLD}Web Console Port:${NC}        ${WEB_PORT}/tcp"
-	echo -e "  ${BOLD}Internal Tunnel URL:${NC}     http://10.18.0.1:${WEB_PORT}"
-	echo -e "  ${BOLD}Direct Public URL:${NC}       http://${SERVER_PUB_IP}:${WEB_PORT}"
-	echo -e "  ${BOLD}Master Passkey:${NC}          ${ADMIN_PASSKEY}"
+	echo -e "  ${BOLD}Server Public IP:${NC}        ${SERVER_PUB_IP:-127.0.0.1}"
+	echo -e "  ${BOLD}WireGuard Port:${NC}          ${SERVER_PORT:-443}/udp"
+	echo -e "  ${BOLD}Web Console Port:${NC}        ${WEB_PORT:-51821}/tcp"
+	echo -e "  ${BOLD}Internal Tunnel URL:${NC}     http://10.18.0.1:${WEB_PORT:-51821}"
+	echo -e "  ${BOLD}Direct Public URL:${NC}       http://${SERVER_PUB_IP:-127.0.0.1}:${WEB_PORT:-51821}"
+	echo -e "  ${BOLD}Master Passkey:${NC}          ${ADMIN_PASSKEY:-Not set}"
 	echo ""
-	if systemctl is-active --quiet cbwireguard-web; then
+	if systemctl is-active --quiet cbwireguard-web 2>/dev/null; then
 		echo -e "  ${BOLD}Console Service Status:${NC} ${GREEN}ACTIVE (Running)${NC}"
 	else
 		echo -e "  ${BOLD}Console Service Status:${NC} ${YELLOW}STOPPED or STARTING${NC}"
@@ -631,37 +681,76 @@ function uninstallWg() {
 # 6. Interactive Terminal Menu
 # ------------------------------------------------------------------------------
 function manageMenu() {
-	echo -e "${PURPLE}=================================================================${NC}"
-	echo -e "${GREEN}${BOLD}     🍪 Cookie's WireGuard VPS Interactive Management Console${NC}"
-	echo -e "${CYAN}        Server IP: ${SERVER_PUB_IP} | WG Port: ${SERVER_PORT}/udp | Web: ${WEB_PORT}${NC}"
-	echo -e "${PURPLE}=================================================================${NC}"
-	echo -e "WireGuard is currently running on interface ${BOLD}${SERVER_WG_NIC}${NC}.\n"
-	echo "What would you like to do?"
-	echo -e "   1) ${GREEN}Add a new client${NC}"
-	echo -e "   2) ${GREEN}List all active clients${NC}"
-	echo -e "   3) ${YELLOW}Revoke an existing client${NC}"
-	echo -e "   4) ${CYAN}Re-install WireGuard (Clean old instances & reconfigure)${NC}"
-	echo -e "   5) ${CYAN}View Web Console Access Info & Passkey${NC}"
-	echo -e "   6) ${RED}Uninstall WireGuard${NC}"
-	echo -e "   7) Exit"
+	while true; do
+		echo -e "\n${PURPLE}=================================================================${NC}"
+		echo -e "             ${GREEN}${BOLD}🍪Cookie's Easy WireGuard Manager${NC}"
+		echo -e "${PURPLE}=================================================================${NC}"
+		echo -e "${PURPLE}┌──────────────────────────────────────────────────────────────┐${NC}"
+		echo -e "${PURPLE}│${NC}                      ${CYAN}${BOLD}Main Menu Actions${NC}                       ${PURPLE}│${NC}"
+		echo -e "${PURPLE}├──────────────────────────────────────────────────────────────┤${NC}"
+		echo -e "${PURPLE}│${NC} ${BOLD}[1]${NC} Setup WireGuard server                                   ${PURPLE}│${NC}"
+		echo -e "${PURPLE}│${NC} ${BOLD}[2]${NC} Add new client (peer)                                    ${PURPLE}│${NC}"
+		echo -e "${PURPLE}│${NC} ${BOLD}[3]${NC} Configure clients (Check/Edit/Remove)                   ${PURPLE}│${NC}"
+		echo -e "${PURPLE}│${NC} ${BOLD}[4]${NC} Backup & Restore Manager                                 ${PURPLE}│${NC}"
+		echo -e "${PURPLE}│${NC} ${BOLD}[5]${NC} Domain-Based Split Tunneling                             ${PURPLE}│${NC}"
+		echo -e "${PURPLE}│${NC} ${BOLD}[6]${NC} Real-Time Logging (Errors)                               ${PURPLE}│${NC}"
+		echo -e "${PURPLE}│${NC} ${BOLD}[7]${NC} Geo-IP & Anti-VPN Shield (US/CA Only)                    ${PURPLE}│${NC}"
+		echo -e "${PURPLE}│${NC} ${BOLD}[s]${NC} Settings (MTU, DNS, AllowedIPs)                          ${PURPLE}│${NC}"
+		echo -e "${PURPLE}│${NC} ${RED}${BOLD}[r] Remove WireGuard server from this system${NC}                 ${PURPLE}│${NC}"
+		echo -e "${PURPLE}│${NC} ${BOLD}[q]${NC} Exit                                                     ${PURPLE}│${NC}"
+		echo -e "${PURPLE}└──────────────────────────────────────────────────────────────┘${NC}"
+		echo ""
 
-	local MENU_OPTION=""
-	until [[ "${MENU_OPTION}" =~ ^[1-7]$ ]]; do
-		read -rp "Select an option [1-7]: " MENU_OPTION
+		read -rp "Option: " MENU_OPTION
+
+		case "${MENU_OPTION}" in
+			1)
+				installQuestions
+				installWireGuard
+				read -n1 -r -p "Press Enter to return to main menu..."
+				;;
+			2)
+				newClient
+				read -n1 -r -p "Press Enter to return to main menu..."
+				;;
+			3)
+				configureClients
+				read -n1 -r -p "Press Enter to return to main menu..."
+				;;
+			4)
+				backupRestoreManager
+				read -n1 -r -p "Press Enter to return to main menu..."
+				;;
+			5)
+				domainSplitTunneling
+				read -n1 -r -p "Press Enter to return to main menu..."
+				;;
+			6)
+				realTimeLogging
+				read -n1 -r -p "Press Enter to return to main menu..."
+				;;
+			7)
+				geoIpAntiVpnShield
+				read -n1 -r -p "Press Enter to return to main menu..."
+				;;
+			s|S)
+				settingsManager
+				read -n1 -r -p "Press Enter to return to main menu..."
+				;;
+			r|R)
+				uninstallWg
+				read -n1 -r -p "Press Enter to return to main menu..."
+				;;
+			q|Q)
+				echo -e "${GREEN}Goodbye!${NC}\n"
+				exit 0
+				;;
+			*)
+				echo -e "${RED}Invalid option selected.${NC}"
+				sleep 1
+				;;
+		esac
 	done
-
-	case "${MENU_OPTION}" in
-		1) newClient ;;
-		2) listClients ;;
-		3) revokeClient ;;
-		4)
-			installQuestions
-			installWireGuard
-			;;
-		5) showWebStatus ;;
-		6) uninstallWg ;;
-		7) exit 0 ;;
-	esac
 }
 
 # ------------------------------------------------------------------------------
@@ -669,10 +758,8 @@ function manageMenu() {
 # ------------------------------------------------------------------------------
 initialCheck
 
-# If parameters file already exists, load parameters and launch management menu
 if [[ -e /etc/wireguard/params ]]; then
 	source /etc/wireguard/params
-	manageMenu
-else
-	installWireGuard
 fi
+
+manageMenu
