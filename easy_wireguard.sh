@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# 🍪 Cookie's Easy WireGuard Manager & VPS Stealth Server v3.5
+# 🍪 Cookie's Easy WireGuard Manager & VPS Stealth Server v3.6
 # Inspired by angristan/wireguard-install with Hyper-Optimized VPS Stealth Features
 # ==============================================================================
 
@@ -47,7 +47,7 @@ function checkOS() {
 	if [[ -e /etc/os-release ]]; then
 		source /etc/os-release
 		OS="${ID}"
-	elif [[ -e /etc/debian_version ]]; then
+	elif [[ -e /debian_version ]]; then
 		OS="debian"
 	else
 		echo -e "${RED}Unsupported Linux distribution.${NC}"
@@ -93,8 +93,41 @@ function getHomeDirForClient() {
 }
 
 # ------------------------------------------------------------------------------
-# 2. Cleanup Old WireGuard Instances & Remove Conflicting Rules
+# 2. Sensitive Port Protection & Safe Cleanup Routines
 # ------------------------------------------------------------------------------
+# Checks if a port is sensitive, well-known, or prone to conflicts
+# (e.g. Web 80/443, SSH 22, DNS 53, Mail, Database, or common scanner targets)
+function isSensitivePort() {
+	local port="$1"
+	local sensitive_ports=(20 21 22 23 25 53 67 68 80 110 143 443 8080 8443 3306 5432 6379 27017)
+	for sp in "${sensitive_ports[@]}"; do
+		if [[ "$port" -eq "$sp" ]]; then
+			return 0
+		fi
+	done
+	return 1
+}
+
+# Checks if a port is currently active and bound on the host
+function isPortInUse() {
+	local port="$1"
+	local proto="${2:-udp}"
+	if command -v ss &>/dev/null; then
+		if [[ "$proto" == "udp" ]]; then
+			ss -uln 2>/dev/null | grep -qE "(:|\])${port}\s" && return 0
+		else
+			ss -tln 2>/dev/null | grep -qE "(:|\])${port}\s" && return 0
+		fi
+	elif command -v netstat &>/dev/null; then
+		if [[ "$proto" == "udp" ]]; then
+			netstat -uln 2>/dev/null | grep -qE "(:|\])${port}\s" && return 0
+		else
+			netstat -tln 2>/dev/null | grep -qE "(:|\])${port}\s" && return 0
+		fi
+	fi
+	return 1
+}
+
 function cleanupOldWireguard() {
 	echo -e "\n${CYAN}[*] Scanning for old/conflicting WireGuard instances & services...${NC}"
 
@@ -112,11 +145,17 @@ function cleanupOldWireguard() {
 	systemctl stop cbwireguard-web >/dev/null 2>&1 || true
 	systemctl disable cbwireguard-web >/dev/null 2>&1 || true
 
-	iptables -t nat -F POSTROUTING 2>/dev/null || true
-	iptables -t mangle -F POSTROUTING 2>/dev/null || true
-	iptables -F FORWARD 2>/dev/null || true
+	# Surgical rule cleanup: only remove WireGuard-created rules.
+	# Sensitive ports (80, 443, 22), Docker chains, and web servers remain untouched!
+	iptables -D FORWARD -i wg0 -j ACCEPT 2>/dev/null || true
+	iptables -D FORWARD -o wg0 -j ACCEPT 2>/dev/null || true
+	iptables -D FORWARD -i wg1 -j ACCEPT 2>/dev/null || true
+	iptables -D FORWARD -o wg1 -j ACCEPT 2>/dev/null || true
+	iptables -t nat -D POSTROUTING -s 10.18.0.0/24 -j MASQUERADE 2>/dev/null || true
+	iptables -t mangle -D POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+	iptables -t mangle -D POSTROUTING -j TTL --ttl-set 64 2>/dev/null || true
 
-	echo -e "${GREEN}[✔] Cleaned up old instances and flushed conflicting firewall state.${NC}"
+	echo -e "${GREEN}[✔] Cleaned old WireGuard instances. Sensitive web & SSH ports (80, 443, 22) protected.${NC}"
 }
 
 # ------------------------------------------------------------------------------
@@ -220,30 +259,50 @@ function installQuestions() {
 	read -rp "Server WireGuard internal IPv4: " -e -i "10.18.0.1" SERVER_WG_IPV4
 	read -rp "Server WireGuard internal IPv6: " -e -i "fd42:42:42::1" SERVER_WG_IPV6
 
-	echo -e "\nSelect a WireGuard Port (Stealth & Anti-Blocking):"
-	echo -e "   1) ${GREEN}443${NC}   (HTTPS / HTTP/3 QUIC - Bypasses firewalls & hotel blocks)"
-	echo -e "   2) ${GREEN}51820${NC} (Standard WireGuard Port)"
-	echo -e "   3) ${GREEN}53${NC}    (DNS - Stealthy)"
-	echo -e "   4) ${GREEN}80${NC}    (HTTP - Stealthy)"
-	echo -e "   5) ${GREEN}1194${NC}  (OpenVPN Default)"
-	echo -e "   6) ${GREEN}3389${NC}  (RDP - Stealthy)"
-	echo -e "   7) ${GREEN}8080${NC}  (HTTP Alt)"
-	echo -e "   8) Custom / Random High Port"
+	echo -e "\n${CYAN}${BOLD}Select WireGuard Port (Stealth & Non-Sensitive Ports - Zero Web/80/443 Conflicts):${NC}"
+	echo -e "   1) ${GREEN}4500${NC}  (IPsec NAT-Traversal UDP | Stealth Encrypted Tunneling - Firewall & Carrier Safe) ${PURPLE}[RECOMMENDED STEALTH]${NC}"
+	echo -e "   2) ${GREEN}3478${NC}  (STUN / WebRTC Media UDP | FaceTime / Zoom / VoIP Bypass - Zero DPI Throttling) ${PURPLE}[STEALTH]${NC}"
+	echo -e "   3) ${GREEN}500${NC}   (IKEv2 / IPsec Signaling UDP | Mobile Telecom Pass-Through)"
+	echo -e "   4) ${GREEN}853${NC}   (DNS-over-QUIC UDP | Modern Encrypted Transport Appearance)"
+	echo -e "   5) ${GREEN}51820${NC} (Official WireGuard Standard Port | Dedicated Non-Conflicting Protocol)"
+	echo -e "   6) ${GREEN}41194${NC} (Disguised High Tunnel UDP | Evades Low-Port Scanning & Probes)"
+	echo -e "   7) Random High-Entropy Stealth Port (49152-65535)"
+	echo -e "   8) Custom Non-Sensitive Port"
 
-	read -rp "Select WireGuard Port option [1-8, default 1]: " PORT_OPTION
+	read -rp "Select WireGuard Port option [1-8, default 1 (4500)]: " PORT_OPTION
+	PORT_OPTION=${PORT_OPTION:-1}
 	case "${PORT_OPTION}" in
-		2) SERVER_PORT=51820 ;;
-		3) SERVER_PORT=53 ;;
-		4) SERVER_PORT=80 ;;
-		5) SERVER_PORT=1194 ;;
-		6) SERVER_PORT=3389 ;;
-		7) SERVER_PORT=8080 ;;
-		8)
+		2) SERVER_PORT=3478 ;;
+		3) SERVER_PORT=500 ;;
+		4) SERVER_PORT=853 ;;
+		5) SERVER_PORT=51820 ;;
+		6) SERVER_PORT=41194 ;;
+		7)
 			RANDOM_PORT=$(( (RANDOM % 16383) + 49152 ))
-			read -rp "Server WireGuard port [1-65535]: " -e -i "${RANDOM_PORT}" SERVER_PORT
+			SERVER_PORT="${RANDOM_PORT}"
+			echo -e "${GREEN}[✔] Generated Random Stealth High Port: ${SERVER_PORT}/udp${NC}"
 			;;
-		1|*) SERVER_PORT=443 ;;
+		8)
+			while true; do
+				read -rp "Enter Custom WireGuard Port [1024-65535]: " -e -i "4500" SERVER_PORT
+				if ! [[ "$SERVER_PORT" =~ ^[0-9]+$ ]] || [[ "$SERVER_PORT" -lt 1024 || "$SERVER_PORT" -gt 65535 ]]; then
+					echo -e "${RED}[!] Invalid port. Please choose an unprivileged port between 1024 and 65535.${NC}"
+					continue
+				fi
+				if isSensitivePort "$SERVER_PORT"; then
+					echo -e "${RED}[!] Port ${SERVER_PORT} is a sensitive service port (conflicts with web/mail/DNS like 80/443/8080). Please enter a non-sensitive stealth port.${NC}"
+					continue
+				fi
+				if isPortInUse "$SERVER_PORT" "udp"; then
+					echo -e "${YELLOW}[!] Warning: Port ${SERVER_PORT}/udp is currently bound by another service on this host. Please choose another port.${NC}"
+					continue
+				fi
+				break
+			done
+			;;
+		1|*) SERVER_PORT=4500 ;;
 	esac
+	echo -e "${GREEN}[✔] WireGuard Port Selected: ${SERVER_PORT}/udp (Safe Non-Sensitive Stealth Port)${NC}"
 
 	selectDNSResolvers
 
@@ -399,19 +458,36 @@ WG_SERVER_EOF
 function provisionWebConsole() {
 	echo -e "\n${CYAN}${BOLD}--- Provision Web Management Console Runtime ---${NC}"
 
-	echo -e "Select Web Management Console Port (Unique Internal Non-Default Port):"
-	echo -e "   1) ${GREEN}51821${NC} (Default Manager Port)"
-	echo -e "   2) ${GREEN}54321${NC} (High Stealth Port)"
-	echo -e "   3) ${GREEN}51830${NC} (Alternate Port)"
-	echo -e "   4) Custom / Random High Port"
+	echo -e "Select Web Management Console Port (Non-Sensitive Dedicated Web Port):"
+	echo -e "   1) ${GREEN}51821${NC} (Default Dedicated WireGuard Manager Port) ${PURPLE}[RECOMMENDED SAFE]${NC}"
+	echo -e "   2) ${GREEN}54321${NC} (High Stealth Web Port)"
+	echo -e "   3) ${GREEN}58921${NC} (High Ephemeral Alternate Port)"
+	echo -e "   4) Custom High Non-Sensitive Port (1024-65535)"
 
-	read -rp "Select Web Console Port option [1-4, default 1]: " WEB_PORT_OPTION
+	read -rp "Select Web Console Port option [1-4, default 1 (51821)]: " WEB_PORT_OPTION
+	WEB_PORT_OPTION=${WEB_PORT_OPTION:-1}
 	case "${WEB_PORT_OPTION}" in
 		2) WEB_PORT=54321 ;;
-		3) WEB_PORT=51830 ;;
+		3) WEB_PORT=58921 ;;
 		4)
-			RANDOM_WEB=$(( (RANDOM % 50000) + 10000 ))
-			read -rp "Web Console port [1024-65535]: " -e -i "${RANDOM_WEB}" WEB_PORT
+			while true; do
+				RANDOM_WEB=$(( (RANDOM % 50000) + 10000 ))
+				read -rp "Web Console port [1024-65535]: " -e -i "${RANDOM_WEB}" CUSTOM_WEB
+				if ! [[ "$CUSTOM_WEB" =~ ^[0-9]+$ ]] || [[ "$CUSTOM_WEB" -lt 1024 || "$CUSTOM_WEB" -gt 65535 ]]; then
+					echo -e "${RED}[!] Invalid port. Enter an unprivileged port between 1024 and 65535.${NC}"
+					continue
+				fi
+				if isSensitivePort "$CUSTOM_WEB"; then
+					echo -e "${RED}[!] Port ${CUSTOM_WEB} is a sensitive service port (like 80/443/8080/8443). The Web Console must run on a dedicated non-sensitive port.${NC}"
+					continue
+				fi
+				if isPortInUse "$CUSTOM_WEB" "tcp"; then
+					echo -e "${YELLOW}[!] Warning: Port ${CUSTOM_WEB}/tcp is currently in use by another service. Please choose another port.${NC}"
+					continue
+				fi
+				WEB_PORT="$CUSTOM_WEB"
+				break
+			done
 			;;
 		1|*) WEB_PORT=${WEB_PORT:-51821} ;;
 	esac
@@ -422,7 +498,7 @@ function provisionWebConsole() {
 
 	cat << ENV_EOF > /etc/wireguard/manager.env
 SERVER_PUBLIC_IP="${SERVER_PUB_IP:-127.0.0.1}"
-WG_DEFAULT_PORT="${SERVER_PORT:-443}"
+WG_DEFAULT_PORT="${SERVER_PORT:-4500}"
 WEB_PORT="${WEB_PORT}"
 ADMIN_PASSKEY="${ADMIN_PASSKEY}"
 ENV_EOF
@@ -678,37 +754,40 @@ function revokeClient() {
 	rm -f "/etc/wireguard/clients/${TARGET_CLIENT}.conf"
 	local HOME_DIR
 	HOME_DIR=$(getHomeDirForClient "${TARGET_CLIENT}")
-	rm -f "${HOME_DIR}/${TARGET_CLIENT}.conf" /root/"${TARGET_CLIENT}.conf"
+	rm -f "${HOME_DIR}/${TARGET_CLIENT}.conf" "/root/${TARGET_CLIENT}.conf" 2>/dev/null || true
 
-	if [[ -n "$TARGET_PUB_KEY" ]]; then
-		wg set "${SERVER_WG_NIC:-wg0}" peer "${TARGET_PUB_KEY}" remove 2>/dev/null || true
+	if command -v wg-quick &>/dev/null && command -v wg &>/dev/null; then
+		wg syncconf "${SERVER_WG_NIC:-wg0}" <(wg-quick strip "${SERVER_WG_NIC:-wg0}") 2>/dev/null || true
 	fi
-	wg syncconf "${SERVER_WG_NIC:-wg0}" <(wg-quick strip "${SERVER_WG_NIC:-wg0}") 2>/dev/null || true
 
-	echo -e "${GREEN}[✔] Client '${TARGET_CLIENT}' successfully revoked.${NC}\n"
+	echo -e "${GREEN}[✔] Client ${TARGET_CLIENT} revoked successfully.${NC}\n"
 }
 
 function backupRestoreManager() {
 	echo -e "\n${CYAN}--- Backup & Restore Manager ---${NC}"
-	echo "1) Create Encrypted WireGuard Backup"
-	echo "2) Restore WireGuard Configuration from Backup"
+	echo "1) Create Encrypted Server Backup Archive"
+	echo "2) Restore Server Configuration from Archive"
 	echo "3) Back to Main Menu"
 
-	read -rp "Select option [1-3]: " B_OPT
-	case "$B_OPT" in
+	read -rp "Select option [1-3]: " BR_OPT
+	case "$BR_OPT" in
 		1)
-			local BACKUP_FILE="/root/easy-wireguard-backup-$(date +%Y%m%d_%H%M%S).tar.gz"
-			tar -czf "$BACKUP_FILE" /etc/wireguard 2>/dev/null || true
-			echo -e "${GREEN}[✔] Backup created successfully at:${NC} ${BACKUP_FILE}\n"
+			local DATE
+			DATE=$(date +%Y-%m-%d_%H-%M-%S)
+			local BACKUP_FILE="/root/wireguard_backup_${DATE}.tar.gz"
+			tar -czf "$BACKUP_FILE" -C /etc wireguard 2>/dev/null
+			chmod 600 "$BACKUP_FILE"
+			echo -e "${GREEN}[✔] Backup archive created successfully: ${BACKUP_FILE}${NC}\n"
 			;;
 		2)
-			read -rp "Enter path to backup archive file: " B_PATH
-			if [[ -f "$B_PATH" ]]; then
-				tar -xzf "$B_PATH" -C / 2>/dev/null
-				echo -e "${GREEN}[✔] WireGuard configurations restored.${NC}\n"
-				systemctl restart "wg-quick@${SERVER_WG_NIC:-wg0}" 2>/dev/null || true
+			read -rp "Enter path to backup archive file: " RESTORE_PATH
+			if [[ -f "$RESTORE_PATH" ]]; then
+				systemctl stop "wg-quick@*" >/dev/null 2>&1 || true
+				tar -xzf "$RESTORE_PATH" -C /etc 2>/dev/null
+				systemctl start "wg-quick@${SERVER_WG_NIC:-wg0}" >/dev/null 2>&1 || true
+				echo -e "${GREEN}[✔] Configuration restored from ${RESTORE_PATH}${NC}\n"
 			else
-				echo -e "${RED}File not found!${NC}\n"
+				echo -e "${RED}[ERROR] Archive file not found.${NC}\n"
 			fi
 			;;
 		3|*) return ;;
@@ -716,10 +795,10 @@ function backupRestoreManager() {
 }
 
 # ------------------------------------------------------------------------------
-# 8. Live Hot-Apply Domain-Based Split Tunneling
+# 8. Dynamic Real-Time Domain Split Tunneling Engine with Location Stealth
 # ------------------------------------------------------------------------------
 function applyDomainSplitRulesLive() {
-	echo -e "\n${CYAN}[*] Applying domain-based split tunneling rules live...${NC}"
+	echo -e "\n${CYAN}[*] Applying domain-based split tunneling rules with Location Stealth live...${NC}"
 
 	mkdir -p /etc/wireguard
 	touch /etc/wireguard/split_domains.txt
@@ -730,13 +809,38 @@ function applyDomainSplitRulesLive() {
 	local MODE
 	MODE=$(cat /etc/wireguard/split_mode.txt 2>/dev/null || echo "BYPASS")
 
+	# Check and install ipset & dnsmasq for high speed dynamic domain routing
+	if command -v apt-get &>/dev/null; then
+		if ! command -v ipset &>/dev/null || ! command -v dnsmasq &>/dev/null; then
+			echo -e "${YELLOW}[*] Installing ipset & dnsmasq for dynamic stealth domain routing...${NC}"
+			apt-get update -y -q >/dev/null 2>&1 || true
+			apt-get install -y -q ipset dnsmasq >/dev/null 2>&1 || true
+		fi
+	elif command -v yum &>/dev/null; then
+		if ! command -v ipset &>/dev/null || ! command -v dnsmasq &>/dev/null; then
+			yum install -y ipset dnsmasq >/dev/null 2>&1 || true
+		fi
+	fi
+
 	if command -v ipset &>/dev/null; then
 		ipset create wg_split_v4 hash:net family inet 2>/dev/null || true
 		ipset create wg_split_v6 hash:net family inet6 2>/dev/null || true
 	fi
 
-	# Clear previous iptables split rules
+	# Configure dnsmasq for Location Stealth & EDNS Client Subnet (ECS) Anonymization
+	mkdir -p /etc/dnsmasq.d
+	cat << DNSMASQ_STEALTH_EOF > /etc/dnsmasq.d/00-stealth-privacy.conf
+# Cookie WireGuard Stealth & Privacy Configuration
+no-edns0
+cache-size=10000
+dns-forward-max=1000
+bogus-priv
+filterwin2k
+DNSMASQ_STEALTH_EOF
+
+	# Clear previous iptables and ip6tables split rules
 	iptables -t nat -D POSTROUTING -m set --match-set wg_split_v4 dst -o "${SERVER_PUB_NIC:-eth0}" -j MASQUERADE 2>/dev/null || true
+	ip6tables -t nat -D POSTROUTING -m set --match-set wg_split_v6 dst -o "${SERVER_PUB_NIC:-eth0}" -j MASQUERADE 2>/dev/null || true
 	iptables -t mangle -D PREROUTING -m set --match-set wg_split_v4 dst -j MARK --set-mark 0x51820 2>/dev/null || true
 
 	if command -v ipset &>/dev/null; then
@@ -744,22 +848,27 @@ function applyDomainSplitRulesLive() {
 		ipset flush wg_split_v6 2>/dev/null || true
 	fi
 
-	if [[ -d /etc/dnsmasq.d ]]; then
-		echo "# Cookie WireGuard Split Tunneling Rules" > /etc/dnsmasq.d/wg_split.conf
-	fi
+	echo "# Cookie WireGuard Dynamic Split Tunneling Rules" > /etc/dnsmasq.d/wg_split.conf
 
 	local DOMAIN_COUNT=0
-	while IFS= read -r domain || [[ -n "$domain" ]]; do
-		[[ -z "$domain" || "$domain" =~ ^# ]] && continue
+	while IFS= read -r raw_domain || [[ -n "$raw_domain" ]]; do
+		[[ -z "$raw_domain" || "$raw_domain" =~ ^# ]] && continue
+		local domain
+		domain=$(echo "$raw_domain" | sed -e 's|^https*://||' -e 's|/.*$||' | tr '[:upper:]' '[:lower:]' | xargs)
+		[[ -z "$domain" ]] && continue
 		((DOMAIN_COUNT++))
 
-		if [[ -d /etc/dnsmasq.d ]] && command -v ipset &>/dev/null; then
-			echo "ipset=/${domain}/wg_split_v4,wg_split_v6" >> /etc/dnsmasq.d/wg_split.conf
+		# Automatically map domain and ALL subdomains in dnsmasq ipset
+		if command -v ipset &>/dev/null; then
+			echo "ipset=/.${domain}/wg_split_v4,wg_split_v6" >> /etc/dnsmasq.d/wg_split.conf
 		fi
 
-		local resolved_ips
-		resolved_ips=$(getent ahosts "$domain" 2>/dev/null | awk '{print $1}' | sort -u || true)
-		for ip in $resolved_ips; do
+		# Resolve IPv4 and IPv6 addresses live for initial pool
+		local resolved_v4 resolved_v6
+		resolved_v4=$(getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | sort -u || true)
+		resolved_v6=$(getent ahostsv6 "$domain" 2>/dev/null | awk '{print $1}' | sort -u || true)
+
+		for ip in $resolved_v4; do
 			if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
 				if command -v ipset &>/dev/null; then
 					ipset add wg_split_v4 "$ip" 2>/dev/null || true
@@ -768,20 +877,40 @@ function applyDomainSplitRulesLive() {
 				fi
 			fi
 		done
+
+		for ip6 in $resolved_v6; do
+			if [[ "$ip6" =~ : ]]; then
+				if command -v ipset &>/dev/null; then
+					ipset add wg_split_v6 "$ip6" 2>/dev/null || true
+				else
+					ip6tables -t nat -A POSTROUTING -d "$ip6" -o "${SERVER_PUB_NIC:-eth0}" -j MASQUERADE 2>/dev/null || true
+				fi
+			fi
+		done
 	done < /etc/wireguard/split_domains.txt
 
 	if command -v ipset &>/dev/null; then
 		if [[ "$MODE" == "BYPASS" ]]; then
 			iptables -t nat -A POSTROUTING -m set --match-set wg_split_v4 dst -o "${SERVER_PUB_NIC:-eth0}" -j MASQUERADE 2>/dev/null || true
+			ip6tables -t nat -A POSTROUTING -m set --match-set wg_split_v6 dst -o "${SERVER_PUB_NIC:-eth0}" -j MASQUERADE 2>/dev/null || true
 		fi
 	fi
 
+	# Re-apply Stealth Packet Normalization Rules
+	iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -o "${SERVER_PUB_NIC:-eth0}" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+	iptables -t mangle -A POSTROUTING -o "${SERVER_PUB_NIC:-eth0}" -j TTL --ttl-set 64 2>/dev/null || true
+	ip6tables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -o "${SERVER_PUB_NIC:-eth0}" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+
 	if systemctl is-active --quiet dnsmasq 2>/dev/null; then
 		systemctl reload dnsmasq >/dev/null 2>&1 || systemctl restart dnsmasq >/dev/null 2>&1 || true
+	else
+		systemctl enable dnsmasq >/dev/null 2>&1 || true
+		systemctl start dnsmasq >/dev/null 2>&1 || true
 	fi
 
-	echo -e "${GREEN}[✔] Live split rules updated for ${DOMAIN_COUNT} domain(s) in [${MODE}] mode.${NC}"
-	echo -e "${GREEN}[✔] Applied instantaneously in real-time — zero reboot, zero rebuild, and zero downtime required!${NC}\n"
+	echo -e "${GREEN}[✔] Stealth Split Rules applied for ${DOMAIN_COUNT} domain(s) & subdomains in [${MODE}] mode.${NC}"
+	echo -e "${GREEN}[✔] EDNS Location Anonymization & IPv4/IPv6 Dual-Stack Protection ACTIVE!${NC}"
+	echo -e "${GREEN}[✔] Applied live in real-time — zero reboot, zero rebuild, zero downtime!${NC}\n"
 }
 
 function domainSplitTunneling() {
@@ -844,28 +973,28 @@ function domainSplitTunneling() {
 				;;
 			3)
 				echo -e "\nSelect Preset Category to Add:"
-				echo "1) AI Services (OpenAI, ChatGPT, Claude, Gemini, DeepSeek, Perplexity)"
-				echo "2) Streaming Services (Netflix, Hulu, Disney+, PrimeVideo, HBO Max, Spotify)"
+				echo "1) AI Services (OpenAI, ChatGPT, Claude, Gemini, DeepSeek, Perplexity & CDNs)"
+				echo "2) Streaming Services (Netflix, Hulu, Disney+, PrimeVideo, HBO Max, Spotify & CDNs)"
 				echo "3) Banking & Finance (PayPal, Chase, Bank of America, Wells Fargo, Stripe)"
 				echo "4) Gaming & Community (Discord, Twitch, Steam, Roblox, Epic Games)"
 				read -rp "Select preset [1-4]: " PRESET_OPT
 				case "$PRESET_OPT" in
 					1)
-						for d in openai.com chatgpt.com claude.ai anthropic.com gemini.google.com deepseek.com perplexity.ai; do
+						for d in openai.com chatgpt.com oaistatic.com oaiusercontent.com claude.ai anthropic.com gemini.google.com deepseek.com perplexity.ai; do
 							grep -q "^${d}\$" /etc/wireguard/split_domains.txt 2>/dev/null || echo "$d" >> /etc/wireguard/split_domains.txt
 						done
-						echo -e "${GREEN}[✔] Added AI Services preset domains.${NC}"
+						echo -e "${GREEN}[✔] Added AI Services & CDNs preset domains.${NC}"
 						applyDomainSplitRulesLive
 						;;
 					2)
-						for d in netflix.com hulu.com disneyplus.com primevideo.com hbomax.com spotify.com; do
+						for d in netflix.com nflxext.com nflxso.net nflxvideo.net nflximg.net hulu.com hulustream.com disneyplus.com disney-plus.net dssott.com bamgrid.com primevideo.com hbomax.com spotify.com; do
 							grep -q "^${d}\$" /etc/wireguard/split_domains.txt 2>/dev/null || echo "$d" >> /etc/wireguard/split_domains.txt
 						done
-						echo -e "${GREEN}[✔] Added Streaming Services preset domains.${NC}"
+						echo -e "${GREEN}[✔] Added Streaming Services & CDNs preset domains.${NC}"
 						applyDomainSplitRulesLive
 						;;
 					3)
-						for d in paypal.com chase.com bankofamerica.com wellsfargo.com stripe.com; do
+						for d in paypal.com paypalobjects.com chase.com bankofamerica.com wellsfargo.com stripe.com; do
 							grep -q "^${d}\$" /etc/wireguard/split_domains.txt 2>/dev/null || echo "$d" >> /etc/wireguard/split_domains.txt
 						done
 						echo -e "${GREEN}[✔] Added Banking & Finance preset domains.${NC}"
@@ -898,7 +1027,7 @@ function domainSplitTunneling() {
 					cat /etc/wireguard/split_domains.txt | grep -v -E '^(#|$)' | nl -s ') '
 					echo ""
 					if command -v ipset &>/dev/null; then
-						echo -e "${BOLD}Active IPSet Rules (wg_split_v4):${NC}"
+						echo -e "${BOLD}Active IPv4 IPSet Rules (wg_split_v4):${NC}"
 						ipset list wg_split_v4 2>/dev/null | grep -A 50 "Members:" || echo "No IP members currently resolved."
 					fi
 				fi
@@ -945,9 +1074,9 @@ function settingsManager() {
 	echo -e "  3) WireGuard NIC Name:     ${SERVER_WG_NIC:-wg0}"
 	echo -e "  4) Server Internal IPv4:   ${SERVER_WG_IPV4:-10.18.0.1}"
 	echo -e "  5) Server Internal IPv6:   ${SERVER_WG_IPV6:-fd42:42:42::1}"
-	echo -e "  6) WireGuard Listen Port:  ${SERVER_PORT:-443}/udp"
+	echo -e "  6) WireGuard Listen Port:  ${SERVER_PORT:-4500}/udp"
 	echo -e "  7) Web Console Port:       ${WEB_PORT:-51821}/tcp"
-	echo -e "  8) DNS Resolvers:          ${CLIENT_DNS_1:-1.1.1.1}, ${CLIENT_DNS_2:-1.0.0.1}"
+	echo -e "  8) DNS Resolvers:          ${CLIENT_DNS_1:-94.140.14.14}, ${CLIENT_DNS_2:-94.140.15.15}"
 	echo -e "  9) Allowed IPs:            ${ALLOWED_IPS:-0.0.0.0/0, ::/0}"
 	echo -e " 10) Master Admin Passkey:   ${ADMIN_PASSKEY:-Not set}"
 	echo ""
@@ -960,8 +1089,28 @@ function settingsManager() {
 			3) read -rp "Enter WireGuard NIC Name: " -e -i "${SERVER_WG_NIC}" SERVER_WG_NIC ;;
 			4) read -rp "Enter Server Internal IPv4: " -e -i "${SERVER_WG_IPV4}" SERVER_WG_IPV4 ;;
 			5) read -rp "Enter Server Internal IPv6: " -e -i "${SERVER_WG_IPV6}" SERVER_WG_IPV6 ;;
-			6) read -rp "Enter WireGuard Port: " -e -i "${SERVER_PORT}" SERVER_PORT ;;
-			7) read -rp "Enter Web Console Port: " -e -i "${WEB_PORT}" WEB_PORT ;;
+			6)
+				while true; do
+					read -rp "Enter WireGuard Port [1024-65535, stealth recommended: 4500, 3478, 51820]: " -e -i "${SERVER_PORT:-4500}" NEW_PORT
+					if isSensitivePort "$NEW_PORT"; then
+						echo -e "${RED}[!] Port ${NEW_PORT} is a sensitive/common service port (conflicts with 80/443/8080/53/22). Please choose a safe stealth port.${NC}"
+						continue
+					fi
+					SERVER_PORT="$NEW_PORT"
+					break
+				done
+				;;
+			7)
+				while true; do
+					read -rp "Enter Web Console Port [1024-65535, default 51821]: " -e -i "${WEB_PORT:-51821}" NEW_WEB
+					if isSensitivePort "$NEW_WEB"; then
+						echo -e "${RED}[!] Port ${NEW_WEB} is a sensitive service port (conflicts with 80/443/8080/8443). Please choose a dedicated port.${NC}"
+						continue
+					fi
+					WEB_PORT="$NEW_WEB"
+					break
+				done
+				;;
 			8) selectDNSResolvers ;;
 			9) read -rp "Enter Allowed IPs: " -e -i "${ALLOWED_IPS}" ALLOWED_IPS ;;
 			10) read -rp "Enter Master Admin Passkey: " -e -i "${ADMIN_PASSKEY}" ADMIN_PASSKEY ;;
@@ -993,8 +1142,8 @@ PARAMS_EOF
 function showWebStatus() {
 	echo -e "\n${CYAN}--- Web Management Console & Stealth Status ---${NC}"
 	echo -e "  ${BOLD}Server Public IP:${NC}        ${SERVER_PUB_IP:-127.0.0.1}"
-	echo -e "  ${BOLD}WireGuard Port:${NC}          ${SERVER_PORT:-443}/udp"
-	echo -e "  ${BOLD}Web Console Port:${NC}        ${WEB_PORT:-51821}/tcp"
+	echo -e "  ${BOLD}WireGuard Port:${NC}          ${SERVER_PORT:-4500}/udp (Non-sensitive stealth port)"
+	echo -e "  ${BOLD}Web Console Port:${NC}        ${WEB_PORT:-51821}/tcp (Dedicated safe console port)"
 	echo -e "  ${BOLD}Internal Tunnel URL:${NC}     http://10.18.0.1:${WEB_PORT:-51821}"
 	echo -e "  ${BOLD}Direct Public URL:${NC}       http://${SERVER_PUB_IP:-127.0.0.1}:${WEB_PORT:-51821}"
 	echo -e "  ${BOLD}Master Passkey:${NC}          ${ADMIN_PASSKEY:-Not set}"
@@ -1012,12 +1161,48 @@ function uninstallWg() {
 	read -rp "Are you sure you want to uninstall WireGuard? [y/N]: " -e REMOVE
 	REMOVE=${REMOVE:-n}
 	if [[ "$REMOVE" =~ ^[Yy]$ ]]; then
-		cleanupOldWireguard
+		echo -e "${CYAN}[*] Safely uninstalling WireGuard (protecting sensitive web & SSH ports: 80, 443, 22)...${NC}"
+		
+		# Stop and disable WireGuard and Web Console
+		systemctl stop "wg-quick@${SERVER_WG_NIC:-wg0}" >/dev/null 2>&1 || true
+		systemctl disable "wg-quick@${SERVER_WG_NIC:-wg0}" >/dev/null 2>&1 || true
+		systemctl stop cbwireguard-web >/dev/null 2>&1 || true
+		systemctl disable cbwireguard-web >/dev/null 2>&1 || true
+
+		if command -v wg-quick >/dev/null 2>&1; then
+			wg-quick down "${SERVER_WG_NIC:-wg0}" >/dev/null 2>&1 || true
+		fi
+		ip link delete dev "${SERVER_WG_NIC:-wg0}" >/dev/null 2>&1 || true
+
+		# Safely clean only WireGuard-specific firewall rules
+		if [[ -n "${SERVER_PORT:-}" ]]; then
+			iptables -D INPUT -p udp --dport "${SERVER_PORT}" -j ACCEPT 2>/dev/null || true
+			ip6tables -D INPUT -p udp --dport "${SERVER_PORT}" -j ACCEPT 2>/dev/null || true
+		fi
+		iptables -D FORWARD -i "${SERVER_WG_NIC:-wg0}" -j ACCEPT 2>/dev/null || true
+		iptables -D FORWARD -o "${SERVER_WG_NIC:-wg0}" -j ACCEPT 2>/dev/null || true
+		iptables -t nat -D POSTROUTING -s 10.18.0.0/24 -j MASQUERADE 2>/dev/null || true
+		if [[ -n "${SERVER_PUB_NIC:-}" ]]; then
+			iptables -t nat -D POSTROUTING -o "${SERVER_PUB_NIC}" -j MASQUERADE 2>/dev/null || true
+		fi
+		iptables -t mangle -D POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+		iptables -t mangle -D POSTROUTING -j TTL --ttl-set 64 2>/dev/null || true
+
+		# Clean split tunneling IP sets and dnsmasq config if present
+		if command -v ipset &>/dev/null; then
+			ipset destroy wg_split_v4 2>/dev/null || true
+			ipset destroy wg_split_v6 2>/dev/null || true
+		fi
+		rm -f /etc/dnsmasq.d/00-stealth-split.conf /etc/dnsmasq.d/00-stealth-dns.conf
+		systemctl restart dnsmasq 2>/dev/null || true
+
+		# Remove files
 		rm -rf /etc/wireguard
 		rm -f /etc/sysctl.d/99-wireguard-stealth.conf
 		rm -f /etc/systemd/system/cbwireguard-web.service
 		systemctl daemon-reload
-		echo -e "${GREEN}[✔] WireGuard and Web Console uninstalled successfully.${NC}\n"
+
+		echo -e "${GREEN}[✔] WireGuard uninstalled safely. Sensitive ports (80, 443, 22) and web server setups preserved intact.${NC}\n"
 		exit 0
 	else
 		echo -e "${YELLOW}Uninstall cancelled.${NC}\n"

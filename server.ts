@@ -164,8 +164,8 @@ function getAutoDetectedWgPort(): number {
     return parseInt(process.env.WG_DEFAULT_PORT, 10);
   }
 
-  // Default to 443 for maximum stealth HTTP/3 QUIC cloaking
-  return 443;
+  // Default to 4500 for IPsec NAT-T stealth tunneling (avoids sensitive ports 80/443)
+  return 4500;
 }
 
 function getAutoDetectedWebPort(): number {
@@ -241,7 +241,7 @@ let stealthConfig: StealthConfig = {
   ttlNormalization: true,
   mssClamping: true,
   pmtuProbing: true,
-  quicPortCloaking: serverState.listenPort === 443,
+  quicPortCloaking: [4500, 3478, 500, 853].includes(serverState.listenPort),
   ipv6LeakShield: true,
   bbrPacing: true,
   tosNormalization: true,
@@ -1075,14 +1075,16 @@ app.post('/api/stealth/audit', requireVpnOrAuth, (_req: Request, res: Response) 
     },
     {
       id: 'aud-quic',
-      name: 'UDP Port & HTTP/3 QUIC Cloaking',
+      name: 'Stealth UDP Port & Sensitive Port Protection',
       category: 'routing' as const,
-      status: serverState.listenPort === 443 || stealthConfig.quicPortCloaking ? ('passed' as const) : ('warning' as const),
-      metric: `Port ${serverState.listenPort}/udp ${serverState.listenPort === 443 ? '(HTTP/3 QUIC Cloak)' : '(Custom)'}`,
-      description: serverState.listenPort === 443
-        ? 'Traffic runs on UDP 443. Indistinguishable from standard Google/Cloudflare HTTP/3 video and website streams.'
-        : `Running on port ${serverState.listenPort}/udp. Port 443 provides maximum bypass capability on restrictive firewalls.`,
-      recommendation: serverState.listenPort === 443 ? undefined : 'Switch WireGuard listen port to 443 in Settings for maximum firewall evasion.',
+      status: [4500, 3478, 500, 853, 51820, 41194].includes(serverState.listenPort) || (serverState.listenPort >= 1024 && ![80, 443, 8080, 8443, 53, 22].includes(serverState.listenPort)) ? ('passed' as const) : ('warning' as const),
+      metric: `Port ${serverState.listenPort}/udp ${[4500, 3478, 500, 853].includes(serverState.listenPort) ? '(Stealth Cloak)' : '(Non-Sensitive)'}`,
+      description: [4500, 3478, 500, 853].includes(serverState.listenPort)
+        ? `Traffic runs on stealth UDP ${serverState.listenPort}. Blends with background VoIP/IPsec media without colliding with sensitive web/system ports (80/443).`
+        : `Running on port ${serverState.listenPort}/udp. Sensitive ports (80, 443, 22, 53) are strictly avoided to prevent web server conflicts and port-scan targeting.`,
+      recommendation: [80, 443, 22, 53, 8080, 8443].includes(serverState.listenPort)
+        ? 'Switch WireGuard listen port to a stealth port (4500, 3478, or 51820) to prevent web collisions.'
+        : undefined,
     },
     {
       id: 'aud-bbr',
@@ -1284,18 +1286,34 @@ app.get('/api/settings', requireVpnOrAuth, (_req: Request, res: Response) => {
   });
 });
 
+const SENSITIVE_PORTS = [20, 21, 22, 23, 25, 53, 67, 68, 80, 110, 143, 443, 8080, 8443, 3306, 5432, 6379, 27017];
+
 app.put('/api/settings', requireVpnOrAuth, (req: Request, res: Response) => {
   const { defaultMtu, defaultDns, defaultAllowedIps, listenPort, webPort, publicIp, dokployBridge } = req.body;
 
+  if (listenPort !== undefined) {
+    const lp = parseInt(listenPort, 10);
+    if (SENSITIVE_PORTS.includes(lp)) {
+      return res.status(400).json({
+        error: `Port ${lp} is a sensitive service port (conflicts with web/system services like 80/443/22). Please choose a safe stealth port (recommended: 4500, 3478, or 51820).`,
+      });
+    }
+    serverState.listenPort = lp;
+    stealthConfig.quicPortCloaking = [4500, 3478, 500, 853].includes(serverState.listenPort);
+    recalculateStealthScore();
+  }
+  if (webPort !== undefined) {
+    const wp = parseInt(webPort, 10);
+    if (SENSITIVE_PORTS.includes(wp)) {
+      return res.status(400).json({
+        error: `Web Console port ${wp} is a sensitive service port (conflicts with 80/443/8080). Please choose a dedicated port like 51821 or 54321.`,
+      });
+    }
+    serverState.webPort = wp;
+  }
   if (defaultMtu !== undefined) serverState.defaultMtu = parseInt(defaultMtu, 10);
   if (defaultDns !== undefined) serverState.defaultDns = defaultDns;
   if (defaultAllowedIps !== undefined) serverState.defaultAllowedIps = defaultAllowedIps;
-  if (listenPort !== undefined) {
-    serverState.listenPort = parseInt(listenPort, 10);
-    stealthConfig.quicPortCloaking = serverState.listenPort === 443;
-    recalculateStealthScore();
-  }
-  if (webPort !== undefined) serverState.webPort = parseInt(webPort, 10);
   if (publicIp !== undefined) serverState.publicIp = publicIp;
   if (dokployBridge !== undefined) serverState.dokployBridge = !!dokployBridge;
 
