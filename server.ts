@@ -1,4 +1,5 @@
-import express, { Request, Response, NextFunction } from 'express';
+import express from 'express';
+import type { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import crypto from 'crypto';
 import QRCode from 'qrcode';
@@ -12,6 +13,8 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 
+const SENSITIVE_PORTS = [20, 21, 22, 23, 25, 53, 67, 68, 80, 110, 143, 443, 8080, 8443, 3306, 5432, 6379, 27017];
+
 function getListenPort(): number {
   if (process.env.PORT) return parseInt(process.env.PORT, 10);
   if (fs.existsSync('/etc/wireguard/manager.env')) {
@@ -19,12 +22,14 @@ function getListenPort(): number {
       const content = fs.readFileSync('/etc/wireguard/manager.env', 'utf8');
       const match = content.match(/WEB_PORT="?([^"\r\n]+)"?/);
       if (match && match[1].trim()) {
-        return parseInt(match[1].trim(), 10);
+        const p = parseInt(match[1].trim(), 10);
+        if (!SENSITIVE_PORTS.includes(p)) return p;
       }
     } catch (e) {}
   }
   if (process.env.WEB_PORT) {
-    return parseInt(process.env.WEB_PORT, 10);
+    const p = parseInt(process.env.WEB_PORT, 10);
+    if (!SENSITIVE_PORTS.includes(p)) return p;
   }
   return 3000;
 }
@@ -143,7 +148,8 @@ function getAutoDetectedWgPort(): number {
       const content = fs.readFileSync('/etc/wireguard/manager.env', 'utf8');
       const match = content.match(/WG_DEFAULT_PORT="?([^"\r\n]+)"?/);
       if (match && match[1].trim()) {
-        return parseInt(match[1].trim(), 10);
+        const p = parseInt(match[1].trim(), 10);
+        if (!SENSITIVE_PORTS.includes(p)) return p;
       }
     } catch (e) {}
   }
@@ -154,14 +160,16 @@ function getAutoDetectedWgPort(): number {
       const conf = fs.readFileSync('/etc/wireguard/wg0.conf', 'utf8');
       const match = conf.match(/ListenPort\s*=\s*(\d+)/i);
       if (match && match[1]) {
-        return parseInt(match[1], 10);
+        const p = parseInt(match[1], 10);
+        if (!SENSITIVE_PORTS.includes(p)) return p;
       }
     } catch (e) {}
   }
 
   // 3. Check environment
   if (process.env.WG_DEFAULT_PORT) {
-    return parseInt(process.env.WG_DEFAULT_PORT, 10);
+    const p = parseInt(process.env.WG_DEFAULT_PORT, 10);
+    if (!SENSITIVE_PORTS.includes(p)) return p;
   }
 
   // Default to 4500 for IPsec NAT-T stealth tunneling (avoids sensitive ports 80/443)
@@ -174,14 +182,16 @@ function getAutoDetectedWebPort(): number {
       const content = fs.readFileSync('/etc/wireguard/manager.env', 'utf8');
       const match = content.match(/WEB_PORT="?([^"\r\n]+)"?/);
       if (match && match[1].trim()) {
-        return parseInt(match[1].trim(), 10);
+        const p = parseInt(match[1].trim(), 10);
+        if (!SENSITIVE_PORTS.includes(p)) return p;
       }
     } catch (e) {}
   }
   if (process.env.WEB_PORT) {
-    return parseInt(process.env.WEB_PORT, 10);
+    const p = parseInt(process.env.WEB_PORT, 10);
+    if (!SENSITIVE_PORTS.includes(p)) return p;
   }
-  return 51821; // Unique WireGuard internal web port for VPS deployment
+  return 51821; // Dedicated WireGuard internal web port for VPS deployment
 }
 
 // Load or Generate Master Security Passkey
@@ -1286,8 +1296,6 @@ app.get('/api/settings', requireVpnOrAuth, (_req: Request, res: Response) => {
   });
 });
 
-const SENSITIVE_PORTS = [20, 21, 22, 23, 25, 53, 67, 68, 80, 110, 143, 443, 8080, 8443, 3306, 5432, 6379, 27017];
-
 app.put('/api/settings', requireVpnOrAuth, (req: Request, res: Response) => {
   const { defaultMtu, defaultDns, defaultAllowedIps, listenPort, webPort, publicIp, dokployBridge } = req.body;
 
@@ -1363,7 +1371,10 @@ async function startServer() {
     const distPath = path.resolve(__dirname, 'dist');
     if (fs.existsSync(distPath)) {
       app.use(express.static(distPath));
-      app.get('*', (_req: Request, res: Response) => {
+      app.get('*', (req: Request, res: Response) => {
+        if (req.path.startsWith('/api/')) {
+          return res.status(404).json({ error: 'API endpoint not found' });
+        }
         res.sendFile(path.resolve(distPath, 'index.html'));
       });
     }

@@ -361,20 +361,47 @@ function installWireGuard() {
 		exit 1
 	fi
 
+	echo -e "${CYAN}[*] Loading WireGuard and networking kernel modules...${NC}"
+	modprobe wireguard >/dev/null 2>&1 || { apt-get install -y "linux-headers-$(uname -r)" wireguard-dkms >/dev/null 2>&1 || true; modprobe wireguard >/dev/null 2>&1 || true; }
+	modprobe iptable_nat >/dev/null 2>&1 || true
+	modprobe iptable_mangle >/dev/null 2>&1 || true
+	modprobe ip6table_nat >/dev/null 2>&1 || true
+	modprobe xt_mark >/dev/null 2>&1 || true
+	modprobe xt_hl >/dev/null 2>&1 || true
+	modprobe ipt_TTL >/dev/null 2>&1 || true
+	modprobe tcp_bbr >/dev/null 2>&1 || true
+
+	# Detect whether host genuinely supports IPv6 in kernel and networking stack
+	local HAS_IPV6=0
+	if [[ -f /proc/net/if_inet6 ]] && [[ $(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || echo 1) -eq 0 ]]; then
+		if ip -6 addr show dev lo 2>/dev/null | grep -q inet6; then
+			HAS_IPV6=1
+		fi
+	fi
+
 	echo -e "${CYAN}[*] Applying BBR, TTL=64 Normalization, and MSS Clamping sysctl rules...${NC}"
 	SYSCTL_CONF="/etc/sysctl.d/99-wireguard-stealth.conf"
 	cat << 'SYSCTL_EOF' > "$SYSCTL_CONF"
 net.ipv4.ip_forward = 1
-net.ipv6.conf.all.disable_ipv6 = 0
-net.ipv6.conf.default.disable_ipv6 = 0
-net.ipv6.conf.all.forwarding = 0
 net.ipv4.tcp_mtu_probing = 1
 net.core.default_qdisc = fq
-net.ipv4.tcp_congestion_control = bbr
 net.ipv4.tcp_fastopen = 3
 net.core.rmem_max = 67108864
 net.core.wmem_max = 67108864
 SYSCTL_EOF
+
+	if [[ "${HAS_IPV6}" -eq 1 ]]; then
+		cat << 'SYSCTL_V6_EOF' >> "$SYSCTL_CONF"
+net.ipv6.conf.all.disable_ipv6 = 0
+net.ipv6.conf.default.disable_ipv6 = 0
+net.ipv6.conf.all.forwarding = 1
+SYSCTL_V6_EOF
+	fi
+
+	if lsmod 2>/dev/null | grep -q bbr || grep -q bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
+		echo "net.ipv4.tcp_congestion_control = bbr" >> "$SYSCTL_CONF"
+	fi
+
 	sysctl --system -q >/dev/null 2>&1 || sysctl -p "$SYSCTL_CONF" >/dev/null 2>&1 || true
 
 	mkdir -p /etc/wireguard
@@ -403,6 +430,7 @@ CLIENT_DNS_2=${CLIENT_DNS_2}
 ALLOWED_IPS=${ALLOWED_IPS}
 WEB_PORT=${WEB_PORT:-51821}
 ADMIN_PASSKEY=${ADMIN_PASSKEY}
+HAS_IPV6=${HAS_IPV6}
 PARAMS_EOF
 	chmod 600 /etc/wireguard/params
 
@@ -414,28 +442,114 @@ ADMIN_PASSKEY="${ADMIN_PASSKEY}"
 ENV_EOF
 	chmod 600 /etc/wireguard/manager.env
 
+	# Probe host iptables mangle capabilities to prevent wg-quick exit aborts
+	local HAS_TCPMSS=0
+	if iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -o "${SERVER_PUB_NIC}" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; then
+		iptables -t mangle -D POSTROUTING -p tcp --tcp-flags SYN,RST SYN -o "${SERVER_PUB_NIC}" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+		HAS_TCPMSS=1
+	fi
+
+	local HAS_TTL=0
+	if iptables -t mangle -A POSTROUTING -o "${SERVER_PUB_NIC}" -j TTL --ttl-set 64 2>/dev/null; then
+		iptables -t mangle -D POSTROUTING -o "${SERVER_PUB_NIC}" -j TTL --ttl-set 64 2>/dev/null || true
+		HAS_TTL=1
+	fi
+
+	# Determine server address (IPv4-only if IPv6 unsupported by host)
+	local WG_SERVER_ADDRESS="${SERVER_WG_IPV4}/24"
+	if [[ "${HAS_IPV6}" -eq 1 ]]; then
+		WG_SERVER_ADDRESS="${SERVER_WG_IPV4}/24,${SERVER_WG_IPV6}/64"
+	fi
+
 	cat << WG_SERVER_EOF > "/etc/wireguard/${SERVER_WG_NIC}.conf"
 [Interface]
-Address = ${SERVER_WG_IPV4}/24,${SERVER_WG_IPV6}/64
+Address = ${WG_SERVER_ADDRESS}
 ListenPort = ${SERVER_PORT}
 PrivateKey = ${SERVER_PRIV_KEY}
 MTU = 1420
 SaveConfig = false
 
-# --- STEALTH & PACKET NORMALIZATION FIREWALL RULES ---
-PostUp = iptables -I INPUT -p udp --dport ${SERVER_PORT} -j ACCEPT
-PostUp = iptables -A FORWARD -i ${SERVER_WG_NIC} -j ACCEPT; iptables -t nat -A POSTROUTING -o ${SERVER_PUB_NIC} -j MASQUERADE
-PostUp = iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -o ${SERVER_PUB_NIC} -j TCPMSS --clamp-mss-to-pmtu
-PostUp = iptables -t mangle -A POSTROUTING -o ${SERVER_PUB_NIC} -j TTL --ttl-set 64
-PostDown = iptables -D INPUT -p udp --dport ${SERVER_PORT} -j ACCEPT
-PostDown = iptables -D FORWARD -i ${SERVER_WG_NIC} -j ACCEPT; iptables -t nat -D POSTROUTING -o ${SERVER_PUB_NIC} -j MASQUERADE
-PostDown = iptables -t mangle -D POSTROUTING -p tcp --tcp-flags SYN,RST SYN -o ${SERVER_PUB_NIC} -j TCPMSS --clamp-mss-to-pmtu
-PostDown = iptables -t mangle -D POSTROUTING -o ${SERVER_PUB_NIC} -j TTL --ttl-set 64
+# --- STEALTH & PACKET ROUTING FIREWALL RULES ---
+PostUp = iptables -I INPUT -p udp --dport ${SERVER_PORT} -j ACCEPT 2>/dev/null || true
+PostUp = iptables -A FORWARD -i ${SERVER_WG_NIC} -j ACCEPT 2>/dev/null || true
+PostUp = iptables -A FORWARD -o ${SERVER_WG_NIC} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+PostUp = iptables -t nat -A POSTROUTING -o ${SERVER_PUB_NIC} -j MASQUERADE 2>/dev/null || true
+PostDown = iptables -D INPUT -p udp --dport ${SERVER_PORT} -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D FORWARD -i ${SERVER_WG_NIC} -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D FORWARD -o ${SERVER_WG_NIC} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+PostDown = iptables -t nat -D POSTROUTING -o ${SERVER_PUB_NIC} -j MASQUERADE 2>/dev/null || true
 WG_SERVER_EOF
+
+	if [[ "${HAS_TCPMSS}" -eq 1 ]]; then
+		cat << 'EOF_MSS' >> "/etc/wireguard/${SERVER_WG_NIC}.conf"
+PostUp = iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -o eth_dummy -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+PostDown = iptables -t mangle -D POSTROUTING -p tcp --tcp-flags SYN,RST SYN -o eth_dummy -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+EOF_MSS
+		sed -i "s|eth_dummy|${SERVER_PUB_NIC}|g" "/etc/wireguard/${SERVER_WG_NIC}.conf"
+	fi
+
+	if [[ "${HAS_TTL}" -eq 1 ]]; then
+		cat << 'EOF_TTL' >> "/etc/wireguard/${SERVER_WG_NIC}.conf"
+PostUp = iptables -t mangle -A POSTROUTING -o eth_dummy -j TTL --ttl-set 64 2>/dev/null || true
+PostDown = iptables -t mangle -D POSTROUTING -o eth_dummy -j TTL --ttl-set 64 2>/dev/null || true
+EOF_TTL
+		sed -i "s|eth_dummy|${SERVER_PUB_NIC}|g" "/etc/wireguard/${SERVER_WG_NIC}.conf"
+	fi
+
+	if [[ "${HAS_IPV6}" -eq 1 ]]; then
+		cat << 'EOF_V6' >> "/etc/wireguard/${SERVER_WG_NIC}.conf"
+PostUp = ip6tables -A FORWARD -i wg_dummy -j ACCEPT 2>/dev/null || true
+PostUp = ip6tables -A FORWARD -o wg_dummy -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+PostUp = ip6tables -t nat -A POSTROUTING -o eth_dummy -j MASQUERADE 2>/dev/null || true
+PostDown = ip6tables -D FORWARD -i wg_dummy -j ACCEPT 2>/dev/null || true
+PostDown = ip6tables -D FORWARD -o wg_dummy -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+PostDown = ip6tables -t nat -D POSTROUTING -o eth_dummy -j MASQUERADE 2>/dev/null || true
+EOF_V6
+		sed -i "s|wg_dummy|${SERVER_WG_NIC}|g" "/etc/wireguard/${SERVER_WG_NIC}.conf"
+		sed -i "s|eth_dummy|${SERVER_PUB_NIC}|g" "/etc/wireguard/${SERVER_WG_NIC}.conf"
+	fi
+
 	chmod 600 "/etc/wireguard/${SERVER_WG_NIC}.conf"
 
+	# Clean any stale or hanging wireguard interfaces
+	wg-quick down "${SERVER_WG_NIC}" >/dev/null 2>&1 || true
+	ip link set "${SERVER_WG_NIC}" down >/dev/null 2>&1 || true
+	ip link delete dev "${SERVER_WG_NIC}" >/dev/null 2>&1 || true
+	systemctl stop "wg-quick@${SERVER_WG_NIC}" >/dev/null 2>&1 || true
+
+	systemctl daemon-reload >/dev/null 2>&1 || true
 	systemctl enable "wg-quick@${SERVER_WG_NIC}" >/dev/null 2>&1 || true
-	systemctl restart "wg-quick@${SERVER_WG_NIC}"
+
+	echo -e "${CYAN}[*] Starting WireGuard daemon (wg-quick@${SERVER_WG_NIC})...${NC}"
+	if ! systemctl restart "wg-quick@${SERVER_WG_NIC}"; then
+		echo -e "${YELLOW}[!] Notice: Initial start encountered host constraint. Auto-diagnosing and healing...${NC}"
+		journalctl -xeu "wg-quick@${SERVER_WG_NIC}" --no-pager -n 12 2>/dev/null || true
+
+		# Clean hung interface
+		wg-quick down "${SERVER_WG_NIC}" >/dev/null 2>&1 || true
+		ip link delete dev "${SERVER_WG_NIC}" >/dev/null 2>&1 || true
+
+		# Strip IPv6 if present
+		if grep -q "fd42:42:42::" "/etc/wireguard/${SERVER_WG_NIC}.conf" 2>/dev/null; then
+			echo -e "${YELLOW}[*] Stripping IPv6 addresses (host kernel lacks IPv6)...${NC}"
+			sed -i -E "s|,fd42:42:42::[0-9a-fA-F:]+/64||g" "/etc/wireguard/${SERVER_WG_NIC}.conf"
+			sed -i "/ip6tables/d" "/etc/wireguard/${SERVER_WG_NIC}.conf"
+		fi
+
+		# Strip any failing mangle targets
+		sed -i "/TTL --ttl-set/d" "/etc/wireguard/${SERVER_WG_NIC}.conf"
+		sed -i "/TCPMSS --clamp-mss-to-pmtu/d" "/etc/wireguard/${SERVER_WG_NIC}.conf"
+
+		# Re-attempt startup
+		systemctl restart "wg-quick@${SERVER_WG_NIC}" 2>/dev/null || wg-quick up "${SERVER_WG_NIC}" 2>/dev/null || true
+	fi
+
+	if systemctl is-active --quiet "wg-quick@${SERVER_WG_NIC}" || wg show "${SERVER_WG_NIC}" &>/dev/null; then
+		echo -e "${GREEN}[✔] WireGuard interface ${SERVER_WG_NIC} started and active!${NC}"
+	else
+		echo -e "${RED}[ERROR] WireGuard failed to start. Journal log:${NC}"
+		journalctl -xeu "wg-quick@${SERVER_WG_NIC}" --no-pager -n 20 2>/dev/null || true
+	fi
 
 	newClientInternal "${CLIENT_NAME}"
 
@@ -594,11 +708,28 @@ function newClientInternal() {
 	mkdir -p /etc/wireguard/clients
 	local CLIENT_CONF_PATH="/etc/wireguard/clients/${CLIENT_NAME}.conf"
 
+	local HAS_SERVER_IPV6=0
+	if grep -q "fd42:42:42::" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" 2>/dev/null; then
+		HAS_SERVER_IPV6=1
+	fi
+
+	local CLIENT_ADDRESS="${CLIENT_WG_IPV4}/32"
+	local PEER_ALLOWED_IPS="${CLIENT_WG_IPV4}/32"
+	if [[ "${HAS_SERVER_IPV6}" -eq 1 ]]; then
+		CLIENT_ADDRESS="${CLIENT_WG_IPV4}/32,${CLIENT_WG_IPV6}/128"
+		PEER_ALLOWED_IPS="${CLIENT_WG_IPV4}/32,${CLIENT_WG_IPV6}/128"
+	fi
+
+	local CLIENT_DNS_LINE="${CLIENT_DNS_1}"
+	if [[ -n "${CLIENT_DNS_2}" && "${CLIENT_DNS_2}" != "${CLIENT_DNS_1}" ]]; then
+		CLIENT_DNS_LINE="${CLIENT_DNS_1}, ${CLIENT_DNS_2}"
+	fi
+
 	cat << CLIENT_EOF > "$CLIENT_CONF_PATH"
 [Interface]
 PrivateKey = ${CLIENT_PRIV_KEY}
-Address = ${CLIENT_WG_IPV4}/32,${CLIENT_WG_IPV6}/128
-DNS = ${CLIENT_DNS_1},${CLIENT_DNS_2}
+Address = ${CLIENT_ADDRESS}
+DNS = ${CLIENT_DNS_LINE}
 MTU = 1420
 
 [Peer]
@@ -618,7 +749,7 @@ CLIENT_EOF
 [Peer]
 PublicKey = ${CLIENT_PUB_KEY}
 PresharedKey = ${CLIENT_PRE_SHARED_KEY}
-AllowedIPs = ${CLIENT_WG_IPV4}/32,${CLIENT_WG_IPV6}/128
+AllowedIPs = ${PEER_ALLOWED_IPS}
 PEER_EOF
 
 	if command -v wg-quick &>/dev/null && command -v wg &>/dev/null; then
@@ -1104,7 +1235,7 @@ function settingsManager() {
 				while true; do
 					read -rp "Enter Web Console Port [1024-65535, default 51821]: " -e -i "${WEB_PORT:-51821}" NEW_WEB
 					if isSensitivePort "$NEW_WEB"; then
-						echo -e "${RED}[!] Port ${NEW_WEB} is a sensitive service port (conflicts with 80/443/8080). Please choose a dedicated port.${NC}"
+						echo -e "${RED}[!] Port ${NEW_WEB} is a sensitive service port (conflicts with 80/443/8080/8443). Please choose a dedicated port.${NC}"
 						continue
 					fi
 					WEB_PORT="$NEW_WEB"
