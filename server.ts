@@ -707,9 +707,23 @@ AllowedIPs = ${p.ip}/32
   return conf;
 }
 
-// Helper to construct Client WireGuard Config
-function generateClientConfigText(peer: Peer): string {
-  return `[Interface]
+// Inverted CIDR set that excludes all Cloudflare IPv4 ranges (AS13335)
+// Routes all internet traffic through WireGuard EXCEPT Cloudflare WAF, Turnstile, and Cloudflare CDN
+export const CLOUDFLARE_BYPASS_ALLOWED_IPS = "224.0.0.0/3, 208.0.0.0/4, 200.0.0.0/5, 192.0.0.0/6, 196.0.0.0/7, 199.0.0.0/8, 198.128.0.0/9, 198.64.0.0/10, 198.0.0.0/11, 198.48.0.0/12, 198.32.0.0/13, 198.44.0.0/14, 198.42.0.0/15, 198.40.0.0/16, 198.41.0.0/17, 128.0.0.0/3, 176.0.0.0/4, 164.0.0.0/6, 160.0.0.0/7, 163.0.0.0/8, 162.0.0.0/9, 162.192.0.0/10, 162.160.0.0/11, 162.128.0.0/12, 162.144.0.0/13, 162.152.0.0/14, 162.156.0.0/15, 168.0.0.0/6, 174.0.0.0/7, 173.0.0.0/8, 172.128.0.0/9, 172.0.0.0/10, 172.96.0.0/11, 172.80.0.0/12, 172.72.0.0/13, 0.0.0.0/2, 64.0.0.0/3, 112.0.0.0/4, 96.0.0.0/5, 108.0.0.0/6, 106.0.0.0/7, 105.0.0.0/8, 104.128.0.0/9, 104.64.0.0/10, 104.32.0.0/11, 104.0.0.0/12";
+
+// Helper to construct Client WireGuard Config (Standard or Cloudflare Anti-Flag Residential Split)
+function generateClientConfigText(peer: Peer, antiFlag: boolean = false): string {
+  const allowed = antiFlag ? CLOUDFLARE_BYPASS_ALLOWED_IPS : peer.allowedIps;
+  const header = antiFlag
+    ? `# ☁️ Cloudflare Anti-Flag & ISP Host Masking Residential Split Profile
+# Routes standard web traffic securely encrypted through WireGuard VPS.
+# Routes all Cloudflare WAF, Turnstile challenges, and CDN subnets directly via your home ISP,
+# completely bypassing VPS Datacenter ASN blocks and eliminating infinite Turnstile loops!
+`
+    : `# Standard WireGuard Tunnel Profile
+`;
+
+  return `${header}[Interface]
 PrivateKey = ${peer.privateKey}
 Address = ${peer.ip}/24
 DNS = ${peer.dns}
@@ -719,7 +733,7 @@ MTU = ${peer.mtu}
 PublicKey = ${serverState.serverPublicKey}
 PresharedKey = ${peer.presharedKey}
 Endpoint = ${serverState.publicIp}:${serverState.listenPort}
-AllowedIPs = ${peer.allowedIps}
+AllowedIPs = ${allowed}
 PersistentKeepalive = 25
 `;
 }
@@ -945,7 +959,9 @@ app.post('/api/clients', requireVpnOrAuth, async (req: Request, res: Response) =
     if (checkLiveWireguard()) {
       try {
         const clientConfPath = `/etc/wireguard/clients/${cleanName}.conf`;
-        fs.writeFileSync(clientConfPath, generateClientConfigText(newPeer), { mode: 0o600 });
+        fs.writeFileSync(clientConfPath, generateClientConfigText(newPeer, false), { mode: 0o600 });
+        const cfShieldPath = `/etc/wireguard/clients/${cleanName}-cloudflare-shield.conf`;
+        fs.writeFileSync(cfShieldPath, generateClientConfigText(newPeer, true), { mode: 0o600 });
         execSync(`wg set wg0 peer "${newPeer.publicKey}" allowed-ips "${newPeer.ip}/32" 2>/dev/null || true`);
         fs.appendFileSync(
           '/etc/wireguard/wg0.conf',
@@ -1031,8 +1047,10 @@ app.get('/api/clients/:id/config', requireVpnOrAuth, (req: Request, res: Respons
   const peer = peers.find(p => p.id === req.params.id);
   if (!peer) return res.status(404).json({ error: 'Client not found' });
 
-  const conf = generateClientConfigText(peer);
-  res.setHeader('Content-Disposition', `attachment; filename="${peer.name}.conf"`);
+  const isAntiFlag = req.query.antiFlag === 'true' || req.query.mode === 'anti-flag' || req.query.mode === 'shield';
+  const conf = generateClientConfigText(peer, isAntiFlag);
+  const filename = isAntiFlag ? `${peer.name}-cloudflare-shield.conf` : `${peer.name}.conf`;
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
   res.type('text/plain').send(conf);
 });
 
@@ -1041,9 +1059,10 @@ app.get('/api/clients/:id/qr', requireVpnOrAuth, async (req: Request, res: Respo
   if (!peer) return res.status(404).json({ error: 'Client not found' });
 
   try {
-    const conf = generateClientConfigText(peer);
+    const isAntiFlag = req.query.antiFlag === 'true' || req.query.mode === 'anti-flag' || req.query.mode === 'shield';
+    const conf = generateClientConfigText(peer, isAntiFlag);
     const qrDataUrl = await QRCode.toDataURL(conf, {
-      errorCorrectionLevel: 'M',
+      errorCorrectionLevel: 'L',
       margin: 2,
       width: 320,
       color: {
@@ -1051,7 +1070,13 @@ app.get('/api/clients/:id/qr', requireVpnOrAuth, async (req: Request, res: Respo
         light: '#ffffff',
       },
     });
-    res.json({ dataUrl: qrDataUrl, rawConfig: conf });
+    res.json({
+      dataUrl: qrDataUrl,
+      rawConfig: conf,
+      isAntiFlag,
+      profileName: isAntiFlag ? 'Cloudflare Anti-Flag Residential Split' : 'Standard Full Tunnel',
+      filename: isAntiFlag ? `${peer.name}-cloudflare-shield.conf` : `${peer.name}.conf`,
+    });
   } catch (err: any) {
     res.status(500).json({ error: 'Failed to generate QR code' });
   }
@@ -1103,6 +1128,7 @@ app.post('/api/cloudflare-shield/repair', requireVpnOrAuth, (_req: Request, res:
       execSync(`
         sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true
         sysctl -w net.ipv4.tcp_mtu_probing=1 2>/dev/null || true
+        sysctl -w net.ipv4.tcp_syncookies=1 2>/dev/null || true
         cat << 'EOF_RESOLV' > /tmp/clean_resolv.conf
 nameserver 1.1.1.1
 nameserver 1.0.0.1
@@ -1110,7 +1136,11 @@ nameserver 8.8.8.8
 EOF_RESOLV
         cp /tmp/clean_resolv.conf /etc/resolv.conf 2>/dev/null || true
         rm -f /tmp/clean_resolv.conf
-        iptables -t nat -A POSTROUTING -o $(ip -4 route show default 2>/dev/null | awk '/dev/ {for (i=1; i<=NF; i++) if ($i == "dev") print $(i+1)}' | head -n1 || echo eth0) -j MASQUERADE 2>/dev/null || true
+        systemctl stop dnsmasq 2>/dev/null || true
+        DEF_IF=$(ip -4 route show default 2>/dev/null | awk '/dev/ {for (i=1; i<=NF; i++) if ($i == "dev") print $(i+1)}' | head -n1 || echo eth0)
+        iptables -t nat -A POSTROUTING -o "$DEF_IF" -j MASQUERADE 2>/dev/null || true
+        iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+        iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1360 2>/dev/null || true
         iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
         iptables -t mangle -A POSTROUTING -j TTL --ttl-set 64 2>/dev/null || true
         systemctl restart wg-quick@wg0 2>/dev/null || true

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, Plus, ShieldCheck, Zap, HardDrive } from 'lucide-react';
+import { X, Plus, ShieldCheck, Zap, HardDrive, Cloud } from 'lucide-react';
 
 interface AddPeerModalProps {
   isOpen: boolean;
@@ -10,6 +10,8 @@ interface AddPeerModalProps {
   defaultAllowedIps: string;
 }
 
+const CF_BYPASS_CIDRS = "224.0.0.0/3, 208.0.0.0/4, 200.0.0.0/5, 192.0.0.0/6, 196.0.0.0/7, 199.0.0.0/8, 198.128.0.0/9, 198.64.0.0/10, 198.0.0.0/11, 198.48.0.0/12, 198.32.0.0/13, 198.44.0.0/14, 198.42.0.0/15, 198.40.0.0/16, 198.41.0.0/17, 128.0.0.0/3, 176.0.0.0/4, 164.0.0.0/6, 160.0.0.0/7, 163.0.0.0/8, 162.0.0.0/9, 162.192.0.0/10, 162.160.0.0/11, 162.128.0.0/12, 162.144.0.0/13, 162.152.0.0/14, 162.156.0.0/15, 168.0.0.0/6, 174.0.0.0/7, 173.0.0.0/8, 172.128.0.0/9, 172.0.0.0/10, 172.96.0.0/11, 172.80.0.0/12, 172.72.0.0/13, 0.0.0.0/2, 64.0.0.0/3, 112.0.0.0/4, 96.0.0.0/5, 108.0.0.0/6, 106.0.0.0/7, 105.0.0.0/8, 104.128.0.0/9, 104.64.0.0/10, 104.32.0.0/11, 104.0.0.0/12";
+
 export const AddPeerModal: React.FC<AddPeerModalProps> = ({
   isOpen,
   onClose,
@@ -19,7 +21,7 @@ export const AddPeerModal: React.FC<AddPeerModalProps> = ({
   defaultAllowedIps,
 }) => {
   const [name, setName] = useState('');
-  const [allowedIpsPreset, setAllowedIpsPreset] = useState<'stealth' | 'full' | 'custom'>('stealth');
+  const [allowedIpsPreset, setAllowedIpsPreset] = useState<'cloudflare' | 'stealth' | 'full' | 'custom'>('cloudflare');
   const [customAllowedIps, setCustomAllowedIps] = useState('0.0.0.0/1, 128.0.0.0/1');
   const [dnsPreset, setDnsPreset] = useState<'adguard' | 'quad9' | 'cloudflare' | 'custom'>('adguard');
   const [customDns, setCustomDns] = useState(defaultDns);
@@ -40,7 +42,8 @@ export const AddPeerModal: React.FC<AddPeerModalProps> = ({
     setError(null);
 
     let finalAllowedIps = defaultAllowedIps;
-    if (allowedIpsPreset === 'stealth') finalAllowedIps = '0.0.0.0/1, 128.0.0.0/1';
+    if (allowedIpsPreset === 'cloudflare') finalAllowedIps = CF_BYPASS_CIDRS;
+    else if (allowedIpsPreset === 'stealth') finalAllowedIps = '0.0.0.0/1, 128.0.0.0/1';
     else if (allowedIpsPreset === 'full') finalAllowedIps = '0.0.0.0/0';
     else finalAllowedIps = customAllowedIps;
 
@@ -125,32 +128,47 @@ export const AddPeerModal: React.FC<AddPeerModalProps> = ({
             <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
               Allowed IPs (Tunnel Scope)
             </label>
-            <div className="grid grid-cols-2 gap-2 mb-2">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-2">
+              <button
+                type="button"
+                onClick={() => setAllowedIpsPreset('cloudflare')}
+                className={`p-2.5 text-xs font-medium rounded-xl border text-left transition ${
+                  allowedIpsPreset === 'cloudflare'
+                    ? 'bg-amber-950/50 border-amber-500 text-amber-300 shadow-sm'
+                    : 'bg-[#070b14] border-slate-800 text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <div className="font-bold flex items-center gap-1.5">
+                  <Cloud className="w-3.5 h-3.5 text-amber-400" />
+                  Anti-Flag Direct
+                </div>
+                <div className="text-[10px] text-amber-400/80 mt-0.5">Bypasses Turnstile/WAF</div>
+              </button>
               <button
                 type="button"
                 onClick={() => setAllowedIpsPreset('stealth')}
-                className={`px-3 py-2 text-xs font-medium rounded-lg border text-left transition ${
+                className={`p-2.5 text-xs font-medium rounded-xl border text-left transition ${
                   allowedIpsPreset === 'stealth'
                     ? 'bg-purple-950/50 border-purple-500 text-purple-300'
                     : 'bg-[#070b14] border-slate-800 text-slate-400 hover:text-slate-200'
                 }`}
               >
-                <div className="font-semibold flex items-center gap-1.5">
+                <div className="font-bold flex items-center gap-1.5">
                   <ShieldCheck className="w-3.5 h-3.5 text-purple-400" />
-                  Stealth Split-Tunnel
+                  Stealth Split
                 </div>
-                <div className="text-[10px] text-slate-400 font-mono mt-0.5">0.0.0.0/1, 128.0.0.0/1</div>
+                <div className="text-[10px] text-slate-400 font-mono mt-0.5">0.0.0.0/1, 128/1</div>
               </button>
               <button
                 type="button"
                 onClick={() => setAllowedIpsPreset('full')}
-                className={`px-3 py-2 text-xs font-medium rounded-lg border text-left transition ${
+                className={`p-2.5 text-xs font-medium rounded-xl border text-left transition ${
                   allowedIpsPreset === 'full'
                     ? 'bg-purple-950/50 border-purple-500 text-purple-300'
                     : 'bg-[#070b14] border-slate-800 text-slate-400 hover:text-slate-200'
                 }`}
               >
-                <div className="font-semibold flex items-center gap-1.5">
+                <div className="font-bold flex items-center gap-1.5">
                   <HardDrive className="w-3.5 h-3.5 text-purple-400" />
                   Full Tunnel
                 </div>

@@ -20,15 +20,18 @@ import {
   Globe,
   Server,
   Radio,
-  ArrowRight
+  ArrowRight,
+  QrCode
 } from 'lucide-react';
-import { StealthConfig, StealthAuditItem, CloudflareShieldStatus } from '../types';
+import { StealthConfig, StealthAuditItem, CloudflareShieldStatus, Peer } from '../types';
 
 interface StealthTabProps {
   onRefresh: () => void;
+  peers?: Peer[];
+  onSelectPeerForQr?: (peer: Peer) => void;
 }
 
-export const StealthTab: React.FC<StealthTabProps> = ({ onRefresh }) => {
+export const StealthTab: React.FC<StealthTabProps> = ({ onRefresh, peers = [], onSelectPeerForQr }) => {
   const [config, setConfig] = useState<StealthConfig | null>(null);
   const [listenPort, setListenPort] = useState<number>(51820);
   const [activeMangleRules, setActiveMangleRules] = useState<string[]>([]);
@@ -506,6 +509,80 @@ export const StealthTab: React.FC<StealthTabProps> = ({ onRefresh }) => {
               {savingProxy ? 'Saving...' : 'Save Upstream Proxy'}
             </button>
           </form>
+        </div>
+
+        {/* Client Device Anti-Flag & ISP Masking Direct Profile Generator */}
+        <div className="pt-4 border-t border-slate-800/80 space-y-3">
+          <div>
+            <h4 className="text-xs font-bold text-slate-100 flex items-center gap-1.5">
+              <Cloud className="w-4 h-4 text-amber-400" />
+              <span>Client Cloudflare Anti-Flag Residential Profile Generator</span>
+            </h4>
+            <p className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
+              Download or scan the zero-challenge residential profile for your device. Encrypts all general internet traffic through WireGuard while routing Cloudflare WAF, Turnstile, and CDN subnets via your direct home ISP.
+            </p>
+          </div>
+
+          {peers && peers.length > 0 ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5 pt-1">
+              {peers.map(peer => (
+                <div key={peer.id} className="p-3 bg-[#070b14] border border-slate-800 rounded-xl flex items-center justify-between gap-2 shadow-sm">
+                  <div className="min-w-0">
+                    <span className="text-xs font-bold text-white block truncate">{peer.name}</span>
+                    <span className="text-[10px] text-emerald-400 font-mono block">{peer.ip}</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <a
+                      href={`/api/clients/${peer.id}/config?antiFlag=true`}
+                      download={`${peer.name}-cloudflare-shield.conf`}
+                      className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 text-[11px] font-semibold border border-amber-500/30 transition shadow-sm"
+                      title="Download Cloudflare Anti-Flag .conf"
+                    >
+                      <Download className="w-3.5 h-3.5 text-amber-400" />
+                      <span>.conf</span>
+                    </a>
+                    {onSelectPeerForQr && (
+                      <button
+                        type="button"
+                        onClick={() => onSelectPeerForQr(peer)}
+                        className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-semibold border border-slate-700 transition"
+                        title="Show Anti-Flag QR Code"
+                      >
+                        <QrCode className="w-3.5 h-3.5 text-emerald-400" />
+                        <span>QR</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="p-3 bg-[#070b14] border border-slate-800/80 rounded-xl text-xs text-slate-400">
+              No WireGuard peers registered yet. Create a peer in the <strong className="text-white">Clients & Peers</strong> tab to generate your Cloudflare Anti-Flag profile.
+            </div>
+          )}
+        </div>
+
+        {/* Anti-Flag WAF Defense Blueprint Explained */}
+        <div className="p-4 bg-[#050811] border border-slate-800/80 rounded-2xl text-xs space-y-2">
+          <div className="font-bold text-slate-200 flex items-center gap-1.5">
+            <ShieldCheck className="w-4 h-4 text-emerald-400" />
+            <span>Why Cloudflare WAF Flags Standard VPNs & How Cookie Protects You:</span>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5 text-[11px] text-slate-400 leading-relaxed pt-1">
+            <div className="p-2.5 bg-[#0a0f1d] rounded-xl border border-slate-800/60">
+              <span className="font-bold text-amber-300 block mb-1">1. Datacenter ASN Cloaking</span>
+              Cloudflare flags VPS IP ranges (Hetzner, DO, AWS) with high threat scores. Our Anti-Flag profile routes all 22 Cloudflare edge subnets via your direct home ISP while encrypting everything else.
+            </div>
+            <div className="p-2.5 bg-[#0a0f1d] rounded-xl border border-slate-800/60">
+              <span className="font-bold text-cyan-300 block mb-1">2. Anti-Stall TCP MSS (1360)</span>
+              Cloudflare TLS handshakes and Turnstile captcha frames drop when WireGuard MTU fragments. Our kernel clamps MSS to 1360 on both FORWARD and POSTROUTING to ensure zero packet drop.
+            </div>
+            <div className="p-2.5 bg-[#0a0f1d] rounded-xl border border-slate-800/60">
+              <span className="font-bold text-purple-300 block mb-1">3. Anycast DNS & Safe Auto-Repair</span>
+              Never leaks local sockets or breaks host resolv.conf. If your host network ever experiences an issue, Safe Health Auto-Repair instantly restores clean Anycast DNS and routing in 1 second.
+            </div>
+          </div>
         </div>
       </div>
 

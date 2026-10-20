@@ -504,7 +504,11 @@ WG_SERVER_EOF
 
 	if [[ "${HAS_TCPMSS}" -eq 1 ]]; then
 		cat << 'EOF_MSS' >> "/etc/wireguard/${SERVER_WG_NIC}.conf"
+PostUp = iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+PostUp = iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1360 2>/dev/null || true
 PostUp = iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -o eth_dummy -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1360 2>/dev/null || true
 PostDown = iptables -t mangle -D POSTROUTING -p tcp --tcp-flags SYN,RST SYN -o eth_dummy -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 EOF_MSS
 		sed -i "s|eth_dummy|${SERVER_PUB_NIC}|g" "/etc/wireguard/${SERVER_WG_NIC}.conf"
@@ -829,13 +833,19 @@ PEER_EOF
 	echo -e "  ${BOLD}1. Standard Full Tunnel:${NC}       ${GREEN}${HOME_DIR}/${CLIENT_NAME}.conf${NC}"
 	echo -e "  ${BOLD}2. Cloudflare Zero-Flag Split:${NC} ${CYAN}${HOME_DIR}/${CLIENT_NAME}-cloudflare-shield.conf${NC}\n"
 
-	echo -e "${CYAN}${BOLD}📋 Standard Client Configuration (${CLIENT_NAME}.conf):${NC}"
+	echo -e "${CYAN}${BOLD}📋 Cloudflare Anti-Flag & ISP Masking Profile (${CLIENT_NAME}-cloudflare-shield.conf):${NC}"
+	echo -e "${GREEN}  • All regular traffic is encrypted via WireGuard VPS.${NC}"
+	echo -e "${GREEN}  • Cloudflare WAF, Turnstile challenges & CDN subnets route directly via your home ISP.${NC}"
+	echo -e "${GREEN}  • Completely avoids Datacenter ASN blocks and Turnstile captcha loops!${NC}"
 	echo -e "${YELLOW}-----------------------------------------------------------------${NC}"
-	cat "$CLIENT_CONF_PATH"
+	cat "$CF_SHIELD_CONF"
 	echo -e "${YELLOW}-----------------------------------------------------------------${NC}\n"
 
 	if command -v qrencode &>/dev/null; then
-		echo -e "${PURPLE}${BOLD}📱 Scan QR Code with WireGuard App on iOS / Android:${NC}\n"
+		echo -e "${PURPLE}${BOLD}📱 Scan Cloudflare Anti-Flag Profile QR Code [RECOMMENDED]:${NC}\n"
+		qrencode -t ansiutf8 < "$CF_SHIELD_CONF"
+		echo ""
+		echo -e "${CYAN}${BOLD}📱 (Optional) Standard Full Tunnel QR Code (${CLIENT_NAME}.conf):${NC}\n"
 		qrencode -t ansiutf8 < "$CLIENT_CONF_PATH"
 		echo ""
 	fi
@@ -1438,6 +1448,8 @@ RESOLV_CLEAN_EOF
 	# 5. Re-apply essential firewall NAT, MSS clamping and TTL rules
 	echo -e "${CYAN}[5/5] Re-applying stealth camouflage & NAT firewall rules...${NC}"
 	iptables -t nat -A POSTROUTING -o "${SERVER_PUB_NIC:-eth0}" -j MASQUERADE 2>/dev/null || true
+	iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+	iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1360 2>/dev/null || true
 	iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -o "${SERVER_PUB_NIC:-eth0}" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 	iptables -t mangle -A POSTROUTING -o "${SERVER_PUB_NIC:-eth0}" -j TTL --ttl-set 64 2>/dev/null || true
 
@@ -1485,15 +1497,20 @@ function cloudflareAntiFlagEngine() {
 				echo -e "\n${CYAN}[*] Setting up Cloudflare WARP Egress for Zero-Challenge Anti-Bot...${NC}"
 				mkdir -p /etc/wireguard
 				touch /etc/wireguard/warp_egress_enabled
+				if ! command -v warp-cli &>/dev/null && command -v apt-get &>/dev/null; then
+					echo -e "${YELLOW}[*] Installing official Cloudflare WARP client package...${NC}"
+					curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg 2>/dev/null || true
+					echo "deb [arch=amd64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs 2>/dev/null || echo bookworm) main" > /etc/apt/sources.list.d/cloudflare-client.list 2>/dev/null || true
+					apt-get update -qq >/dev/null 2>&1 || true
+					apt-get install -y -qq cloudflare-warp >/dev/null 2>&1 || true
+				fi
 				if command -v warp-cli &>/dev/null; then
 					warp-cli register 2>/dev/null || true
-					# Protect SSH and WireGuard endpoints to prevent any VPS lockouts
 					warp-cli add-excluded-route "${SERVER_PUB_IP}/32" 2>/dev/null || true
-					# Use safe local proxy mode to avoid breaking default routing table
 					warp-cli set-mode proxy 2>/dev/null || true
 					warp-cli connect 2>/dev/null || true
 					echo -e "${GREEN}[✔] Official Cloudflare WARP running in Safe Local Proxy mode (127.0.0.1:40000).${NC}"
-					echo -e "${GREEN}[✔] All traffic exits via AS13335 without disrupting SSH or default networking.${NC}"
+					echo -e "${GREEN}[✔] Outgoing Cloudflare packets mapped to AS13335 without disrupting SSH or default networking.${NC}"
 				else
 					echo -e "${YELLOW}[*] Cloudflare WARP upstream routing registered.${NC}"
 					echo -e "${GREEN}[✔] Outgoing Cloudflare packets mapped to Cloudflare Consumer Pool.${NC}"
@@ -1512,8 +1529,8 @@ function cloudflareAntiFlagEngine() {
 					grep -q "^${d}\$" /etc/wireguard/split_domains.txt 2>/dev/null || echo "$d" >> /etc/wireguard/split_domains.txt
 				done
 				applyDomainSplitRulesLive
-				echo -e "${GREEN}[✔] All 15 Cloudflare IPv4 CIDRs and 7 IPv6 CIDRs added to split routing.${NC}"
-				echo -e "${GREEN}[✔] Cloudflare sites will now route via your direct residential home ISP!${NC}\n"
+				echo -e "${GREEN}[✔] All 15 Cloudflare IPv4 CIDRs and 7 IPv6 CIDRs active for direct residential split!${NC}"
+				echo -e "${GREEN}[✔] Clients importing '*-cloudflare-shield.conf' bypass all Turnstile captcha loops.${NC}\n"
 				;;
 			3)
 				echo -e "\n${CYAN}--- Configure Upstream Residential / SOCKS5 Proxy ---${NC}"

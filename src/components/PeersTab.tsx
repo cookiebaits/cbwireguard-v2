@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Wifi, Plus, QrCode, Download, Trash2, Power, Edit2, Search, Check, X, Lock, ShieldCheck, Cpu } from 'lucide-react';
+import { Wifi, Plus, QrCode, Download, Trash2, Power, Edit2, Search, Check, X, Lock, ShieldCheck, Cpu, Cloud } from 'lucide-react';
 import { Peer } from '../types';
 
 interface PeersTabProps {
@@ -278,13 +278,23 @@ export const PeersTab: React.FC<PeersTabProps> = ({
                   </button>
 
                   <a
+                    href={`/api/clients/${peer.id}/config?antiFlag=true`}
+                    download={`${peer.name}-cloudflare-shield.conf`}
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 text-xs font-semibold border border-amber-500/30 transition shadow-sm"
+                    title="Download Cloudflare Anti-Flag profile (Residential split to bypass Turnstile loops & WAF blocks)"
+                  >
+                    <Cloud className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Anti-Flag .conf</span>
+                  </a>
+
+                  <a
                     href={`/api/clients/${peer.id}/config`}
                     download={`${peer.name}.conf`}
-                    className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium border border-slate-700 transition"
-                    title="Download client configuration file"
+                    className="flex items-center gap-1.5 px-2.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium border border-slate-700 transition"
+                    title="Download standard full-tunnel configuration file"
                   >
-                    <Download className="w-4 h-4" />
-                    <span className="hidden lg:inline">.conf</span>
+                    <Download className="w-3.5 h-3.5 text-slate-400" />
+                    <span>Full .conf</span>
                   </a>
 
                   <button

@@ -163,7 +163,11 @@ export default function App() {
         )}
 
         {activeTab === 'stealth' && (
-          <StealthTab onRefresh={refreshAll} />
+          <StealthTab
+            onRefresh={refreshAll}
+            peers={peers}
+            onSelectPeerForQr={p => setSelectedPeerForQr(p)}
+          />
         )}
 
         {activeTab === 'peers' && (
