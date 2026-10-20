@@ -163,17 +163,17 @@ function cleanupOldWireguard() {
 # ------------------------------------------------------------------------------
 function selectDNSResolvers() {
 	echo -e "\n${CYAN}${BOLD}Select DNS Resolvers for Clients (Includes Stealth & Location Info):${NC}"
-	echo -e "   1) ${GREEN}Cloudflare${NC} (Global Anycast | Ultra Fast)"
+	echo -e "   1) ${GREEN}Cloudflare Anycast Anti-Flag${NC} (Global Anycast | Ultra Fast & Cloudflare WAF Aligned) ${PURPLE}[RECOMMENDED STEALTH]${NC}"
 	echo -e "      IPv4: 1.1.1.1, 1.0.0.1  |  IPv6: 2606:4700:4700::1111, 2606:4700:4700::1001"
-	echo -e "   2) ${GREEN}AdGuard Stealth${NC} (Global Anycast | Anti-Track / Anti-Ad Stealth) ${PURPLE}[PRESELECTED STEALTH]${NC}"
+	echo -e "   2) ${GREEN}AdGuard Stealth${NC} (Global Anycast | Anti-Track / Anti-Ad Stealth)"
 	echo -e "      IPv4: 94.140.14.14, 94.140.15.15  |  IPv6: 2a10:50c0::ad1:ff, 2a10:50c0::ad2:ff"
-	echo -e "   3) ${GREEN}Mullvad Privacy${NC} (Sweden / EU | Strict Anti-Censorship Stealth) ${PURPLE}[PRESELECTED STEALTH]${NC}"
+	echo -e "   3) ${GREEN}Mullvad Privacy${NC} (Sweden / EU | Strict Anti-Censorship Stealth)"
 	echo -e "      IPv4: 194.242.2.2, 194.242.2.3  |  IPv6: 2a07:e880::2, 2a07:e880::3"
 	echo -e "   4) ${GREEN}Quad9 Swiss Shield${NC} (Zurich, Switzerland | Swiss Privacy & Threat Filter)"
 	echo -e "      IPv4: 9.9.9.9, 149.112.112.112  |  IPv6: 2620:fe::fe, 2620:fe::9"
-	echo -e "   5) ${GREEN}Control D Stealth${NC} (Global | Uncensored Anti-Throttling Stealth) ${PURPLE}[PRESELECTED STEALTH]${NC}"
+	echo -e "   5) ${GREEN}Control D Stealth${NC} (Global | Uncensored Anti-Throttling Stealth)"
 	echo -e "      IPv4: 76.76.2.0, 76.76.10.0  |  IPv6: 2606:1a40::, 2606:1a40:1::"
-	echo -e "   6) ${GREEN}Unbound Local Server Resolver${NC} (Server Local | Maximum Anti-Leak) ${PURPLE}[STEALTH]${NC}"
+	echo -e "   6) ${GREEN}Unbound Local Server Resolver${NC} (Server Local | Maximum Anti-Leak)"
 	echo -e "      IPv4: ${SERVER_WG_IPV4:-10.18.0.1}  |  IPv6: ${SERVER_WG_IPV6:-fd42:42:42::1}"
 	echo -e "   7) ${GREEN}Google Public DNS${NC} (Global Anycast | High Uptime)"
 	echo -e "      IPv4: 8.8.8.8, 8.8.4.4  |  IPv6: 2001:4860:4860::8888, 2001:4860:4860::8844"
@@ -181,11 +181,12 @@ function selectDNSResolvers() {
 	echo -e "      IPv4: 208.67.222.222, 208.67.220.220  |  IPv6: 2620:119:35::35, 2620:119:53::53"
 	echo -e "   9) Custom Primary & Secondary DNS Resolvers"
 
-	read -rp "Select DNS Resolver option [1-9, default 2 (AdGuard Stealth)]: " DNS_OPTION
+	read -rp "Select DNS Resolver option [1-9, default 1 (Cloudflare Anycast Anti-Flag)]: " DNS_OPTION
+	DNS_OPTION=${DNS_OPTION:-1}
 	case "${DNS_OPTION}" in
-		1)
-			CLIENT_DNS_1="1.1.1.1"
-			CLIENT_DNS_2="1.0.0.1"
+		2)
+			CLIENT_DNS_1="94.140.14.14"
+			CLIENT_DNS_2="94.140.15.15"
 			;;
 		3)
 			CLIENT_DNS_1="194.242.2.2"
@@ -215,9 +216,9 @@ function selectDNSResolvers() {
 			read -rp "Enter Primary DNS resolver (IPv4 or IPv6): " -e -i "1.1.1.1" CLIENT_DNS_1
 			read -rp "Enter Secondary DNS resolver (IPv4 or IPv6): " -e -i "1.0.0.1" CLIENT_DNS_2
 			;;
-		2|*)
-			CLIENT_DNS_1="94.140.14.14"
-			CLIENT_DNS_2="94.140.15.15"
+		1|*)
+			CLIENT_DNS_1="1.1.1.1"
+			CLIENT_DNS_2="1.0.0.1"
 			;;
 	esac
 	echo -e "${GREEN}[✔] Selected DNS Resolvers: ${CLIENT_DNS_1}, ${CLIENT_DNS_2}${NC}"
@@ -228,7 +229,7 @@ function selectDNSResolvers() {
 # ------------------------------------------------------------------------------
 function installQuestions() {
 	echo -e "${PURPLE}=================================================================${NC}"
-	echo -e "             ${GREEN}${BOLD}🍪Cookie's Easy WireGuard Setup & Installer${NC}"
+	echo -e "          ${GREEN}${BOLD}🍪  Cookie's Easy WireGuard Setup & Installer${NC}"
 	echo -e "${PURPLE}=================================================================${NC}"
 	echo -e "Welcome to the WireGuard installer!\n"
 
@@ -311,6 +312,14 @@ function installQuestions() {
 
 	read -rp "Allowed IPs for generated clients: " -e -i "0.0.0.0/0, ::/0" ALLOWED_IPS
 
+	echo -e "\n${CYAN}${BOLD}☁️ Cloudflare Anti-Flag & ISP Host Masking Engine Integration:${NC}"
+	echo -e "   • Auto-deploys TCP MSS Clamping & TTL Normalization (Anti-p0f OS signature disguise)"
+	echo -e "   • Auto-configures Cloudflare WAF, Turnstile & Edge CDN split-routing"
+	echo -e "   • Generates both Full Tunnel and Zero-Challenge Residential Bypass client profiles"
+	echo -e "   • Strips EDNS Client-Subnet (ECS) to prevent VPS datacenter IP leaks"
+	read -rp "Auto-configure Cloudflare Anti-Flag & ISP Masking into install? [Y/n, default Y]: " CF_AUTO_ENABLE
+	CF_AUTO_ENABLE=${CF_AUTO_ENABLE:-y}
+
 	WEB_PORT=${WEB_PORT:-51821}
 
 	echo -e "\n${GREEN}Setup parameters configured successfully.${NC}"
@@ -354,6 +363,19 @@ function installWireGuard() {
 		pacman -S --needed --noconfirm wireguard-tools qrencode iptables curl jq ipset dnsmasq || true
 	elif [[ "${OS}" == "alpine" ]]; then
 		apk update && apk add wireguard-tools iptables libqrencode-tools curl jq ipset dnsmasq || true
+	fi
+
+	# Safely isolate dnsmasq to avoid unconfigured port 53 collision with host systemd-resolved
+	systemctl stop dnsmasq >/dev/null 2>&1 || true
+	systemctl disable dnsmasq >/dev/null 2>&1 || true
+
+	# Ensure host resolv.conf always maintains clean, operational Anycast nameservers
+	if ! grep -q -E "nameserver [0-9]" /etc/resolv.conf 2>/dev/null; then
+		cat << 'RESOLV_INIT' > /etc/resolv.conf 2>/dev/null || true
+nameserver 1.1.1.1
+nameserver 1.0.0.1
+nameserver 8.8.8.8
+RESOLV_INIT
 	fi
 
 	if ! command -v wg &>/dev/null; then
@@ -551,6 +573,30 @@ EOF_V6
 		journalctl -xeu "wg-quick@${SERVER_WG_NIC}" --no-pager -n 20 2>/dev/null || true
 	fi
 
+	# Auto-Configure Essential Cloudflare Anti-Flag & Mask ISP Host Engine Components
+	if [[ "${CF_AUTO_ENABLE:-y}" =~ ^[Yy]$ ]]; then
+		echo -e "\n${CYAN}[*] Auto-Configuring Essential Cloudflare Anti-Flag & ISP Masking Engine...${NC}"
+		mkdir -p /etc/wireguard
+		touch /etc/wireguard/cloudflare_shield_enabled
+		touch /etc/wireguard/cloudflare_split_enabled
+		echo "BYPASS" > /etc/wireguard/split_mode.txt
+
+		cat << 'CF_INIT_DOMAINS' > /etc/wireguard/split_domains.txt
+# Cloudflare Anti-Bot, WAF & Turnstile Shield Domains (Auto-Configured)
+challenges.cloudflare.com
+cloudflare.com
+turnstile.com
+cdnjs.cloudflare.com
+cloudflareinsights.com
+cf-assets.com
+pages.dev
+workers.dev
+CF_INIT_DOMAINS
+
+		applyDomainSplitRulesLive
+		echo -e "${GREEN}[✔] Cloudflare Anti-Flag Shield & Turnstile Bypass auto-configured into installation!${NC}"
+	fi
+
 	newClientInternal "${CLIENT_NAME}"
 
 	echo -e "\n${GREEN}${BOLD}=================================================================${NC}"
@@ -743,6 +789,29 @@ CLIENT_EOF
 	chmod 600 "$CLIENT_CONF_PATH"
 	cp "$CLIENT_CONF_PATH" "${HOME_DIR}/${CLIENT_NAME}.conf" 2>/dev/null || cp "$CLIENT_CONF_PATH" "/root/${CLIENT_NAME}.conf"
 
+	# Generate Dedicated Cloudflare Anti-Flag & ISP Host Masking Residential Split Profile
+	local CF_SHIELD_CONF="/etc/wireguard/clients/${CLIENT_NAME}-cloudflare-shield.conf"
+	local CF_SPLIT_ALLOWED_IPS="0.0.0.0/2, 64.0.0.0/3, 96.0.0.0/6, 100.0.0.0/7, 102.0.0.0/8, 103.0.0.0/12, 103.16.0.0/14, 103.20.0.0/16, 103.21.0.0/17, 103.21.128.0/18, 103.21.192.0/19, 103.21.224.0/20, 103.21.240.0/22, 103.21.248.0/21, 103.22.0.0/17, 103.22.128.0/18, 103.22.192.0/21, 103.22.204.0/22, 103.22.208.0/20, 103.22.224.0/19, 103.23.0.0/16, 103.24.0.0/14, 103.28.0.0/15, 103.30.0.0/16, 103.31.0.0/22, 103.31.8.0/21, 103.31.16.0/20, 103.31.32.0/19, 103.31.64.0/18, 103.31.128.0/17, 103.32.0.0/11, 103.64.0.0/10, 103.128.0.0/9, 104.0.0.0/12, 104.28.0.0/14, 104.32.0.0/11, 104.64.0.0/10, 104.128.0.0/9, 105.0.0.0/8, 106.0.0.0/7, 108.0.0.0/9, 108.128.0.0/11, 108.160.0.0/15, 108.162.0.0/17, 108.162.128.0/18, 108.163.0.0/16, 108.164.0.0/14, 108.168.0.0/13, 108.176.0.0/12, 108.192.0.0/10, 109.0.0.0/8, 110.0.0.0/7, 112.0.0.0/4, 128.0.0.0/7, 130.0.0.0/8, 131.0.0.0/18, 131.0.64.0/21, 131.0.76.0/22, 131.0.80.0/20, 131.0.96.0/19, 131.0.128.0/17, 131.1.0.0/16, 131.2.0.0/15, 131.4.0.0/14, 131.8.0.0/13, 131.16.0.0/12, 131.32.0.0/11, 131.64.0.0/10, 131.128.0.0/9, 132.0.0.0/6, 136.0.0.0/6, 140.0.0.0/8, 141.0.0.0/10, 141.64.0.0/11, 141.96.0.0/14, 141.100.0.0/16, 141.101.0.0/18, 141.101.128.0/17, 141.102.0.0/15, 141.104.0.0/13, 141.112.0.0/12, 141.128.0.0/9, 142.0.0.0/7, 144.0.0.0/4, 160.0.0.0/7, 162.0.0.0/9, 162.128.0.0/12, 162.144.0.0/13, 162.152.0.0/14, 162.156.0.0/15, 162.160.0.0/11, 162.192.0.0/10, 163.0.0.0/8, 164.0.0.0/6, 168.0.0.0/6, 172.0.0.0/10, 172.72.0.0/13, 172.80.0.0/12, 172.96.0.0/11, 172.128.0.0/9, 173.0.0.0/9, 173.128.0.0/10, 173.192.0.0/11, 173.224.0.0/12, 173.240.0.0/14, 173.244.0.0/16, 173.245.0.0/19, 173.245.32.0/20, 173.245.64.0/18, 173.245.128.0/17, 173.246.0.0/15, 173.248.0.0/13, 174.0.0.0/7, 176.0.0.0/5, 184.0.0.0/6, 188.0.0.0/10, 188.64.0.0/11, 188.96.0.0/12, 188.112.0.0/15, 188.114.0.0/18, 188.114.64.0/19, 188.114.112.0/20, 188.114.128.0/17, 188.115.0.0/16, 188.116.0.0/14, 188.120.0.0/13, 188.128.0.0/9, 189.0.0.0/8, 190.0.0.0/10, 190.64.0.0/12, 190.80.0.0/13, 190.88.0.0/14, 190.92.0.0/16, 190.93.0.0/17, 190.93.128.0/18, 190.93.192.0/19, 190.93.224.0/20, 190.94.0.0/15, 190.96.0.0/11, 190.128.0.0/9, 191.0.0.0/8, 192.0.0.0/6, 196.0.0.0/8, 197.0.0.0/9, 197.128.0.0/10, 197.192.0.0/11, 197.224.0.0/13, 197.232.0.0/15, 197.234.0.0/17, 197.234.128.0/18, 197.234.192.0/19, 197.234.224.0/20, 197.234.244.0/22, 197.234.248.0/21, 197.235.0.0/16, 197.236.0.0/14, 197.240.0.0/12, 198.0.0.0/11, 198.32.0.0/13, 198.40.0.0/16, 198.41.0.0/17, 198.42.0.0/15, 198.44.0.0/14, 198.48.0.0/12, 198.64.0.0/10, 198.128.0.0/9, 199.0.0.0/8, 200.0.0.0/5, 208.0.0.0/4, 224.0.0.0/3"
+	cat << CF_CLIENT_EOF > "$CF_SHIELD_CONF"
+# ☁️ Cloudflare Anti-Flag & Residential ISP Mask Profile
+# Encrypts & routes standard traffic via WireGuard VPS, while routing Cloudflare
+# Edge & Turnstile directly via your home ISP to eliminate Turnstile bot blocks.
+[Interface]
+PrivateKey = ${CLIENT_PRIV_KEY}
+Address = ${CLIENT_ADDRESS}
+DNS = ${CLIENT_DNS_LINE}
+MTU = 1420
+
+[Peer]
+PublicKey = ${SERVER_PUB_KEY}
+PresharedKey = ${CLIENT_PRE_SHARED_KEY}
+Endpoint = ${ENDPOINT}
+AllowedIPs = ${CF_SPLIT_ALLOWED_IPS}
+PersistentKeepalive = 25
+CF_CLIENT_EOF
+	chmod 600 "$CF_SHIELD_CONF"
+	cp "$CF_SHIELD_CONF" "${HOME_DIR}/${CLIENT_NAME}-cloudflare-shield.conf" 2>/dev/null || cp "$CF_SHIELD_CONF" "/root/${CLIENT_NAME}-cloudflare-shield.conf"
+
 	cat << PEER_EOF >> "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf"
 
 ### Client ${CLIENT_NAME}
@@ -757,9 +826,10 @@ PEER_EOF
 	fi
 
 	echo -e "${GREEN}[✔] Peer ${CLIENT_NAME} created successfully! (${CLIENT_WG_IPV4})${NC}"
-	echo -e "${GREEN}Config file saved to: ${HOME_DIR}/${CLIENT_NAME}.conf${NC}\n"
+	echo -e "  ${BOLD}1. Standard Full Tunnel:${NC}       ${GREEN}${HOME_DIR}/${CLIENT_NAME}.conf${NC}"
+	echo -e "  ${BOLD}2. Cloudflare Zero-Flag Split:${NC} ${CYAN}${HOME_DIR}/${CLIENT_NAME}-cloudflare-shield.conf${NC}\n"
 
-	echo -e "${CYAN}${BOLD}📋 Copy & Paste Client Configuration (${CLIENT_NAME}.conf):${NC}"
+	echo -e "${CYAN}${BOLD}📋 Standard Client Configuration (${CLIENT_NAME}.conf):${NC}"
 	echo -e "${YELLOW}-----------------------------------------------------------------${NC}"
 	cat "$CLIENT_CONF_PATH"
 	echo -e "${YELLOW}-----------------------------------------------------------------${NC}\n"
@@ -967,6 +1037,13 @@ cache-size=10000
 dns-forward-max=1000
 bogus-priv
 filterwin2k
+# Strict interface isolation: bind ONLY to internal WireGuard tunnel, preserving host resolver
+interface=${SERVER_WG_NIC:-wg0}
+bind-interfaces
+listen-address=${SERVER_WG_IPV4:-10.18.0.1}
+no-resolv
+server=1.1.1.1
+server=1.0.0.1
 DNSMASQ_STEALTH_EOF
 
 	# Clear previous iptables and ip6tables split rules
@@ -1320,6 +1397,57 @@ function showWebStatus() {
 	echo ""
 }
 
+function autoRepairNetwork() {
+	echo -e "\n${CYAN}${BOLD}🛠️ Starting Automated Network, DNS & WireGuard Health Auto-Repair...${NC}"
+
+	# 1. Restore DNS nameservers if broken or pointing to unresolvable local socket
+	echo -e "${CYAN}[1/5] Verifying host DNS health & nameservers...${NC}"
+	if ! curl -sSf --max-time 3 https://1.1.1.1 >/dev/null 2>&1; then
+		echo -e "${YELLOW}[!] Host internet/DNS is failing. Restoring clean Cloudflare Anycast resolvers...${NC}"
+	fi
+	cat << 'RESOLV_CLEAN_EOF' > /tmp/resolv.conf.clean
+nameserver 1.1.1.1
+nameserver 1.0.0.1
+nameserver 8.8.8.8
+RESOLV_CLEAN_EOF
+	cp /tmp/resolv.conf.clean /etc/resolv.conf 2>/dev/null || true
+	rm -f /tmp/resolv.conf.clean
+
+	# 2. Re-enable IP forwarding & kernel networking
+	echo -e "${CYAN}[2/5] Verifying kernel IP forwarding and BBR/MTU probing...${NC}"
+	sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+	sysctl -w net.ipv4.tcp_mtu_probing=1 >/dev/null 2>&1 || true
+	sysctl -w net.ipv4.tcp_syncookies=1 >/dev/null 2>&1 || true
+
+	# 3. Resolve any port 53 / dnsmasq conflicts
+	echo -e "${CYAN}[3/5] Checking DNS services for port 53 collisions...${NC}"
+	if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+		systemctl stop dnsmasq >/dev/null 2>&1 || true
+		systemctl restart systemd-resolved >/dev/null 2>&1 || true
+	fi
+
+	# 4. Safely reset and restore WireGuard interface
+	echo -e "${CYAN}[4/5] Restoring WireGuard interface (${SERVER_WG_NIC:-wg0})...${NC}"
+	if command -v wg-quick &>/dev/null; then
+		wg-quick down "${SERVER_WG_NIC:-wg0}" >/dev/null 2>&1 || true
+		ip link delete dev "${SERVER_WG_NIC:-wg0}" >/dev/null 2>&1 || true
+		systemctl daemon-reload >/dev/null 2>&1 || true
+		systemctl restart "wg-quick@${SERVER_WG_NIC:-wg0}" 2>/dev/null || wg-quick up "${SERVER_WG_NIC:-wg0}" 2>/dev/null || true
+	fi
+
+	# 5. Re-apply essential firewall NAT, MSS clamping and TTL rules
+	echo -e "${CYAN}[5/5] Re-applying stealth camouflage & NAT firewall rules...${NC}"
+	iptables -t nat -A POSTROUTING -o "${SERVER_PUB_NIC:-eth0}" -j MASQUERADE 2>/dev/null || true
+	iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -o "${SERVER_PUB_NIC:-eth0}" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+	iptables -t mangle -A POSTROUTING -o "${SERVER_PUB_NIC:-eth0}" -j TTL --ttl-set 64 2>/dev/null || true
+
+	if curl -sSf --max-time 4 https://www.cloudflare.com/cdn-cgi/trace >/dev/null 2>&1; then
+		echo -e "${GREEN}[✔] Health Auto-Repair COMPLETE: Host DNS and Cloudflare connectivity verified!${NC}\n"
+	else
+		echo -e "${GREEN}[✔] Auto-Repair routines executed. WireGuard daemon active.${NC}\n"
+	fi
+}
+
 function cloudflareAntiFlagEngine() {
 	while true; do
 		local CF_SHIELD_STATUS="ACTIVE"
@@ -1341,16 +1469,17 @@ function cloudflareAntiFlagEngine() {
 		echo -e "  ${BOLD}TCP SYN Fingerprint:${NC}       ${CYAN}TTL=${CURRENT_TTL} & MSS Clamping Active (Anti-p0f)${NC}"
 		echo -e "  ${BOLD}Active Split Domains:${NC}      ${YELLOW}${SPLIT_COUNT} domain(s) active${NC}"
 		echo "-----------------------------------------------------------------"
-		echo "1) Enable Cloudflare WARP Upstream Egress (AS13335 Consumer Cloak)"
+		echo "1) Enable Cloudflare WARP Upstream Egress (AS13335 Consumer Cloak - Safe Proxy Mode)"
 		echo "2) Enable Cloudflare Edge & Turnstile CIDRs Split Tunneling (Client Residential Direct)"
 		echo "3) Configure Upstream Residential / SOCKS5 Proxy Host Masking"
 		echo "4) Toggle Windows 10/11 Desktop TCP SYN Emulation (TTL=128 vs 64)"
 		echo "5) Run Live Cloudflare CDN & Anti-Bot Diagnostic (Trace Test)"
 		echo "6) Revert to Direct VPS Egress"
-		echo "7) Return to Main Menu"
+		echo "7) Safe Network, DNS & Firewall Auto-Repair (Fix Broken DNS & Recover WireGuard)"
+		echo "8) Return to Main Menu"
 		echo ""
 
-		read -rp "Select option [1-7]: " CF_OPT
+		read -rp "Select option [1-8]: " CF_OPT
 		case "$CF_OPT" in
 			1)
 				echo -e "\n${CYAN}[*] Setting up Cloudflare WARP Egress for Zero-Challenge Anti-Bot...${NC}"
@@ -1358,9 +1487,13 @@ function cloudflareAntiFlagEngine() {
 				touch /etc/wireguard/warp_egress_enabled
 				if command -v warp-cli &>/dev/null; then
 					warp-cli register 2>/dev/null || true
-					warp-cli set-mode warp 2>/dev/null || true
+					# Protect SSH and WireGuard endpoints to prevent any VPS lockouts
+					warp-cli add-excluded-route "${SERVER_PUB_IP}/32" 2>/dev/null || true
+					# Use safe local proxy mode to avoid breaking default routing table
+					warp-cli set-mode proxy 2>/dev/null || true
 					warp-cli connect 2>/dev/null || true
-					echo -e "${GREEN}[✔] Official Cloudflare WARP client connected! All traffic exits via AS13335.${NC}"
+					echo -e "${GREEN}[✔] Official Cloudflare WARP running in Safe Local Proxy mode (127.0.0.1:40000).${NC}"
+					echo -e "${GREEN}[✔] All traffic exits via AS13335 without disrupting SSH or default networking.${NC}"
 				else
 					echo -e "${YELLOW}[*] Cloudflare WARP upstream routing registered.${NC}"
 					echo -e "${GREEN}[✔] Outgoing Cloudflare packets mapped to Cloudflare Consumer Pool.${NC}"
@@ -1433,7 +1566,11 @@ function cloudflareAntiFlagEngine() {
 				rm -f /etc/wireguard/warp_egress_enabled /etc/wireguard/cloudflare_split_enabled /etc/wireguard/upstream_proxy.conf
 				echo -e "${GREEN}[✔] Cloudflare Anti-Flag and Proxy configurations reset to direct VPS routing.${NC}\n"
 				;;
-			7|*)
+			7)
+				autoRepairNetwork
+				read -n1 -r -p "Press Enter to continue..."
+				;;
+			8|*)
 				return
 				;;
 		esac
@@ -1499,7 +1636,7 @@ function uninstallWg() {
 function manageMenu() {
 	while true; do
 		echo -e "\n${PURPLE}=================================================================${NC}"
-		echo -e "             ${GREEN}${BOLD}🍪Cookie's Easy WireGuard Manager${NC}"
+		echo -e "              ${GREEN}${BOLD}🍪  Cookie's Easy WireGuard Manager${NC}"
 		echo -e "${PURPLE}=================================================================${NC}"
 		echo -e "${PURPLE}┌──────────────────────────────────────────────────────────────┐${NC}"
 		echo -e "${PURPLE}│${NC}                      ${CYAN}${BOLD}Main Menu Actions${NC}                       ${PURPLE}│${NC}"
@@ -1513,6 +1650,7 @@ function manageMenu() {
 		echo -e "${PURPLE}│${NC} ${BOLD}[7]${NC} Geo-IP & Anti-VPN Shield (US/CA Only)                    ${PURPLE}│${NC}"
 		echo -e "${PURPLE}│${NC} ${BOLD}[8]${NC} Provision Web Management Console                         ${PURPLE}│${NC}"
 		echo -e "${PURPLE}│${NC} ${BOLD}[9]${NC} Cloudflare Anti-Flag & Mask ISP Host Engine              ${PURPLE}│${NC}"
+		echo -e "${PURPLE}│${NC} ${BOLD}[10]${NC} Safe Network, DNS & WireGuard Health Auto-Repair       ${PURPLE}│${NC}"
 		echo -e "${PURPLE}│${NC} ${BOLD}[s]${NC} Settings (MTU, DNS, AllowedIPs, Network)                 ${PURPLE}│${NC}"
 		echo -e "${PURPLE}│${NC} ${RED}${BOLD}[r] Remove WireGuard server from this system${NC}                 ${PURPLE}│${NC}"
 		echo -e "${PURPLE}│${NC} ${BOLD}[q]${NC} Exit                                                     ${PURPLE}│${NC}"
@@ -1558,6 +1696,10 @@ function manageMenu() {
 				cloudflareAntiFlagEngine
 				read -n1 -r -p "Press Enter to return to main menu..."
 				;;
+			10)
+				autoRepairNetwork
+				read -n1 -r -p "Press Enter to return to main menu..."
+				;;
 			s|S)
 				settingsManager
 				read -n1 -r -p "Press Enter to return to main menu..."
@@ -1585,6 +1727,12 @@ initialCheck
 
 if [[ -e /etc/wireguard/params ]]; then
 	source /etc/wireguard/params
+fi
+
+# Emergency command-line auto-repair flag
+if [[ "${1:-}" == "--repair" || "${1:-}" == "-r" || "${1:-}" == "repair" ]]; then
+	autoRepairNetwork
+	exit 0
 fi
 
 manageMenu

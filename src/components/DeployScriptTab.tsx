@@ -68,7 +68,7 @@ export const DeployScriptTab: React.FC<DeployScriptTabProps> = ({ server }) => {
                 </span>
               </div>
               <p className="text-xs sm:text-sm text-slate-300 mt-1 max-w-2xl leading-relaxed">
-                Deploy Cookie's WireGuard server directly onto any external VPS (DigitalOcean, Hetzner, Vultr, AWS, Linode). Runs non-interactively or with the interactive CLI menu, automatically applying BBR, FQ queuing, and Anti-VPN Geo Shielding.
+                Deploy Cookie's WireGuard server directly onto any external VPS (DigitalOcean, Hetzner, Vultr, AWS, Linode). Auto-configures Cloudflare Anti-Flag & ISP Host Masking into the install, applying BBR, TCP MSS Clamping, TTL Normalization (Anti-p0f), and residential bypass profiles out of the box.
               </p>
             </div>
           </div>
@@ -93,6 +93,10 @@ export const DeployScriptTab: React.FC<DeployScriptTabProps> = ({ server }) => {
 
         <div className="p-4 rounded-xl bg-[#050811] border border-slate-800 text-emerald-400 font-mono text-xs overflow-x-auto select-all">
           {oneLiner}
+        </div>
+        <div className="flex items-center justify-between pt-1 text-[11px] text-slate-400 font-mono">
+          <span>✨ Includes auto-configured Cloudflare Anti-Flag & Turnstile Zero-Challenge cloaking.</span>
+          <span className="text-amber-400">Emergency Repair: <code>sudo ./easy_wireguard.sh --repair</code></span>
         </div>
       </div>
 

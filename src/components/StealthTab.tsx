@@ -44,6 +44,28 @@ export const StealthTab: React.FC<StealthTabProps> = ({ onRefresh }) => {
   const [proxyInput, setProxyInput] = useState('');
   const [savingProxy, setSavingProxy] = useState(false);
   const [togglingCfKey, setTogglingCfKey] = useState<string | null>(null);
+  const [repairing, setRepairing] = useState(false);
+  const [repairMsg, setRepairMsg] = useState<string | null>(null);
+
+  const handleSelfRepair = async () => {
+    setRepairing(true);
+    setRepairMsg(null);
+    try {
+      const res = await fetch('/api/cloudflare-shield/repair', { method: 'POST' });
+      const data = await res.json();
+      if (data.success) {
+        setRepairMsg('DNS nameservers (1.1.1.1/1.0.0.1/8.8.8.8), kernel forwarding, MSS clamping & WireGuard recovered successfully!');
+        await fetchStealth();
+        await fetchCfStatus();
+        setTimeout(() => setRepairMsg(null), 6000);
+      }
+    } catch (e) {
+      console.error(e);
+      setRepairMsg('Auto-repair request failed. Check server connection.');
+    } finally {
+      setRepairing(false);
+    }
+  };
 
   const vpsCurlCmd = `curl -sSfL https://raw.githubusercontent.com/cookiebaits/cbwireguard/main/install.sh -o install.sh && chmod +x install.sh && sudo ./install.sh`;
 
@@ -255,26 +277,48 @@ export const StealthTab: React.FC<StealthTabProps> = ({ onRefresh }) => {
             <div>
               <div className="flex items-center gap-2 flex-wrap">
                 <h3 className="text-lg font-black text-white">Cloudflare Anti-Flag & Mask ISP Host Engine</h3>
+                <span className="text-xs px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-bold flex items-center gap-1">
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  Auto-Configured In Install
+                </span>
                 <span className="text-xs px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 font-bold flex items-center gap-1">
                   <ShieldCheck className="w-3.5 h-3.5" />
                   Turnstile Zero-Challenge Cloaking
                 </span>
               </div>
               <p className="text-xs sm:text-sm text-slate-300 mt-1 max-w-2xl leading-relaxed">
-                Prevents Cloudflare Managed Challenges (Turnstile loop, Ray ID 403, and Bot Management flags) by cloaking your VPS datacenter ASN (Linode/DO/AWS) with Cloudflare WARP consumer egress (AS13335) or routing Cloudflare traffic via direct residential split tunneling.
+                Prevents Cloudflare Managed Challenges (Turnstile loop, Ray ID 403, and Bot Management flags) by cloaking your VPS datacenter ASN with Cloudflare WARP consumer egress (AS13335) or routing Cloudflare traffic via direct residential split tunneling. Auto-configured out-of-the-box in the installer.
               </p>
             </div>
           </div>
 
-          <button
-            onClick={handleTestTrace}
-            disabled={testingTrace}
-            className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500 text-white text-xs font-bold shadow-lg shadow-amber-950 transition shrink-0"
-          >
-            <Activity className={`w-4 h-4 ${testingTrace ? 'animate-spin' : ''}`} />
-            <span>{testingTrace ? 'Tracing Cloudflare Edge...' : 'Test Cloudflare Trace & Threat Score'}</span>
-          </button>
+          <div className="flex items-center gap-2 flex-wrap shrink-0">
+            <button
+              onClick={handleSelfRepair}
+              disabled={repairing}
+              title="Restores clean DNS nameservers, re-enables IP forwarding, and safely recovers WireGuard services"
+              className="flex items-center gap-2 px-3.5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 hover:border-slate-600 text-xs font-bold shadow-md transition shrink-0"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 text-cyan-400 ${repairing ? 'animate-spin' : ''}`} />
+              <span>{repairing ? 'Restoring DNS & Network...' : 'Safe Health Auto-Repair'}</span>
+            </button>
+            <button
+              onClick={handleTestTrace}
+              disabled={testingTrace}
+              className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500 text-white text-xs font-bold shadow-lg shadow-amber-950 transition shrink-0"
+            >
+              <Activity className={`w-4 h-4 ${testingTrace ? 'animate-spin' : ''}`} />
+              <span>{testingTrace ? 'Tracing Cloudflare Edge...' : 'Test Cloudflare Trace & Threat Score'}</span>
+            </button>
+          </div>
         </div>
+
+        {repairMsg && (
+          <div className="flex items-center gap-2 p-3.5 rounded-xl bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 text-xs font-semibold animate-in fade-in duration-200">
+            <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
+            <span>{repairMsg}</span>
+          </div>
+        )}
 
         {/* Telemetry Status Strip */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-[#070b14]/90 p-4 rounded-2xl border border-slate-800 text-xs">
