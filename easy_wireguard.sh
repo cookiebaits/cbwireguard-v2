@@ -426,6 +426,25 @@ SYSCTL_V6_EOF
 
 	sysctl --system -q >/dev/null 2>&1 || sysctl -p "$SYSCTL_CONF" >/dev/null 2>&1 || true
 
+	# Ensure UFW / Firewalld unblock WireGuard UDP traffic & enable forwarding
+	if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+		echo -e "${CYAN}[*] UFW firewall active. Allowing WireGuard port ${SERVER_PORT}/udp and enabling forwarding...${NC}"
+		ufw allow "${SERVER_PORT}/udp" >/dev/null 2>&1 || true
+		ufw allow "${WEB_PORT:-51821}/tcp" >/dev/null 2>&1 || true
+		if [ -f /etc/default/ufw ]; then
+			sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw 2>/dev/null || true
+		fi
+		ufw reload >/dev/null 2>&1 || true
+	fi
+
+	if command -v firewall-cmd &>/dev/null && systemctl is-active --quiet firewalld 2>/dev/null; then
+		echo -e "${CYAN}[*] Firewalld active. Opening WireGuard UDP port ${SERVER_PORT}...${NC}"
+		firewall-cmd --add-port="${SERVER_PORT}/udp" --permanent >/dev/null 2>&1 || true
+		firewall-cmd --add-port="${WEB_PORT:-51821}/tcp" --permanent >/dev/null 2>&1 || true
+		firewall-cmd --add-masquerade --permanent >/dev/null 2>&1 || true
+		firewall-cmd --reload >/dev/null 2>&1 || true
+	fi
+
 	mkdir -p /etc/wireguard
 	chmod 700 /etc/wireguard
 	cd /etc/wireguard
@@ -495,10 +514,12 @@ SaveConfig = false
 PostUp = iptables -I INPUT -p udp --dport ${SERVER_PORT} -j ACCEPT 2>/dev/null || true
 PostUp = iptables -A FORWARD -i ${SERVER_WG_NIC} -j ACCEPT 2>/dev/null || true
 PostUp = iptables -A FORWARD -o ${SERVER_WG_NIC} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+PostUp = iptables -t nat -A POSTROUTING -s 10.18.0.0/24 -o ${SERVER_PUB_NIC} -j MASQUERADE 2>/dev/null || true
 PostUp = iptables -t nat -A POSTROUTING -o ${SERVER_PUB_NIC} -j MASQUERADE 2>/dev/null || true
 PostDown = iptables -D INPUT -p udp --dport ${SERVER_PORT} -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -i ${SERVER_WG_NIC} -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -o ${SERVER_WG_NIC} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+PostDown = iptables -t nat -D POSTROUTING -s 10.18.0.0/24 -o ${SERVER_PUB_NIC} -j MASQUERADE 2>/dev/null || true
 PostDown = iptables -t nat -D POSTROUTING -o ${SERVER_PUB_NIC} -j MASQUERADE 2>/dev/null || true
 WG_SERVER_EOF
 
@@ -795,7 +816,7 @@ CLIENT_EOF
 
 	# Generate Dedicated Cloudflare Anti-Flag & ISP Host Masking Residential Split Profile
 	local CF_SHIELD_CONF="/etc/wireguard/clients/${CLIENT_NAME}-cloudflare-shield.conf"
-	local CF_SPLIT_ALLOWED_IPS="0.0.0.0/2, 64.0.0.0/3, 96.0.0.0/6, 100.0.0.0/7, 102.0.0.0/8, 103.0.0.0/12, 103.16.0.0/14, 103.20.0.0/16, 103.21.0.0/17, 103.21.128.0/18, 103.21.192.0/19, 103.21.224.0/20, 103.21.240.0/22, 103.21.248.0/21, 103.22.0.0/17, 103.22.128.0/18, 103.22.192.0/21, 103.22.204.0/22, 103.22.208.0/20, 103.22.224.0/19, 103.23.0.0/16, 103.24.0.0/14, 103.28.0.0/15, 103.30.0.0/16, 103.31.0.0/22, 103.31.8.0/21, 103.31.16.0/20, 103.31.32.0/19, 103.31.64.0/18, 103.31.128.0/17, 103.32.0.0/11, 103.64.0.0/10, 103.128.0.0/9, 104.0.0.0/12, 104.28.0.0/14, 104.32.0.0/11, 104.64.0.0/10, 104.128.0.0/9, 105.0.0.0/8, 106.0.0.0/7, 108.0.0.0/9, 108.128.0.0/11, 108.160.0.0/15, 108.162.0.0/17, 108.162.128.0/18, 108.163.0.0/16, 108.164.0.0/14, 108.168.0.0/13, 108.176.0.0/12, 108.192.0.0/10, 109.0.0.0/8, 110.0.0.0/7, 112.0.0.0/4, 128.0.0.0/7, 130.0.0.0/8, 131.0.0.0/18, 131.0.64.0/21, 131.0.76.0/22, 131.0.80.0/20, 131.0.96.0/19, 131.0.128.0/17, 131.1.0.0/16, 131.2.0.0/15, 131.4.0.0/14, 131.8.0.0/13, 131.16.0.0/12, 131.32.0.0/11, 131.64.0.0/10, 131.128.0.0/9, 132.0.0.0/6, 136.0.0.0/6, 140.0.0.0/8, 141.0.0.0/10, 141.64.0.0/11, 141.96.0.0/14, 141.100.0.0/16, 141.101.0.0/18, 141.101.128.0/17, 141.102.0.0/15, 141.104.0.0/13, 141.112.0.0/12, 141.128.0.0/9, 142.0.0.0/7, 144.0.0.0/4, 160.0.0.0/7, 162.0.0.0/9, 162.128.0.0/12, 162.144.0.0/13, 162.152.0.0/14, 162.156.0.0/15, 162.160.0.0/11, 162.192.0.0/10, 163.0.0.0/8, 164.0.0.0/6, 168.0.0.0/6, 172.0.0.0/10, 172.72.0.0/13, 172.80.0.0/12, 172.96.0.0/11, 172.128.0.0/9, 173.0.0.0/9, 173.128.0.0/10, 173.192.0.0/11, 173.224.0.0/12, 173.240.0.0/14, 173.244.0.0/16, 173.245.0.0/19, 173.245.32.0/20, 173.245.64.0/18, 173.245.128.0/17, 173.246.0.0/15, 173.248.0.0/13, 174.0.0.0/7, 176.0.0.0/5, 184.0.0.0/6, 188.0.0.0/10, 188.64.0.0/11, 188.96.0.0/12, 188.112.0.0/15, 188.114.0.0/18, 188.114.64.0/19, 188.114.112.0/20, 188.114.128.0/17, 188.115.0.0/16, 188.116.0.0/14, 188.120.0.0/13, 188.128.0.0/9, 189.0.0.0/8, 190.0.0.0/10, 190.64.0.0/12, 190.80.0.0/13, 190.88.0.0/14, 190.92.0.0/16, 190.93.0.0/17, 190.93.128.0/18, 190.93.192.0/19, 190.93.224.0/20, 190.94.0.0/15, 190.96.0.0/11, 190.128.0.0/9, 191.0.0.0/8, 192.0.0.0/6, 196.0.0.0/8, 197.0.0.0/9, 197.128.0.0/10, 197.192.0.0/11, 197.224.0.0/13, 197.232.0.0/15, 197.234.0.0/17, 197.234.128.0/18, 197.234.192.0/19, 197.234.224.0/20, 197.234.244.0/22, 197.234.248.0/21, 197.235.0.0/16, 197.236.0.0/14, 197.240.0.0/12, 198.0.0.0/11, 198.32.0.0/13, 198.40.0.0/16, 198.41.0.0/17, 198.42.0.0/15, 198.44.0.0/14, 198.48.0.0/12, 198.64.0.0/10, 198.128.0.0/9, 199.0.0.0/8, 200.0.0.0/5, 208.0.0.0/4, 224.0.0.0/3"
+	local CF_SPLIT_ALLOWED_IPS="224.0.0.0/3, 208.0.0.0/4, 200.0.0.0/5, 192.0.0.0/6, 196.0.0.0/7, 199.0.0.0/8, 198.128.0.0/9, 198.64.0.0/10, 198.0.0.0/11, 198.48.0.0/12, 198.32.0.0/13, 198.44.0.0/14, 198.42.0.0/15, 198.40.0.0/16, 198.41.0.0/17, 128.0.0.0/3, 176.0.0.0/4, 164.0.0.0/6, 160.0.0.0/7, 163.0.0.0/8, 162.0.0.0/9, 162.192.0.0/10, 162.160.0.0/11, 162.128.0.0/12, 162.144.0.0/13, 162.152.0.0/14, 162.156.0.0/15, 168.0.0.0/6, 174.0.0.0/7, 173.0.0.0/8, 172.128.0.0/9, 172.0.0.0/10, 172.96.0.0/11, 172.80.0.0/12, 172.72.0.0/13, 0.0.0.0/2, 64.0.0.0/3, 112.0.0.0/4, 96.0.0.0/5, 108.0.0.0/6, 106.0.0.0/7, 105.0.0.0/8, 104.128.0.0/9, 104.64.0.0/10, 104.32.0.0/11, 104.0.0.0/12"
 	cat << CF_CLIENT_EOF > "$CF_SHIELD_CONF"
 # ☁️ Cloudflare Anti-Flag & Residential ISP Mask Profile
 # Encrypts & routes standard traffic via WireGuard VPS, while routing Cloudflare
@@ -829,25 +850,43 @@ PEER_EOF
 		wg syncconf "${SERVER_WG_NIC:-wg0}" <(wg-quick strip "${SERVER_WG_NIC:-wg0}") 2>/dev/null || true
 	fi
 
+	local IS_CF_SHIELD=0
+	if [[ "${CF_AUTO_ENABLE:-n}" =~ ^[Yy]$ ]] || [[ -f /etc/wireguard/cloudflare_shield_enabled ]]; then
+		IS_CF_SHIELD=1
+	fi
+
 	echo -e "${GREEN}[✔] Peer ${CLIENT_NAME} created successfully! (${CLIENT_WG_IPV4})${NC}"
-	echo -e "  ${BOLD}1. Standard Full Tunnel:${NC}       ${GREEN}${HOME_DIR}/${CLIENT_NAME}.conf${NC}"
-	echo -e "  ${BOLD}2. Cloudflare Zero-Flag Split:${NC} ${CYAN}${HOME_DIR}/${CLIENT_NAME}-cloudflare-shield.conf${NC}\n"
 
-	echo -e "${CYAN}${BOLD}📋 Cloudflare Anti-Flag & ISP Masking Profile (${CLIENT_NAME}-cloudflare-shield.conf):${NC}"
-	echo -e "${GREEN}  • All regular traffic is encrypted via WireGuard VPS.${NC}"
-	echo -e "${GREEN}  • Cloudflare WAF, Turnstile challenges & CDN subnets route directly via your home ISP.${NC}"
-	echo -e "${GREEN}  • Completely avoids Datacenter ASN blocks and Turnstile captcha loops!${NC}"
-	echo -e "${YELLOW}-----------------------------------------------------------------${NC}"
-	cat "$CF_SHIELD_CONF"
-	echo -e "${YELLOW}-----------------------------------------------------------------${NC}\n"
+	if [[ "$IS_CF_SHIELD" -eq 1 ]]; then
+		echo -e "  ${BOLD}1. Standard Full Tunnel:${NC}       ${GREEN}${HOME_DIR}/${CLIENT_NAME}.conf${NC}"
+		echo -e "  ${BOLD}2. Cloudflare Anti-Flag Profile:${NC} ${CYAN}${HOME_DIR}/${CLIENT_NAME}-cloudflare-shield.conf${NC}\n"
 
-	if command -v qrencode &>/dev/null; then
-		echo -e "${PURPLE}${BOLD}📱 Scan Cloudflare Anti-Flag Profile QR Code [RECOMMENDED]:${NC}\n"
-		qrencode -t ansiutf8 < "$CF_SHIELD_CONF"
-		echo ""
-		echo -e "${CYAN}${BOLD}📱 (Optional) Standard Full Tunnel QR Code (${CLIENT_NAME}.conf):${NC}\n"
-		qrencode -t ansiutf8 < "$CLIENT_CONF_PATH"
-		echo ""
+		echo -e "${CYAN}${BOLD}📋 Standard Client Configuration (${CLIENT_NAME}.conf):${NC}"
+		echo -e "${YELLOW}-----------------------------------------------------------------${NC}"
+		cat "$CLIENT_CONF_PATH"
+		echo -e "${YELLOW}-----------------------------------------------------------------${NC}\n"
+
+		if command -v qrencode &>/dev/null; then
+			echo -e "${PURPLE}${BOLD}📱 Scan Standard Full Tunnel QR Code (${CLIENT_NAME}.conf):${NC}\n"
+			qrencode -t ansiutf8 < "$CLIENT_CONF_PATH"
+			echo ""
+			echo -e "${CYAN}${BOLD}📱 (Optional) Scan Cloudflare Anti-Flag Residential Split QR Code (${CLIENT_NAME}-cloudflare-shield.conf):${NC}\n"
+			qrencode -t ansiutf8 < "$CF_SHIELD_CONF"
+			echo ""
+		fi
+	else
+		echo -e "  ${BOLD}Client Profile Path:${NC} ${GREEN}${HOME_DIR}/${CLIENT_NAME}.conf${NC}\n"
+
+		echo -e "${CYAN}${BOLD}📋 WireGuard Client Configuration (${CLIENT_NAME}.conf):${NC}"
+		echo -e "${YELLOW}-----------------------------------------------------------------${NC}"
+		cat "$CLIENT_CONF_PATH"
+		echo -e "${YELLOW}-----------------------------------------------------------------${NC}\n"
+
+		if command -v qrencode &>/dev/null; then
+			echo -e "${PURPLE}${BOLD}📱 Scan QR Code with WireGuard App on iOS / Android / Desktop:${NC}\n"
+			qrencode -t ansiutf8 < "$CLIENT_CONF_PATH"
+			echo ""
+		fi
 	fi
 }
 
