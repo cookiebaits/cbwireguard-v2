@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Split, Plus, Trash2, CheckCircle2, Tv, Bot, Landmark, Globe, Shield } from 'lucide-react';
+import { Split, Plus, Trash2, CheckCircle2, Tv, Bot, Landmark, Globe, Shield, Cloud } from 'lucide-react';
 import { SplitService } from '../types';
 
 export const SplitTunnelingTab: React.FC = () => {
@@ -67,7 +67,8 @@ export const SplitTunnelingTab: React.FC = () => {
     }
   };
 
-  const getCategoryIcon = (cat: string) => {
+  const getCategoryIcon = (cat: string, id?: string) => {
+    if (id === 'cloudflare') return <Cloud className="w-4 h-4 text-amber-400" />;
     switch (cat) {
       case 'streaming': return <Tv className="w-4 h-4 text-emerald-400" />;
       case 'ai': return <Bot className="w-4 h-4 text-purple-400" />;
@@ -105,16 +106,25 @@ export const SplitTunnelingTab: React.FC = () => {
         {services.map(svc => (
           <div
             key={svc.id}
-            className={`p-5 rounded-2xl border transition ${
-              svc.enabled
+            className={`p-5 rounded-2xl border transition relative overflow-hidden ${
+              svc.id === 'cloudflare'
+                ? svc.enabled
+                  ? 'bg-gradient-to-br from-[#0c1427] to-[#131c36] border-amber-500/50 shadow-lg shadow-amber-950/20'
+                  : 'bg-[#0b101e] border-slate-800/80 opacity-70'
+                : svc.enabled
                 ? 'bg-[#0f172a] border-purple-500/40 shadow-lg shadow-purple-950/20'
                 : 'bg-[#0b101e] border-slate-800/80 opacity-70'
             }`}
           >
+            {svc.id === 'cloudflare' && (
+              <span className="absolute top-2 right-14 text-[9px] font-bold px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 uppercase tracking-wider">
+                Anti-Flag Shield
+              </span>
+            )}
             <div className="flex items-center justify-between mb-3">
               <div className="flex items-center gap-2.5">
-                <div className="p-2 rounded-xl bg-slate-800">
-                  {getCategoryIcon(svc.category)}
+                <div className={`p-2 rounded-xl ${svc.id === 'cloudflare' ? 'bg-amber-500/10' : 'bg-slate-800'}`}>
+                  {getCategoryIcon(svc.category, svc.id)}
                 </div>
                 <div>
                   <h3 className="text-sm font-bold text-white">{svc.name}</h3>
@@ -125,7 +135,11 @@ export const SplitTunnelingTab: React.FC = () => {
               <button
                 onClick={() => handleToggleService(svc.id, svc.enabled)}
                 className={`w-11 h-6 flex items-center rounded-full p-1 transition ${
-                  svc.enabled ? 'bg-purple-600 justify-end' : 'bg-slate-700 justify-start'
+                  svc.enabled
+                    ? svc.id === 'cloudflare'
+                      ? 'bg-amber-500 justify-end'
+                      : 'bg-purple-600 justify-end'
+                    : 'bg-slate-700 justify-start'
                 }`}
               >
                 <div className="bg-white w-4 h-4 rounded-full shadow-md" />

@@ -33,8 +33,31 @@ export interface StealthConfig {
   bbrPacing: boolean;
   tosNormalization: boolean;
   udpFragmentationDefense: boolean;
+  cloudflareShield: boolean;
+  ispHostMasking: boolean;
+  warpEgress: boolean;
+  cloudflareSplitRanges: boolean;
+  windowsTtlEmulation: boolean;
+  upstreamProxy?: string;
   overallScore: number;
   rating: string;
+}
+
+export interface CloudflareShieldStatus {
+  active: boolean;
+  warpEgressActive: boolean;
+  ispHostMaskingActive: boolean;
+  cloudflareCidrSplitActive: boolean;
+  windowsTtlEmulation: boolean;
+  upstreamProxyConfigured: boolean;
+  upstreamProxyUrl?: string;
+  publicEgressIp: string;
+  egressAsn: string;
+  egressIsp: string;
+  cfTraceWarp: 'on' | 'off' | 'simulated';
+  cfRayProtection: 'active' | 'bypassed';
+  splitCloudflareCidrCount: number;
+  splitCloudflareDomainCount: number;
 }
 
 export interface StealthAuditItem {

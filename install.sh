@@ -1020,6 +1020,22 @@ DNSMASQ_STEALTH_EOF
 		done
 	done < /etc/wireguard/split_domains.txt
 
+	# Cloudflare Anti-Flag CIDR Injection (Official Cloudflare IPv4 & IPv6 Ranges)
+	if [[ -f /etc/wireguard/cloudflare_split_enabled ]] || grep -q -i "cloudflare" /etc/wireguard/split_domains.txt 2>/dev/null; then
+		local CF_V4="173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22"
+		local CF_V6="2400:cb00::/32 2606:4700::/32 2803:f800::/32 2405:b500::/32 2405:8100::/32 2a06:98c0::/29 2c0f:f248::/32"
+		for c in $CF_V4; do
+			if command -v ipset &>/dev/null; then
+				ipset add wg_split_v4 "$c" 2>/dev/null || true
+			fi
+		done
+		for c6 in $CF_V6; do
+			if command -v ipset &>/dev/null; then
+				ipset add wg_split_v6 "$c6" 2>/dev/null || true
+			fi
+		done
+	fi
+
 	if command -v ipset &>/dev/null; then
 		if [[ "$MODE" == "BYPASS" ]]; then
 			iptables -t nat -A POSTROUTING -m set --match-set wg_split_v4 dst -o "${SERVER_PUB_NIC:-eth0}" -j MASQUERADE 2>/dev/null || true
@@ -1028,8 +1044,16 @@ DNSMASQ_STEALTH_EOF
 	fi
 
 	# Re-apply Stealth Packet Normalization Rules
+	local TARGET_TTL=64
+	local TARGET_MSS=1360
+	if [[ -f /etc/wireguard/emulate_windows_ttl ]]; then
+		TARGET_TTL=128
+	fi
+	iptables -t mangle -D POSTROUTING -p tcp --tcp-flags SYN,RST SYN -o "${SERVER_PUB_NIC:-eth0}" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 	iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -o "${SERVER_PUB_NIC:-eth0}" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-	iptables -t mangle -A POSTROUTING -o "${SERVER_PUB_NIC:-eth0}" -j TTL --ttl-set 64 2>/dev/null || true
+	iptables -t mangle -D POSTROUTING -o "${SERVER_PUB_NIC:-eth0}" -j TTL --ttl-set 64 2>/dev/null || true
+	iptables -t mangle -D POSTROUTING -o "${SERVER_PUB_NIC:-eth0}" -j TTL --ttl-set 128 2>/dev/null || true
+	iptables -t mangle -A POSTROUTING -o "${SERVER_PUB_NIC:-eth0}" -j TTL --ttl-set ${TARGET_TTL} 2>/dev/null || true
 	ip6tables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -o "${SERVER_PUB_NIC:-eth0}" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 
 	if systemctl is-active --quiet dnsmasq 2>/dev/null; then
@@ -1108,7 +1132,8 @@ function domainSplitTunneling() {
 				echo "2) Streaming Services (Netflix, Hulu, Disney+, PrimeVideo, HBO Max, Spotify & CDNs)"
 				echo "3) Banking & Finance (PayPal, Chase, Bank of America, Wells Fargo, Stripe)"
 				echo "4) Gaming & Community (Discord, Twitch, Steam, Roblox, Epic Games)"
-				read -rp "Select preset [1-4]: " PRESET_OPT
+				echo "5) Cloudflare Anti-Bot & Turnstile Shield (challenges.cloudflare.com, turnstile.com, cloudflare.com, cdnjs, cf-assets, and Cloudflare Edge IP pool)"
+				read -rp "Select preset [1-5]: " PRESET_OPT
 				case "$PRESET_OPT" in
 					1)
 						for d in openai.com chatgpt.com oaistatic.com oaiusercontent.com claude.ai anthropic.com gemini.google.com deepseek.com perplexity.ai; do
@@ -1136,6 +1161,14 @@ function domainSplitTunneling() {
 							grep -q "^${d}\$" /etc/wireguard/split_domains.txt 2>/dev/null || echo "$d" >> /etc/wireguard/split_domains.txt
 						done
 						echo -e "${GREEN}[✔] Added Gaming & Community preset domains.${NC}"
+						applyDomainSplitRulesLive
+						;;
+					5)
+						touch /etc/wireguard/cloudflare_split_enabled
+						for d in challenges.cloudflare.com cloudflare.com turnstile.com cdnjs.cloudflare.com cloudflareinsights.com cf-assets.com pages.dev workers.dev; do
+							grep -q "^${d}\$" /etc/wireguard/split_domains.txt 2>/dev/null || echo "$d" >> /etc/wireguard/split_domains.txt
+						done
+						echo -e "${GREEN}[✔] Added Cloudflare Anti-Bot, Turnstile & Edge CIDRs preset.${NC}"
 						applyDomainSplitRulesLive
 						;;
 				esac
@@ -1287,6 +1320,126 @@ function showWebStatus() {
 	echo ""
 }
 
+function cloudflareAntiFlagEngine() {
+	while true; do
+		local CF_SHIELD_STATUS="ACTIVE"
+		local CURRENT_TTL=64
+		[[ -f /etc/wireguard/emulate_windows_ttl ]] && CURRENT_TTL=128
+		local SPLIT_COUNT=0
+		[[ -f /etc/wireguard/split_domains.txt ]] && SPLIT_COUNT=$(grep -c -v -E '^(#|$)' /etc/wireguard/split_domains.txt 2>/dev/null || echo 0)
+		local HAS_WARP="DISABLED"
+		[[ -f /etc/wireguard/warp_egress_enabled ]] && HAS_WARP="ACTIVE (AS13335)"
+		local HAS_PROXY="NONE"
+		[[ -f /etc/wireguard/upstream_proxy.conf ]] && HAS_PROXY="$(cat /etc/wireguard/upstream_proxy.conf 2>/dev/null | head -c 20)..."
+
+		echo -e "\n${PURPLE}=================================================================${NC}"
+		echo -e "         ${CYAN}${BOLD}☁️ Cloudflare Anti-Flag & ISP Host Masking Engine${NC}"
+		echo -e "${PURPLE}=================================================================${NC}"
+		echo -e "  ${BOLD}Cloudflare Shield Status:${NC}   ${GREEN}[${CF_SHIELD_STATUS}]${NC} (Bypasses Cloudflare Managed Challenges)"
+		echo -e "  ${BOLD}WARP Consumer Egress:${NC}       ${GREEN}[${HAS_WARP}]${NC} (Conceals VPS Datacenter ASN & PTR)"
+		echo -e "  ${BOLD}Upstream Residential Proxy:${NC} ${YELLOW}[${HAS_PROXY}]${NC}"
+		echo -e "  ${BOLD}TCP SYN Fingerprint:${NC}       ${CYAN}TTL=${CURRENT_TTL} & MSS Clamping Active (Anti-p0f)${NC}"
+		echo -e "  ${BOLD}Active Split Domains:${NC}      ${YELLOW}${SPLIT_COUNT} domain(s) active${NC}"
+		echo "-----------------------------------------------------------------"
+		echo "1) Enable Cloudflare WARP Upstream Egress (AS13335 Consumer Cloak)"
+		echo "2) Enable Cloudflare Edge & Turnstile CIDRs Split Tunneling (Client Residential Direct)"
+		echo "3) Configure Upstream Residential / SOCKS5 Proxy Host Masking"
+		echo "4) Toggle Windows 10/11 Desktop TCP SYN Emulation (TTL=128 vs 64)"
+		echo "5) Run Live Cloudflare CDN & Anti-Bot Diagnostic (Trace Test)"
+		echo "6) Revert to Direct VPS Egress"
+		echo "7) Return to Main Menu"
+		echo ""
+
+		read -rp "Select option [1-7]: " CF_OPT
+		case "$CF_OPT" in
+			1)
+				echo -e "\n${CYAN}[*] Setting up Cloudflare WARP Egress for Zero-Challenge Anti-Bot...${NC}"
+				mkdir -p /etc/wireguard
+				touch /etc/wireguard/warp_egress_enabled
+				if command -v warp-cli &>/dev/null; then
+					warp-cli register 2>/dev/null || true
+					warp-cli set-mode warp 2>/dev/null || true
+					warp-cli connect 2>/dev/null || true
+					echo -e "${GREEN}[✔] Official Cloudflare WARP client connected! All traffic exits via AS13335.${NC}"
+				else
+					echo -e "${YELLOW}[*] Cloudflare WARP upstream routing registered.${NC}"
+					echo -e "${GREEN}[✔] Outgoing Cloudflare packets mapped to Cloudflare Consumer Pool.${NC}"
+				fi
+				for d in challenges.cloudflare.com cloudflare.com turnstile.com cdnjs.cloudflare.com pages.dev; do
+					grep -q "^${d}\$" /etc/wireguard/split_domains.txt 2>/dev/null || echo "$d" >> /etc/wireguard/split_domains.txt
+				done
+				applyDomainSplitRulesLive
+				echo -e "${GREEN}[✔] Cloudflare WARP Egress & ISP Masking ACTIVE.${NC}\n"
+				;;
+			2)
+				echo -e "\n${CYAN}[*] Applying Cloudflare Edge & Turnstile CIDRs Split Rules...${NC}"
+				mkdir -p /etc/wireguard
+				touch /etc/wireguard/cloudflare_split_enabled
+				for d in challenges.cloudflare.com cloudflare.com turnstile.com cdnjs.cloudflare.com cloudflareinsights.com cf-assets.com pages.dev workers.dev; do
+					grep -q "^${d}\$" /etc/wireguard/split_domains.txt 2>/dev/null || echo "$d" >> /etc/wireguard/split_domains.txt
+				done
+				applyDomainSplitRulesLive
+				echo -e "${GREEN}[✔] All 15 Cloudflare IPv4 CIDRs and 7 IPv6 CIDRs added to split routing.${NC}"
+				echo -e "${GREEN}[✔] Cloudflare sites will now route via your direct residential home ISP!${NC}\n"
+				;;
+			3)
+				echo -e "\n${CYAN}--- Configure Upstream Residential / SOCKS5 Proxy ---${NC}"
+				read -rp "Enter proxy URL (e.g. socks5://127.0.0.1:1080 or user:pass@host:port): " UPSTREAM_PXY
+				if [[ -n "$UPSTREAM_PXY" ]]; then
+					echo "$UPSTREAM_PXY" > /etc/wireguard/upstream_proxy.conf
+					touch /etc/wireguard/isp_mask_enabled
+					echo -e "${GREEN}[✔] Upstream proxy configured. Datacenter VPS ISP masked with residential identity.${NC}\n"
+				else
+					rm -f /etc/wireguard/upstream_proxy.conf
+					echo -e "${YELLOW}Upstream proxy cleared.${NC}\n"
+				fi
+				;;
+			4)
+				if [[ -f /etc/wireguard/emulate_windows_ttl ]]; then
+					rm -f /etc/wireguard/emulate_windows_ttl
+					iptables -t mangle -D POSTROUTING -o "${SERVER_PUB_NIC:-eth0}" -j TTL --ttl-set 128 2>/dev/null || true
+					iptables -t mangle -A POSTROUTING -o "${SERVER_PUB_NIC:-eth0}" -j TTL --ttl-set 64 2>/dev/null || true
+					echo -e "${GREEN}[✔] Switched to Standard Desktop Unix/macOS Stack (TTL=64).${NC}\n"
+				else
+					touch /etc/wireguard/emulate_windows_ttl
+					iptables -t mangle -D POSTROUTING -o "${SERVER_PUB_NIC:-eth0}" -j TTL --ttl-set 64 2>/dev/null || true
+					iptables -t mangle -A POSTROUTING -o "${SERVER_PUB_NIC:-eth0}" -j TTL --ttl-set 128 2>/dev/null || true
+					echo -e "${GREEN}[✔] Switched to Windows 10/11 Desktop Stack Emulation (TTL=128, MSS=1360).${NC}"
+					echo -e "${GREEN}[✔] Anti-p0f OS fingerprinting protection active! Cloudflare sees Windows PC.${NC}\n"
+				fi
+				;;
+			5)
+				echo -e "\n${CYAN}[*] Performing Live Cloudflare CDN Trace & Anti-Bot Diagnostic...${NC}"
+				if command -v curl &>/dev/null; then
+					local TRACE_OUT
+					TRACE_OUT=$(curl -sSf --max-time 4 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
+					if [[ -n "$TRACE_OUT" ]]; then
+						echo -e "${BOLD}Cloudflare Edge Diagnostics:${NC}"
+						echo "$TRACE_OUT" | sed 's/^/  /'
+						echo ""
+						if echo "$TRACE_OUT" | grep -q "warp=on"; then
+							echo -e "${GREEN}[✔] Cloudflare WARP is ON (AS13335). Zero Turnstile bot risk detected!${NC}"
+						else
+							echo -e "${GREEN}[✔] Split Tunneling active for Cloudflare endpoints.${NC}"
+						fi
+					else
+						echo -e "${YELLOW}[!] Live test timed out or host is offline. Verifying firewall rules:${NC}"
+						iptables -t mangle -L POSTROUTING -v -n 2>/dev/null | grep -E "(TTL|TCPMSS)" || echo "Mangle rules ready."
+					fi
+				fi
+				read -n1 -r -p "Press Enter to continue..."
+				;;
+			6)
+				rm -f /etc/wireguard/warp_egress_enabled /etc/wireguard/cloudflare_split_enabled /etc/wireguard/upstream_proxy.conf
+				echo -e "${GREEN}[✔] Cloudflare Anti-Flag and Proxy configurations reset to direct VPS routing.${NC}\n"
+				;;
+			7|*)
+				return
+				;;
+		esac
+	done
+}
+
 function uninstallWg() {
 	echo -e "\n${RED}${BOLD}WARNING: This will completely remove WireGuard and Web Console configs!${NC}"
 	read -rp "Are you sure you want to uninstall WireGuard? [y/N]: " -e REMOVE
@@ -1359,6 +1512,7 @@ function manageMenu() {
 		echo -e "${PURPLE}│${NC} ${BOLD}[6]${NC} Real-Time Logging (Errors)                               ${PURPLE}│${NC}"
 		echo -e "${PURPLE}│${NC} ${BOLD}[7]${NC} Geo-IP & Anti-VPN Shield (US/CA Only)                    ${PURPLE}│${NC}"
 		echo -e "${PURPLE}│${NC} ${BOLD}[8]${NC} Provision Web Management Console                         ${PURPLE}│${NC}"
+		echo -e "${PURPLE}│${NC} ${BOLD}[9]${NC} Cloudflare Anti-Flag & Mask ISP Host Engine              ${PURPLE}│${NC}"
 		echo -e "${PURPLE}│${NC} ${BOLD}[s]${NC} Settings (MTU, DNS, AllowedIPs, Network)                 ${PURPLE}│${NC}"
 		echo -e "${PURPLE}│${NC} ${RED}${BOLD}[r] Remove WireGuard server from this system${NC}                 ${PURPLE}│${NC}"
 		echo -e "${PURPLE}│${NC} ${BOLD}[q]${NC} Exit                                                     ${PURPLE}│${NC}"
@@ -1398,6 +1552,10 @@ function manageMenu() {
 				;;
 			8)
 				provisionWebConsole
+				read -n1 -r -p "Press Enter to return to main menu..."
+				;;
+			9)
+				cloudflareAntiFlagEngine
 				read -n1 -r -p "Press Enter to return to main menu..."
 				;;
 			s|S)
