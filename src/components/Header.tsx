@@ -151,7 +151,7 @@ export const Header: React.FC<HeaderProps> = ({
             { id: 'tunnel', label: 'Split Tunneling', icon: Terminal },
             { id: 'backups', label: 'Encrypted Backups', icon: Lock },
             { id: 'logs', label: 'Journalctl Logs', icon: Terminal },
-            { id: 'deploy', label: 'VPS Installer (install.sh)', icon: Play },
+            { id: 'deploy', label: 'VPS Installer (easy_wireguard.sh)', icon: Play },
             { id: 'settings', label: 'Settings', icon: RotateCw },
           ].map(tab => {
             const Icon = tab.icon;

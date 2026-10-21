@@ -8,8 +8,8 @@ interface QrModalProps {
   initialAntiFlag?: boolean;
 }
 
-export const QrModal: React.FC<QrModalProps> = ({ peer, onClose, initialAntiFlag = true }) => {
-  const [profileType, setProfileType] = useState<'antiFlag' | 'standard'>(initialAntiFlag ? 'antiFlag' : 'standard');
+export const QrModal: React.FC<QrModalProps> = ({ peer, onClose, initialAntiFlag = false }) => {
+  const [profileType, setProfileType] = useState<'standard' | 'antiFlag'>(initialAntiFlag ? 'antiFlag' : 'standard');
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
   const [rawConfig, setRawConfig] = useState<string>('');
   const [filename, setFilename] = useState<string>('');
@@ -60,7 +60,7 @@ export const QrModal: React.FC<QrModalProps> = ({ peer, onClose, initialAntiFlag
         {/* Header */}
         <div className="flex items-center justify-between border-b border-slate-800/80 pb-4 mb-4">
           <div className="flex items-center gap-3">
-            <div className="p-2.5 rounded-2xl bg-amber-500/10 text-amber-400 border border-amber-500/20">
+            <div className="p-2.5 rounded-2xl bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
               <QrCode className="w-5 h-5" />
             </div>
             <div>
@@ -85,6 +85,24 @@ export const QrModal: React.FC<QrModalProps> = ({ peer, onClose, initialAntiFlag
         <div className="grid grid-cols-2 gap-2 mb-4 p-1 bg-[#070b14] rounded-2xl border border-slate-800">
           <button
             type="button"
+            onClick={() => setProfileType('standard')}
+            className={`flex flex-col items-center justify-center py-2 px-3 rounded-xl transition text-left text-xs ${
+              profileType === 'standard'
+                ? 'bg-gradient-to-r from-emerald-600 to-teal-600 text-white font-bold shadow-md shadow-emerald-950'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+            }`}
+          >
+            <div className="flex items-center gap-1.5 font-bold">
+              <Shield className="w-3.5 h-3.5" />
+              <span>Standard Full Tunnel (Default)</span>
+            </div>
+            <span className={`text-[10px] mt-0.5 ${profileType === 'standard' ? 'text-emerald-100' : 'text-slate-500'}`}>
+              0.0.0.0/0, ::/0 • 100% Encrypted via WireGuard
+            </span>
+          </button>
+
+          <button
+            type="button"
             onClick={() => setProfileType('antiFlag')}
             className={`flex flex-col items-center justify-center py-2 px-3 rounded-xl transition text-left text-xs ${
               profileType === 'antiFlag'
@@ -94,28 +112,10 @@ export const QrModal: React.FC<QrModalProps> = ({ peer, onClose, initialAntiFlag
           >
             <div className="flex items-center gap-1.5 font-bold">
               <Cloud className="w-3.5 h-3.5" />
-              <span>Cloudflare Anti-Flag (Residential Direct)</span>
+              <span>Cloudflare Anti-Flag (Residential Split)</span>
             </div>
             <span className={`text-[10px] mt-0.5 ${profileType === 'antiFlag' ? 'text-amber-100' : 'text-slate-500'}`}>
-              Recommended • Zero Turnstile Captchas
-            </span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setProfileType('standard')}
-            className={`flex flex-col items-center justify-center py-2 px-3 rounded-xl transition text-left text-xs ${
-              profileType === 'standard'
-                ? 'bg-slate-800 text-white font-bold shadow-md'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
-            }`}
-          >
-            <div className="flex items-center gap-1.5 font-bold">
-              <Shield className="w-3.5 h-3.5" />
-              <span>Standard Full Tunnel</span>
-            </div>
-            <span className={`text-[10px] mt-0.5 ${profileType === 'standard' ? 'text-slate-300' : 'text-slate-500'}`}>
-              0.0.0.0/0 • 100% via WireGuard VPS
+              Bypasses Turnstile & WAF Datacenter ASN Blocks
             </span>
           </button>
         </div>

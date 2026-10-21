@@ -318,7 +318,13 @@ function installQuestions() {
 	echo -e "   • Generates both Full Tunnel and Zero-Challenge Residential Bypass client profiles"
 	echo -e "   • Strips EDNS Client-Subnet (ECS) to prevent VPS datacenter IP leaks"
 	read -rp "Auto-configure Cloudflare Anti-Flag & ISP Masking into install? [Y/n, default Y]: " CF_AUTO_ENABLE
-	CF_AUTO_ENABLE=${CF_AUTO_ENABLE:-y}
+	if [[ "$CF_AUTO_ENABLE" =~ ^[Nn] ]]; then
+		CF_AUTO_ENABLE="n"
+		rm -f /etc/wireguard/cloudflare_shield_enabled /etc/wireguard/cloudflare_split_enabled /etc/wireguard/warp_egress_enabled 2>/dev/null || true
+		echo -e "${YELLOW}[!] Cloudflare Anti-Flag & ISP Masking bypassed. Standard full tunnel profile will be generated.${NC}"
+	else
+		CF_AUTO_ENABLE="y"
+	fi
 
 	WEB_PORT=${WEB_PORT:-51821}
 
@@ -337,7 +343,7 @@ function installWireGuard() {
 
 	cleanupOldWireguard
 
-	echo -e "\n${CYAN}[*] Installing system dependencies (wireguard, iptables, qrencode, nodejs)...${NC}"
+	echo -e "\n${CYAN}[*] Checking and installing system dependencies (wireguard, iptables, qrencode)...${NC}"
 
 	for i in {1..10}; do
 		if fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1; then
@@ -355,19 +361,48 @@ function installWireGuard() {
 	echo "iptables-persistent iptables-persistent/autosave_v6 boolean true" | debconf-set-selections 2>/dev/null || true
 
 	if [[ "${OS}" == "ubuntu" || "${OS}" == "debian" ]]; then
-		apt-get update -o Acquire::Http::Timeout="10" -o Acquire::Ftp::Timeout="10" -y -q || true
-		apt-get install -y -q -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" wireguard wireguard-tools iptables qrencode curl jq iproute2 iptables-persistent net-tools ipset dnsmasq || true
-	elif [[ "${OS}" == "fedora" || "${OS}" == "centos" || "${OS}" == "almalinux" || "${OS}" == "rocky" ]]; then
-		yum install -y wireguard-tools iptables qrencode curl jq ipset dnsmasq || true
-	elif [[ "${OS}" == "arch" ]]; then
-		pacman -S --needed --noconfirm wireguard-tools qrencode iptables curl jq ipset dnsmasq || true
-	elif [[ "${OS}" == "alpine" ]]; then
-		apk update && apk add wireguard-tools iptables libqrencode-tools curl jq ipset dnsmasq || true
-	fi
+		local NEED_APT_INSTALL=0
+		local MISSING_PKGS=()
+		for pkg in wireguard wireguard-tools iptables qrencode curl jq iproute2 iptables-persistent net-tools; do
+			if ! dpkg -s "$pkg" &>/dev/null; then
+				NEED_APT_INSTALL=1
+				MISSING_PKGS+=("$pkg")
+			fi
+		done
 
-	# Safely isolate dnsmasq to avoid unconfigured port 53 collision with host systemd-resolved
-	systemctl stop dnsmasq >/dev/null 2>&1 || true
-	systemctl disable dnsmasq >/dev/null 2>&1 || true
+		if [[ "$NEED_APT_INSTALL" -eq 1 ]]; then
+			echo -e "${YELLOW}[*] Installing required packages (${MISSING_PKGS[*]})...${NC}"
+			# Only update package indices if apt cache doesn't already know about wireguard
+			local CACHE_HAS_PKGS=1
+			for pkg in "${MISSING_PKGS[@]}"; do
+				if ! apt-cache show "$pkg" &>/dev/null; then
+					CACHE_HAS_PKGS=0
+					break
+				fi
+			done
+
+			if [[ "$CACHE_HAS_PKGS" -eq 0 ]]; then
+				echo -e "${YELLOW}[*] Updating package index (minimal fetch, skipping non-essential translation lists)...${NC}"
+				apt-get update -o Acquire::Languages=none \
+				               -o Acquire::IndexTargets::deb::Contents-deb::MetaKey="" \
+				               -o Acquire::Http::Timeout="8" \
+				               -o Acquire::Retries="1" \
+				               -y -q || true
+			fi
+
+			apt-get install -y -q -o Dpkg::Options::="--force-confdef" \
+			                      -o Dpkg::Options::="--force-confold" \
+			                      "${MISSING_PKGS[@]}" || true
+		else
+			echo -e "${GREEN}[✔] Core WireGuard packages already installed. Skipping package index fetch.${NC}"
+		fi
+	elif [[ "${OS}" == "fedora" || "${OS}" == "centos" || "${OS}" == "almalinux" || "${OS}" == "rocky" ]]; then
+		yum install -y wireguard-tools iptables qrencode curl jq ipset || true
+	elif [[ "${OS}" == "arch" ]]; then
+		pacman -S --needed --noconfirm wireguard-tools qrencode iptables curl jq ipset || true
+	elif [[ "${OS}" == "alpine" ]]; then
+		apk update && apk add wireguard-tools iptables libqrencode-tools curl jq ipset || true
+	fi
 
 	# Ensure host resolv.conf always maintains clean, operational Anycast nameservers
 	if ! grep -q -E "nameserver [0-9]" /etc/resolv.conf 2>/dev/null; then
@@ -472,6 +507,7 @@ ALLOWED_IPS=${ALLOWED_IPS}
 WEB_PORT=${WEB_PORT:-51821}
 ADMIN_PASSKEY=${ADMIN_PASSKEY}
 HAS_IPV6=${HAS_IPV6}
+CF_AUTO_ENABLE=${CF_AUTO_ENABLE:-y}
 PARAMS_EOF
 	chmod 600 /etc/wireguard/params
 
@@ -511,15 +547,17 @@ MTU = 1420
 SaveConfig = false
 
 # --- STEALTH & PACKET ROUTING FIREWALL RULES ---
-PostUp = iptables -I INPUT -p udp --dport ${SERVER_PORT} -j ACCEPT 2>/dev/null || true
-PostUp = iptables -A FORWARD -i ${SERVER_WG_NIC} -j ACCEPT 2>/dev/null || true
-PostUp = iptables -A FORWARD -o ${SERVER_WG_NIC} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
-PostUp = iptables -t nat -A POSTROUTING -s 10.18.0.0/24 -o ${SERVER_PUB_NIC} -j MASQUERADE 2>/dev/null || true
-PostUp = iptables -t nat -A POSTROUTING -o ${SERVER_PUB_NIC} -j MASQUERADE 2>/dev/null || true
+PostUp = iptables -I INPUT 1 -p udp --dport ${SERVER_PORT} -j ACCEPT 2>/dev/null || true
+PostUp = iptables -I FORWARD 1 -i ${SERVER_WG_NIC} -j ACCEPT 2>/dev/null || true
+PostUp = iptables -I FORWARD 2 -o ${SERVER_WG_NIC} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+PostUp = iptables -I FORWARD 3 -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
+PostUp = iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 ! -o ${SERVER_WG_NIC} -j MASQUERADE 2>/dev/null || true
+PostUp = iptables -t nat -I POSTROUTING 2 -o ${SERVER_PUB_NIC} -j MASQUERADE 2>/dev/null || true
 PostDown = iptables -D INPUT -p udp --dport ${SERVER_PORT} -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -i ${SERVER_WG_NIC} -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -o ${SERVER_WG_NIC} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
-PostDown = iptables -t nat -D POSTROUTING -s 10.18.0.0/24 -o ${SERVER_PUB_NIC} -j MASQUERADE 2>/dev/null || true
+PostDown = iptables -D FORWARD -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
+PostDown = iptables -t nat -D POSTROUTING -s 10.18.0.0/24 ! -o ${SERVER_WG_NIC} -j MASQUERADE 2>/dev/null || true
 PostDown = iptables -t nat -D POSTROUTING -o ${SERVER_PUB_NIC} -j MASQUERADE 2>/dev/null || true
 WG_SERVER_EOF
 
@@ -599,7 +637,7 @@ EOF_V6
 	fi
 
 	# Auto-Configure Essential Cloudflare Anti-Flag & Mask ISP Host Engine Components
-	if [[ "${CF_AUTO_ENABLE:-y}" =~ ^[Yy]$ ]]; then
+	if [[ "${CF_AUTO_ENABLE}" == "y" ]]; then
 		echo -e "\n${CYAN}[*] Auto-Configuring Essential Cloudflare Anti-Flag & ISP Masking Engine...${NC}"
 		mkdir -p /etc/wireguard
 		touch /etc/wireguard/cloudflare_shield_enabled
@@ -620,6 +658,9 @@ CF_INIT_DOMAINS
 
 		applyDomainSplitRulesLive
 		echo -e "${GREEN}[✔] Cloudflare Anti-Flag Shield & Turnstile Bypass auto-configured into installation!${NC}"
+	else
+		echo -e "\n${GREEN}[✔] Standard Full Tunnel configured. Cloudflare Anti-Flag bypassed.${NC}"
+		rm -f /etc/wireguard/cloudflare_shield_enabled /etc/wireguard/cloudflare_split_enabled 2>/dev/null || true
 	fi
 
 	newClientInternal "${CLIENT_NAME}"
@@ -759,12 +800,15 @@ function newClientInternal() {
 	local HOME_DIR
 	HOME_DIR=$(getHomeDirForClient "${CLIENT_NAME}")
 
+	local SUBNET_BASE
+	SUBNET_BASE=$(echo "${SERVER_WG_IPV4:-10.18.0.1}" | cut -d'.' -f1-3)
+	[[ -z "$SUBNET_BASE" ]] && SUBNET_BASE="10.18.0"
 	local OCTET=2
-	while grep -q "10.18.0.${OCTET}/32" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" 2>/dev/null; do
+	while grep -q "${SUBNET_BASE}.${OCTET}/32" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" 2>/dev/null; do
 		((OCTET++))
 	done
 
-	local CLIENT_WG_IPV4="10.18.0.${OCTET}"
+	local CLIENT_WG_IPV4="${SUBNET_BASE}.${OCTET}"
 	local CLIENT_WG_IPV6="fd42:42:42::${OCTET}"
 
 	local CLIENT_PRIV_KEY
@@ -791,7 +835,7 @@ function newClientInternal() {
 		PEER_ALLOWED_IPS="${CLIENT_WG_IPV4}/32,${CLIENT_WG_IPV6}/128"
 	fi
 
-	local CLIENT_DNS_LINE="${CLIENT_DNS_1}"
+	local CLIENT_DNS_LINE="${CLIENT_DNS_1:-1.1.1.1}"
 	if [[ -n "${CLIENT_DNS_2}" && "${CLIENT_DNS_2}" != "${CLIENT_DNS_1}" ]]; then
 		CLIENT_DNS_LINE="${CLIENT_DNS_1}, ${CLIENT_DNS_2}"
 	fi
@@ -807,17 +851,38 @@ MTU = 1420
 PublicKey = ${SERVER_PUB_KEY}
 PresharedKey = ${CLIENT_PRE_SHARED_KEY}
 Endpoint = ${ENDPOINT}
-AllowedIPs = ${ALLOWED_IPS}
+AllowedIPs = ${ALLOWED_IPS:-0.0.0.0/0, ::/0}
 PersistentKeepalive = 25
 CLIENT_EOF
 
 	chmod 600 "$CLIENT_CONF_PATH"
 	cp "$CLIENT_CONF_PATH" "${HOME_DIR}/${CLIENT_NAME}.conf" 2>/dev/null || cp "$CLIENT_CONF_PATH" "/root/${CLIENT_NAME}.conf"
 
-	# Generate Dedicated Cloudflare Anti-Flag & ISP Host Masking Residential Split Profile
-	local CF_SHIELD_CONF="/etc/wireguard/clients/${CLIENT_NAME}-cloudflare-shield.conf"
-	local CF_SPLIT_ALLOWED_IPS="224.0.0.0/3, 208.0.0.0/4, 200.0.0.0/5, 192.0.0.0/6, 196.0.0.0/7, 199.0.0.0/8, 198.128.0.0/9, 198.64.0.0/10, 198.0.0.0/11, 198.48.0.0/12, 198.32.0.0/13, 198.44.0.0/14, 198.42.0.0/15, 198.40.0.0/16, 198.41.0.0/17, 128.0.0.0/3, 176.0.0.0/4, 164.0.0.0/6, 160.0.0.0/7, 163.0.0.0/8, 162.0.0.0/9, 162.192.0.0/10, 162.160.0.0/11, 162.128.0.0/12, 162.144.0.0/13, 162.152.0.0/14, 162.156.0.0/15, 168.0.0.0/6, 174.0.0.0/7, 173.0.0.0/8, 172.128.0.0/9, 172.0.0.0/10, 172.96.0.0/11, 172.80.0.0/12, 172.72.0.0/13, 0.0.0.0/2, 64.0.0.0/3, 112.0.0.0/4, 96.0.0.0/5, 108.0.0.0/6, 106.0.0.0/7, 105.0.0.0/8, 104.128.0.0/9, 104.64.0.0/10, 104.32.0.0/11, 104.0.0.0/12"
-	cat << CF_CLIENT_EOF > "$CF_SHIELD_CONF"
+	cat << PEER_EOF >> "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf"
+
+### Client ${CLIENT_NAME}
+[Peer]
+PublicKey = ${CLIENT_PUB_KEY}
+PresharedKey = ${CLIENT_PRE_SHARED_KEY}
+AllowedIPs = ${PEER_ALLOWED_IPS}
+PEER_EOF
+
+	if command -v wg-quick &>/dev/null && command -v wg &>/dev/null; then
+		wg syncconf "${SERVER_WG_NIC:-wg0}" <(wg-quick strip "${SERVER_WG_NIC:-wg0}") 2>/dev/null || true
+	fi
+
+	local IS_CF_SHIELD=0
+	if [[ "${CF_AUTO_ENABLE:-n}" =~ ^[Yy]$ && -f /etc/wireguard/cloudflare_shield_enabled ]]; then
+		IS_CF_SHIELD=1
+	fi
+
+	echo -e "${GREEN}[✔] Peer ${CLIENT_NAME} created successfully! (${CLIENT_WG_IPV4})${NC}"
+
+	if [[ "$IS_CF_SHIELD" -eq 1 ]]; then
+		# Generate Dedicated Cloudflare Anti-Flag & ISP Host Masking Residential Split Profile ONLY if enabled
+		local CF_SHIELD_CONF="/etc/wireguard/clients/${CLIENT_NAME}-cloudflare-shield.conf"
+		local CF_SPLIT_ALLOWED_IPS="224.0.0.0/3, 208.0.0.0/4, 200.0.0.0/5, 192.0.0.0/6, 196.0.0.0/7, 199.0.0.0/8, 198.128.0.0/9, 198.64.0.0/10, 198.0.0.0/11, 198.48.0.0/12, 198.32.0.0/13, 198.44.0.0/14, 198.42.0.0/15, 198.40.0.0/16, 198.41.0.0/17, 128.0.0.0/3, 176.0.0.0/4, 164.0.0.0/6, 160.0.0.0/7, 163.0.0.0/8, 162.0.0.0/9, 162.192.0.0/10, 162.160.0.0/11, 162.128.0.0/12, 162.144.0.0/13, 162.152.0.0/14, 162.156.0.0/15, 168.0.0.0/6, 174.0.0.0/7, 173.0.0.0/8, 172.128.0.0/9, 172.0.0.0/10, 172.96.0.0/11, 172.80.0.0/12, 172.72.0.0/13, 0.0.0.0/2, 64.0.0.0/3, 112.0.0.0/4, 96.0.0.0/5, 108.0.0.0/6, 106.0.0.0/7, 105.0.0.0/8, 104.128.0.0/9, 104.64.0.0/10, 104.32.0.0/11, 104.0.0.0/12"
+		cat << CF_CLIENT_EOF > "$CF_SHIELD_CONF"
 # ☁️ Cloudflare Anti-Flag & Residential ISP Mask Profile
 # Encrypts & routes standard traffic via WireGuard VPS, while routing Cloudflare
 # Edge & Turnstile directly via your home ISP to eliminate Turnstile bot blocks.
@@ -834,30 +899,9 @@ Endpoint = ${ENDPOINT}
 AllowedIPs = ${CF_SPLIT_ALLOWED_IPS}
 PersistentKeepalive = 25
 CF_CLIENT_EOF
-	chmod 600 "$CF_SHIELD_CONF"
-	cp "$CF_SHIELD_CONF" "${HOME_DIR}/${CLIENT_NAME}-cloudflare-shield.conf" 2>/dev/null || cp "$CF_SHIELD_CONF" "/root/${CLIENT_NAME}-cloudflare-shield.conf"
+		chmod 600 "$CF_SHIELD_CONF"
+		cp "$CF_SHIELD_CONF" "${HOME_DIR}/${CLIENT_NAME}-cloudflare-shield.conf" 2>/dev/null || cp "$CF_SHIELD_CONF" "/root/${CLIENT_NAME}-cloudflare-shield.conf"
 
-	cat << PEER_EOF >> "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf"
-
-### Client ${CLIENT_NAME}
-[Peer]
-PublicKey = ${CLIENT_PUB_KEY}
-PresharedKey = ${CLIENT_PRE_SHARED_KEY}
-AllowedIPs = ${PEER_ALLOWED_IPS}
-PEER_EOF
-
-	if command -v wg-quick &>/dev/null && command -v wg &>/dev/null; then
-		wg syncconf "${SERVER_WG_NIC:-wg0}" <(wg-quick strip "${SERVER_WG_NIC:-wg0}") 2>/dev/null || true
-	fi
-
-	local IS_CF_SHIELD=0
-	if [[ "${CF_AUTO_ENABLE:-n}" =~ ^[Yy]$ ]] || [[ -f /etc/wireguard/cloudflare_shield_enabled ]]; then
-		IS_CF_SHIELD=1
-	fi
-
-	echo -e "${GREEN}[✔] Peer ${CLIENT_NAME} created successfully! (${CLIENT_WG_IPV4})${NC}"
-
-	if [[ "$IS_CF_SHIELD" -eq 1 ]]; then
 		echo -e "  ${BOLD}1. Standard Full Tunnel:${NC}       ${GREEN}${HOME_DIR}/${CLIENT_NAME}.conf${NC}"
 		echo -e "  ${BOLD}2. Cloudflare Anti-Flag Profile:${NC} ${CYAN}${HOME_DIR}/${CLIENT_NAME}-cloudflare-shield.conf${NC}\n"
 
@@ -875,6 +919,7 @@ PEER_EOF
 			echo ""
 		fi
 	else
+		rm -f "/etc/wireguard/clients/${CLIENT_NAME}-cloudflare-shield.conf" "${HOME_DIR}/${CLIENT_NAME}-cloudflare-shield.conf" "/root/${CLIENT_NAME}-cloudflare-shield.conf" 2>/dev/null || true
 		echo -e "  ${BOLD}Client Profile Path:${NC} ${GREEN}${HOME_DIR}/${CLIENT_NAME}.conf${NC}\n"
 
 		echo -e "${CYAN}${BOLD}📋 WireGuard Client Configuration (${CLIENT_NAME}.conf):${NC}"
@@ -1059,16 +1104,15 @@ function applyDomainSplitRulesLive() {
 	local MODE
 	MODE=$(cat /etc/wireguard/split_mode.txt 2>/dev/null || echo "BYPASS")
 
-	# Check and install ipset & dnsmasq for high speed dynamic domain routing
+	# Check and install ipset for high speed dynamic domain routing
 	if command -v apt-get &>/dev/null; then
-		if ! command -v ipset &>/dev/null || ! command -v dnsmasq &>/dev/null; then
-			echo -e "${YELLOW}[*] Installing ipset & dnsmasq for dynamic stealth domain routing...${NC}"
-			apt-get update -y -q >/dev/null 2>&1 || true
-			apt-get install -y -q ipset dnsmasq >/dev/null 2>&1 || true
+		if ! command -v ipset &>/dev/null; then
+			echo -e "${YELLOW}[*] Installing ipset for dynamic stealth domain routing...${NC}"
+			apt-get install -y -q ipset >/dev/null 2>&1 || (apt-get update -o Acquire::Languages=none -qq >/dev/null 2>&1 && apt-get install -y -q ipset >/dev/null 2>&1) || true
 		fi
 	elif command -v yum &>/dev/null; then
-		if ! command -v ipset &>/dev/null || ! command -v dnsmasq &>/dev/null; then
-			yum install -y ipset dnsmasq >/dev/null 2>&1 || true
+		if ! command -v ipset &>/dev/null; then
+			yum install -y ipset >/dev/null 2>&1 || true
 		fi
 	fi
 
@@ -1088,11 +1132,12 @@ bogus-priv
 filterwin2k
 # Strict interface isolation: bind ONLY to internal WireGuard tunnel, preserving host resolver
 interface=${SERVER_WG_NIC:-wg0}
+except-interface=lo
 bind-interfaces
 listen-address=${SERVER_WG_IPV4:-10.18.0.1}
 no-resolv
 server=1.1.1.1
-server=1.0.0.1
+server=8.8.8.8
 DNSMASQ_STEALTH_EOF
 
 	# Clear previous iptables and ip6tables split rules
@@ -1169,12 +1214,21 @@ DNSMASQ_STEALTH_EOF
 		fi
 	fi
 
+	# GUARANTEE CORE FORWARD & MASQUERADE ARE ALWAYS ACTIVE
+	iptables -I FORWARD 1 -i "${SERVER_WG_NIC:-wg0}" -j ACCEPT 2>/dev/null || true
+	iptables -I FORWARD 2 -o "${SERVER_WG_NIC:-wg0}" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+	iptables -I FORWARD 3 -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
+	iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 ! -o "${SERVER_WG_NIC:-wg0}" -j MASQUERADE 2>/dev/null || true
+	sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+
 	# Re-apply Stealth Packet Normalization Rules
 	local TARGET_TTL=64
 	local TARGET_MSS=1360
 	if [[ -f /etc/wireguard/emulate_windows_ttl ]]; then
 		TARGET_TTL=128
 	fi
+	iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+	iptables -t mangle -I FORWARD 2 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss ${TARGET_MSS} 2>/dev/null || true
 	iptables -t mangle -D POSTROUTING -p tcp --tcp-flags SYN,RST SYN -o "${SERVER_PUB_NIC:-eth0}" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 	iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -o "${SERVER_PUB_NIC:-eth0}" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 	iptables -t mangle -D POSTROUTING -o "${SERVER_PUB_NIC:-eth0}" -j TTL --ttl-set 64 2>/dev/null || true
@@ -1182,11 +1236,19 @@ DNSMASQ_STEALTH_EOF
 	iptables -t mangle -A POSTROUTING -o "${SERVER_PUB_NIC:-eth0}" -j TTL --ttl-set ${TARGET_TTL} 2>/dev/null || true
 	ip6tables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -o "${SERVER_PUB_NIC:-eth0}" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 
-	if systemctl is-active --quiet dnsmasq 2>/dev/null; then
-		systemctl reload dnsmasq >/dev/null 2>&1 || systemctl restart dnsmasq >/dev/null 2>&1 || true
-	else
-		systemctl enable dnsmasq >/dev/null 2>&1 || true
-		systemctl start dnsmasq >/dev/null 2>&1 || true
+	# Protect host DNS resolvers from corruption
+	if ! grep -q -E "nameserver [0-9]" /etc/resolv.conf 2>/dev/null || grep -q "127.0.0.1" /etc/resolv.conf 2>/dev/null; then
+		cat << 'RESOLV_PROTECT' > /etc/resolv.conf 2>/dev/null || true
+nameserver 1.1.1.1
+nameserver 1.0.0.1
+nameserver 8.8.8.8
+RESOLV_PROTECT
+	fi
+
+	if command -v dnsmasq &>/dev/null; then
+		if systemctl is-active --quiet dnsmasq 2>/dev/null; then
+			systemctl reload dnsmasq >/dev/null 2>&1 || systemctl restart dnsmasq >/dev/null 2>&1 || true
+		fi
 	fi
 
 	echo -e "${GREEN}[✔] Stealth Split Rules applied for ${DOMAIN_COUNT} domain(s) & subdomains in [${MODE}] mode.${NC}"
@@ -1465,6 +1527,8 @@ RESOLV_CLEAN_EOF
 	# 2. Re-enable IP forwarding & kernel networking
 	echo -e "${CYAN}[2/5] Verifying kernel IP forwarding and BBR/MTU probing...${NC}"
 	sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+	sysctl -w net.ipv4.conf.all.forwarding=1 >/dev/null 2>&1 || true
+	sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || true
 	sysctl -w net.ipv4.tcp_mtu_probing=1 >/dev/null 2>&1 || true
 	sysctl -w net.ipv4.tcp_syncookies=1 >/dev/null 2>&1 || true
 
@@ -1484,18 +1548,29 @@ RESOLV_CLEAN_EOF
 		systemctl restart "wg-quick@${SERVER_WG_NIC:-wg0}" 2>/dev/null || wg-quick up "${SERVER_WG_NIC:-wg0}" 2>/dev/null || true
 	fi
 
-	# 5. Re-apply essential firewall NAT, MSS clamping and TTL rules
-	echo -e "${CYAN}[5/5] Re-applying stealth camouflage & NAT firewall rules...${NC}"
-	iptables -t nat -A POSTROUTING -o "${SERVER_PUB_NIC:-eth0}" -j MASQUERADE 2>/dev/null || true
-	iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-	iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1360 2>/dev/null || true
-	iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -o "${SERVER_PUB_NIC:-eth0}" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-	iptables -t mangle -A POSTROUTING -o "${SERVER_PUB_NIC:-eth0}" -j TTL --ttl-set 64 2>/dev/null || true
+	# 5. Re-apply essential firewall NAT, MSS clamping and Forwarding rules
+	echo -e "${CYAN}[5/5] Re-applying stealth camouflage, FORWARD & NAT firewall rules...${NC}"
+	local DEF_NIC="${SERVER_PUB_NIC}"
+	if [[ -z "$DEF_NIC" ]]; then
+		DEF_NIC=$(ip -4 route show default 2>/dev/null | awk '/dev/ {for (i=1; i<=NF; i++) if ($i == "dev") print $(i+1)}' | head -n1 || echo "eth0")
+	fi
+	# Unblock FORWARD chain for WireGuard clients
+	iptables -I FORWARD 1 -i "${SERVER_WG_NIC:-wg0}" -j ACCEPT 2>/dev/null || true
+	iptables -I FORWARD 2 -o "${SERVER_WG_NIC:-wg0}" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+	iptables -I FORWARD 3 -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
+	# Ensure outgoing NAT
+	iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 ! -o "${SERVER_WG_NIC:-wg0}" -j MASQUERADE 2>/dev/null || true
+	iptables -t nat -I POSTROUTING 2 -o "${DEF_NIC}" -j MASQUERADE 2>/dev/null || true
+	# MSS Clamping & TTL Normalization
+	iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+	iptables -t mangle -I FORWARD 2 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1360 2>/dev/null || true
+	iptables -t mangle -I POSTROUTING 1 -p tcp --tcp-flags SYN,RST SYN -o "${DEF_NIC}" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+	iptables -t mangle -I POSTROUTING 2 -o "${DEF_NIC}" -j TTL --ttl-set 64 2>/dev/null || true
 
 	if curl -sSf --max-time 4 https://www.cloudflare.com/cdn-cgi/trace >/dev/null 2>&1; then
-		echo -e "${GREEN}[✔] Health Auto-Repair COMPLETE: Host DNS and Cloudflare connectivity verified!${NC}\n"
+		echo -e "${GREEN}[✔] Health Auto-Repair COMPLETE: Host DNS, WireGuard forwarding and connectivity verified!${NC}\n"
 	else
-		echo -e "${GREEN}[✔] Auto-Repair routines executed. WireGuard daemon active.${NC}\n"
+		echo -e "${GREEN}[✔] Auto-Repair routines executed. WireGuard daemon active & traffic forwarding enabled.${NC}\n"
 	fi
 }
 
@@ -1619,7 +1694,8 @@ function cloudflareAntiFlagEngine() {
 				read -n1 -r -p "Press Enter to continue..."
 				;;
 			6)
-				rm -f /etc/wireguard/warp_egress_enabled /etc/wireguard/cloudflare_split_enabled /etc/wireguard/upstream_proxy.conf
+				rm -f /etc/wireguard/cloudflare_shield_enabled /etc/wireguard/warp_egress_enabled /etc/wireguard/cloudflare_split_enabled /etc/wireguard/upstream_proxy.conf
+				autoRepairNetwork
 				echo -e "${GREEN}[✔] Cloudflare Anti-Flag and Proxy configurations reset to direct VPS routing.${NC}\n"
 				;;
 			7)

@@ -114,10 +114,10 @@ function generateWgKey(): string {
 }
 
 // -------------------------------------------------------------
-// Auto-Detection Logic based on install.sh and host environment
+// Auto-Detection Logic based on easy_wireguard.sh and host environment
 // -------------------------------------------------------------
 function getAutoDetectedPublicIp(): string {
-  // 1. Check if install.sh wrote /etc/wireguard/manager.env
+  // 1. Check if easy_wireguard.sh wrote /etc/wireguard/manager.env
   if (fs.existsSync('/etc/wireguard/manager.env')) {
     try {
       const content = fs.readFileSync('/etc/wireguard/manager.env', 'utf8');
@@ -148,7 +148,7 @@ function getAutoDetectedPublicIp(): string {
 }
 
 function getAutoDetectedWgPort(): number {
-  // 1. Check if install.sh wrote /etc/wireguard/manager.env
+  // 1. Check if easy_wireguard.sh wrote /etc/wireguard/manager.env
   if (fs.existsSync('/etc/wireguard/manager.env')) {
     try {
       const content = fs.readFileSync('/etc/wireguard/manager.env', 'utf8');
@@ -725,7 +725,7 @@ function generateClientConfigText(peer: Peer, antiFlag: boolean = false): string
 
   return `${header}[Interface]
 PrivateKey = ${peer.privateKey}
-Address = ${peer.ip}/24
+Address = ${peer.ip}/32
 DNS = ${peer.dns}
 MTU = ${peer.mtu}
 
@@ -738,18 +738,18 @@ PersistentKeepalive = 25
 `;
 }
 
-// ======================== STATIC INSTALL.SH ROUTE ========================
+// ======================== STATIC EASY_WIREGUARD.SH ROUTE ========================
 const serveInstallScript = (_req: Request, res: Response) => {
-  const installPath = path.resolve(__dirname, 'install.sh');
+  const installPath = path.resolve(__dirname, 'easy_wireguard.sh');
   if (fs.existsSync(installPath)) {
     res.type('text/x-shellscript').sendFile(installPath);
   } else {
-    res.type('text/plain').status(404).send('#!/bin/bash\necho "install.sh file not found"\n');
+    res.type('text/plain').status(404).send('#!/bin/bash\necho "easy_wireguard.sh file not found"\n');
   }
 };
 
-app.get('/install.sh', serveInstallScript);
-app.get('/api/install.sh', serveInstallScript);
+app.get(['/easy_wireguard.sh', '/install.sh'], serveInstallScript);
+app.get(['/api/easy_wireguard.sh', '/api/install.sh'], serveInstallScript);
 
 // ======================== AUTH & GATEKEEPER APIS ========================
 app.get('/api/auth/status', (req: Request, res: Response) => {
@@ -1127,6 +1127,7 @@ app.post('/api/cloudflare-shield/repair', requireVpnOrAuth, (_req: Request, res:
     if (process.platform === 'linux' && fs.existsSync('/etc/wireguard')) {
       execSync(`
         sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true
+        sysctl -w net.ipv4.conf.all.forwarding=1 2>/dev/null || true
         sysctl -w net.ipv4.tcp_mtu_probing=1 2>/dev/null || true
         sysctl -w net.ipv4.tcp_syncookies=1 2>/dev/null || true
         cat << 'EOF_RESOLV' > /tmp/clean_resolv.conf
@@ -1138,11 +1139,15 @@ EOF_RESOLV
         rm -f /tmp/clean_resolv.conf
         systemctl stop dnsmasq 2>/dev/null || true
         DEF_IF=$(ip -4 route show default 2>/dev/null | awk '/dev/ {for (i=1; i<=NF; i++) if ($i == "dev") print $(i+1)}' | head -n1 || echo eth0)
-        iptables -t nat -A POSTROUTING -o "$DEF_IF" -j MASQUERADE 2>/dev/null || true
-        iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-        iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1360 2>/dev/null || true
-        iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-        iptables -t mangle -A POSTROUTING -j TTL --ttl-set 64 2>/dev/null || true
+        iptables -I FORWARD 1 -i wg0 -j ACCEPT 2>/dev/null || true
+        iptables -I FORWARD 2 -o wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+        iptables -I FORWARD 3 -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
+        iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 ! -o wg0 -j MASQUERADE 2>/dev/null || true
+        iptables -t nat -I POSTROUTING 2 -o "$DEF_IF" -j MASQUERADE 2>/dev/null || true
+        iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+        iptables -t mangle -I FORWARD 2 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1360 2>/dev/null || true
+        iptables -t mangle -I POSTROUTING 1 -p tcp --tcp-flags SYN,RST SYN -o "$DEF_IF" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+        iptables -t mangle -I POSTROUTING 2 -j TTL --ttl-set 64 2>/dev/null || true
         systemctl restart wg-quick@wg0 2>/dev/null || true
       `, { timeout: 8000, shell: '/bin/bash' });
     }
@@ -1597,18 +1602,6 @@ app.put('/api/settings', requireVpnOrAuth, (req: Request, res: Response) => {
   });
 
   res.json({ success: true, serverState });
-});
-
-app.get(['/install.sh', '/easy_wireguard.sh'], (_req: Request, res: Response) => {
-  const scriptPath = fs.existsSync(path.resolve(__dirname, 'easy_wireguard.sh'))
-    ? path.resolve(__dirname, 'easy_wireguard.sh')
-    : path.resolve(__dirname, 'install.sh');
-  if (fs.existsSync(scriptPath)) {
-    res.setHeader('Content-Type', 'text/x-shellscript');
-    res.sendFile(scriptPath);
-  } else {
-    res.status(404).send('Script not found');
-  }
 });
 
 // Setup Vite or static serving

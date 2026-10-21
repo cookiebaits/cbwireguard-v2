@@ -44,7 +44,7 @@ export const DeployScriptTab: React.FC<DeployScriptTabProps> = ({ server }) => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'install.sh';
+    a.download = 'easy_wireguard.sh';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -105,7 +105,7 @@ export const DeployScriptTab: React.FC<DeployScriptTabProps> = ({ server }) => {
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Server className="w-4 h-4 text-purple-400" />
-            <span className="text-sm font-bold text-white">Full Installer Shell Script (`easy_wireguard.sh` / `install.sh`)</span>
+            <span className="text-sm font-bold text-white">Full Installer Shell Script (`easy_wireguard.sh`)</span>
           </div>
           <div className="flex items-center gap-2">
             <button

@@ -21,9 +21,9 @@ export const AddPeerModal: React.FC<AddPeerModalProps> = ({
   defaultAllowedIps,
 }) => {
   const [name, setName] = useState('');
-  const [allowedIpsPreset, setAllowedIpsPreset] = useState<'cloudflare' | 'stealth' | 'full' | 'custom'>('cloudflare');
+  const [allowedIpsPreset, setAllowedIpsPreset] = useState<'full' | 'cloudflare' | 'stealth' | 'custom'>('full');
   const [customAllowedIps, setCustomAllowedIps] = useState('0.0.0.0/1, 128.0.0.0/1');
-  const [dnsPreset, setDnsPreset] = useState<'adguard' | 'quad9' | 'cloudflare' | 'custom'>('adguard');
+  const [dnsPreset, setDnsPreset] = useState<'cloudflare' | 'adguard' | 'quad9' | 'custom'>('cloudflare');
   const [customDns, setCustomDns] = useState(defaultDns);
   const [mtu, setMtu] = useState(defaultMtu);
   const [submitting, setSubmitting] = useState(false);
@@ -42,9 +42,9 @@ export const AddPeerModal: React.FC<AddPeerModalProps> = ({
     setError(null);
 
     let finalAllowedIps = defaultAllowedIps;
-    if (allowedIpsPreset === 'cloudflare') finalAllowedIps = CF_BYPASS_CIDRS;
+    if (allowedIpsPreset === 'full') finalAllowedIps = '0.0.0.0/0, ::/0';
+    else if (allowedIpsPreset === 'cloudflare') finalAllowedIps = CF_BYPASS_CIDRS;
     else if (allowedIpsPreset === 'stealth') finalAllowedIps = '0.0.0.0/1, 128.0.0.0/1';
-    else if (allowedIpsPreset === 'full') finalAllowedIps = '0.0.0.0/0';
     else finalAllowedIps = customAllowedIps;
 
     let finalDns = defaultDns;
@@ -131,6 +131,21 @@ export const AddPeerModal: React.FC<AddPeerModalProps> = ({
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-2">
               <button
                 type="button"
+                onClick={() => setAllowedIpsPreset('full')}
+                className={`p-2.5 text-xs font-medium rounded-xl border text-left transition ${
+                  allowedIpsPreset === 'full'
+                    ? 'bg-emerald-950/50 border-emerald-500 text-emerald-300 shadow-sm'
+                    : 'bg-[#070b14] border-slate-800 text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <div className="font-bold flex items-center gap-1.5">
+                  <HardDrive className="w-3.5 h-3.5 text-emerald-400" />
+                  Full Tunnel
+                </div>
+                <div className="text-[10px] text-emerald-400/80 mt-0.5">Standard (0.0.0.0/0, ::/0)</div>
+              </button>
+              <button
+                type="button"
                 onClick={() => setAllowedIpsPreset('cloudflare')}
                 className={`p-2.5 text-xs font-medium rounded-xl border text-left transition ${
                   allowedIpsPreset === 'cloudflare'
@@ -142,7 +157,7 @@ export const AddPeerModal: React.FC<AddPeerModalProps> = ({
                   <Cloud className="w-3.5 h-3.5 text-amber-400" />
                   Anti-Flag Direct
                 </div>
-                <div className="text-[10px] text-amber-400/80 mt-0.5">Bypasses Turnstile/WAF</div>
+                <div className="text-[10px] text-amber-400/80 mt-0.5">Cloudflare Turnstile Split</div>
               </button>
               <button
                 type="button"
@@ -155,24 +170,9 @@ export const AddPeerModal: React.FC<AddPeerModalProps> = ({
               >
                 <div className="font-bold flex items-center gap-1.5">
                   <ShieldCheck className="w-3.5 h-3.5 text-purple-400" />
-                  Stealth Split
+                  Dual /1 Split
                 </div>
                 <div className="text-[10px] text-slate-400 font-mono mt-0.5">0.0.0.0/1, 128/1</div>
-              </button>
-              <button
-                type="button"
-                onClick={() => setAllowedIpsPreset('full')}
-                className={`p-2.5 text-xs font-medium rounded-xl border text-left transition ${
-                  allowedIpsPreset === 'full'
-                    ? 'bg-purple-950/50 border-purple-500 text-purple-300'
-                    : 'bg-[#070b14] border-slate-800 text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                <div className="font-bold flex items-center gap-1.5">
-                  <HardDrive className="w-3.5 h-3.5 text-purple-400" />
-                  Full Tunnel
-                </div>
-                <div className="text-[10px] text-slate-400 font-mono mt-0.5">0.0.0.0/0</div>
               </button>
             </div>
             {allowedIpsPreset === 'custom' && (

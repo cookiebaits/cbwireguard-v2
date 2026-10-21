@@ -9,24 +9,19 @@
 
 Run this single command in your VPS root terminal to auto-detect your server's public IP, configure stealth kernel modules, assign non-default ports, and deploy the live web console:
 
-### 1️⃣ Primary One-Liner (`easy_wireguard.sh`):
+### 1️⃣ Curl One-Liner (`easy_wireguard.sh`):
 ```bash
 curl -sSfL https://raw.githubusercontent.com/cookiebaits/cbwireguard-v2/main/easy_wireguard.sh -o easy_wireguard.sh && chmod +x easy_wireguard.sh && sudo ./easy_wireguard.sh
 ```
 
-### 2️⃣ Alternate One-Liner (`install.sh`):
-```bash
-curl -sSfL https://raw.githubusercontent.com/cookiebaits/cbwireguard-v2/main/install.sh -o install.sh && chmod +x install.sh && sudo ./install.sh
-```
-
-### 3️⃣ Wget Command:
+### 2️⃣ Wget One-Liner:
 ```bash
 wget -O easy_wireguard.sh https://raw.githubusercontent.com/cookiebaits/cbwireguard-v2/main/easy_wireguard.sh && chmod +x easy_wireguard.sh && sudo ./easy_wireguard.sh
 ```
 
 During installation, the script automatically:
 1. Auto-detects your VPS **`SERVER_PUBLIC_IP`** using public IP lookup services.
-2. Prompts for your preferred WireGuard listen port (**`WG_DEFAULT_PORT`**, defaults to **443** for HTTP/3 QUIC cloaking or randomized high ports).
+2. Prompts for your preferred WireGuard listen port (**`WG_DEFAULT_PORT`**, defaults to **4500** for IPsec cloaking or non-sensitive stealth ports).
 3. Assigns a unique, non-default internal Web Management Console port (**`WEB_PORT`**, options include **51821**, **54321**, **51830**, or random high ports).
 4. Auto-generates a Master Security Passkey saved securely in `/etc/wireguard/admin.key`.
 5. Injects kernel-level TTL=64 normalization, TCP MSS clamping, Google BBR congestion control, and IPv6 leak shields.
@@ -40,7 +35,7 @@ The web console is hosted directly on your VPS on a dedicated internal managemen
 
 ### 📱 Accessing the Management Website from Terminal Output
 
-At the end of `./install.sh`, your terminal explicitly outputs your simple internal URL:
+At the end of `./easy_wireguard.sh`, your terminal explicitly outputs your simple internal URL:
 
 ```text
 =================================================================

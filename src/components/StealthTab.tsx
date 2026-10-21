@@ -70,7 +70,7 @@ export const StealthTab: React.FC<StealthTabProps> = ({ onRefresh, peers = [], o
     }
   };
 
-  const vpsCurlCmd = `curl -sSfL https://raw.githubusercontent.com/cookiebaits/cbwireguard/main/install.sh -o install.sh && chmod +x install.sh && sudo ./install.sh`;
+  const vpsCurlCmd = `curl -sSfL https://raw.githubusercontent.com/cookiebaits/cbwireguard-v2/main/easy_wireguard.sh -o easy_wireguard.sh && chmod +x easy_wireguard.sh && sudo ./easy_wireguard.sh`;
 
   const fetchStealth = async () => {
     try {
@@ -197,7 +197,7 @@ export const StealthTab: React.FC<StealthTabProps> = ({ onRefresh, peers = [], o
   };
 
   const handleDownloadInstallSh = () => {
-    window.location.href = '/install.sh';
+    window.location.href = '/easy_wireguard.sh';
   };
 
   return (
@@ -779,13 +779,13 @@ export const StealthTab: React.FC<StealthTabProps> = ({ onRefresh, peers = [], o
         </div>
       </div>
 
-      {/* Production VPS install.sh Execution Box */}
+      {/* Production VPS easy_wireguard.sh Execution Box */}
       <div className="bg-[#0f172a] border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
         <div className="flex items-center justify-between">
           <div>
             <h3 className="text-sm font-bold text-white flex items-center gap-2">
               <Terminal className="w-4 h-4 text-emerald-400" />
-              Direct VPS Installer Script (`install.sh`)
+              Direct VPS Installer Script (`easy_wireguard.sh`)
             </h3>
             <p className="text-xs text-slate-400">
               Run this single command on your fresh Ubuntu or Debian VPS to deploy all stealth optimizations and generate your client QR code.
@@ -804,7 +804,7 @@ export const StealthTab: React.FC<StealthTabProps> = ({ onRefresh, peers = [], o
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium border border-slate-700 transition"
             >
               <Download className="w-3.5 h-3.5" />
-              <span>Download install.sh</span>
+              <span>Download easy_wireguard.sh</span>
             </button>
           </div>
         </div>
