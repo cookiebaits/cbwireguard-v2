@@ -22,6 +22,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
   onNavigateToTab,
 }) => {
   const [copiedConf, setCopiedConf] = useState(false);
+  const [selectedConfIface, setSelectedConfIface] = useState<'wg0' | 'wg1'>('wg0');
   const [serverConfText, setServerConfText] = useState<string>('');
   const [loadingConf, setLoadingConf] = useState(false);
   const [confVisible, setConfVisible] = useState(false);
@@ -34,14 +35,11 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   };
 
-  const handleFetchServerConf = async () => {
-    if (serverConfText) {
-      setConfVisible(!confVisible);
-      return;
-    }
+  const handleFetchServerConf = async (iface: 'wg0' | 'wg1' = 'wg0') => {
+    setSelectedConfIface(iface);
     setLoadingConf(true);
     try {
-      const res = await fetch('/api/server/config');
+      const res = await fetch(`/api/server/config?interface=${iface}`);
       const text = await res.text();
       setServerConfText(text);
       setConfVisible(true);
@@ -63,38 +61,114 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'wg0.conf';
+    a.download = `${selectedConfIface}.conf`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   };
 
+  const wg0Instance = server?.instances?.find(i => i.interfaceName === 'wg0');
+  const wg1Instance = server?.instances?.find(i => i.interfaceName === 'wg1');
+
   return (
     <div className="space-y-6">
+      {/* Dual Instances Overview Banner */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {/* Instance 1: Standard WireGuard */}
+        <div className="bg-[#0f172a]/95 border border-emerald-500/30 rounded-2xl p-5 shadow-xl relative overflow-hidden">
+          <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+            <div className="flex items-center gap-2">
+              <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 shadow-md shadow-emerald-400/50 animate-ping" />
+              <span className="text-xs font-bold text-slate-200 uppercase tracking-wider">Instance 1: Standard WireGuard</span>
+            </div>
+            <span className="text-xs px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 font-semibold font-mono">
+              wg0 • Port {server?.listenPort || 4500}
+            </span>
+          </div>
+
+          <div className="mt-3.5 space-y-2">
+            <div className="flex items-baseline justify-between">
+              <span className="text-2xl font-black text-white font-mono">10.18.0.0/24</span>
+              <span className="text-xs text-emerald-400 font-semibold">Direct VPS Egress</span>
+            </div>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              Standard full-tunnel WireGuard egress without Cloudflare split. All web packets routed directly through your VPS.
+            </p>
+          </div>
+
+          <div className="mt-4 pt-3 border-t border-slate-800/80 flex items-center justify-between text-xs">
+            <span className="text-slate-400">
+              Active Peers: <strong className="text-white">{wg0Instance ? wg0Instance.activePeersCount : peers.filter(p => p.instance !== 'wg1' && !p.ip.startsWith('10.19.')).length}</strong>
+            </span>
+            <button
+              onClick={() => handleFetchServerConf('wg0')}
+              className="px-2.5 py-1 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 text-xs font-semibold border border-emerald-500/20 transition"
+            >
+              Inspect wg0.conf
+            </button>
+          </div>
+        </div>
+
+        {/* Instance 2: Dedicated Cloudflare Anti-Flag */}
+        <div className="bg-[#0f172a]/95 border border-amber-500/30 rounded-2xl p-5 shadow-xl relative overflow-hidden">
+          <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+            <div className="flex items-center gap-2">
+              <span className="w-2.5 h-2.5 rounded-full bg-amber-400 shadow-md shadow-amber-400/50 animate-ping" />
+              <span className="text-xs font-bold text-slate-200 uppercase tracking-wider">Instance 2: Cloudflare Anti-Flag</span>
+            </div>
+            <span className="text-xs px-2.5 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/30 font-semibold font-mono">
+              wg1 • Port {server?.secondaryPort || (server?.listenPort ? server.listenPort + 1 : 4501)}
+            </span>
+          </div>
+
+          <div className="mt-3.5 space-y-2">
+            <div className="flex items-baseline justify-between">
+              <span className="text-2xl font-black text-white font-mono">10.19.0.0/24</span>
+              <span className="text-xs text-amber-400 font-semibold">Turnstile & WAF Bypass</span>
+            </div>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              Eliminates Turnstile loops and 403 Ray ID blocks via 170-CIDR residential ISP complement and MSS 1360 clamping.
+            </p>
+          </div>
+
+          <div className="mt-4 pt-3 border-t border-slate-800/80 flex items-center justify-between text-xs">
+            <span className="text-slate-400">
+              Active Peers: <strong className="text-white">{wg1Instance ? wg1Instance.activePeersCount : peers.filter(p => p.instance === 'wg1' || p.ip.startsWith('10.19.')).length}</strong>
+            </span>
+            <button
+              onClick={() => handleFetchServerConf('wg1')}
+              className="px-2.5 py-1 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 text-xs font-semibold border border-amber-500/20 transition"
+            >
+              Inspect wg1.conf
+            </button>
+          </div>
+        </div>
+      </div>
+
       {/* Metrics Row */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {/* Status */}
         <div className="bg-[#0f172a]/90 border border-slate-800 rounded-2xl p-5 shadow-lg relative overflow-hidden group hover:border-emerald-500/40 transition">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Interface wg0</span>
-            <span className={`w-2.5 h-2.5 rounded-full ${server?.status === 'running' ? 'bg-emerald-400 shadow-lg shadow-emerald-400/50 animate-ping' : 'bg-red-400'}`} />
+            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Daemon Status</span>
+            <span className={`w-2.5 h-2.5 rounded-full ${server?.status === 'running' ? 'bg-emerald-400 shadow-lg shadow-emerald-400/50' : 'bg-red-400'}`} />
           </div>
           <div className="mt-3">
             <div className="text-2xl font-black text-white flex items-center gap-2">
               {server?.status === 'running' ? 'ONLINE' : 'STOPPED'}
               <span className="text-xs px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono">
-                Port {server?.listenPort}
+                Dual Sockets
               </span>
             </div>
-            <p className="text-xs text-slate-400 mt-1 font-mono">Subnet: {server?.internalSubnet}</p>
+            <p className="text-xs text-slate-400 mt-1 font-mono">{server?.publicIp || '127.0.0.1'}</p>
           </div>
           <div className="mt-4 pt-3 border-t border-slate-800/80 flex items-center justify-between text-xs text-slate-400">
             <span className="flex items-center gap-1.5 text-emerald-400 font-medium">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
               BBR & FQ Active
             </span>
-            <span>MTU {server?.defaultMtu}</span>
+            <span>MSS 1360 / MTU 1420</span>
           </div>
         </div>
 
@@ -118,7 +192,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
             >
               Manage all clients &rarr;
             </button>
-            <span className="text-slate-500">10.18.0.x</span>
+            <span className="text-slate-500">Dual Subnets</span>
           </div>
         </div>
 
@@ -262,7 +336,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
                 <h3 className="text-sm font-bold text-white">Live wg0.conf File</h3>
               </div>
               <button
-                onClick={handleFetchServerConf}
+                onClick={() => (confVisible ? setConfVisible(false) : handleFetchServerConf('wg0'))}
                 className="text-xs text-purple-400 hover:text-purple-300 font-medium"
               >
                 {confVisible ? 'Hide' : 'Inspect'}
@@ -304,7 +378,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
 
             {!confVisible && (
               <button
-                onClick={handleFetchServerConf}
+                onClick={() => handleFetchServerConf('wg0')}
                 className="w-full py-2.5 rounded-xl bg-slate-800/80 hover:bg-slate-800 text-slate-300 text-xs font-medium border border-slate-700/80 transition flex items-center justify-center gap-2"
               >
                 <Terminal className="w-4 h-4 text-emerald-400" />

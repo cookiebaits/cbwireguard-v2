@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { X, Plus, ShieldCheck, Zap, HardDrive, Cloud } from 'lucide-react';
+import { X, Plus, ShieldCheck, Zap, HardDrive, Cloud, Server } from 'lucide-react';
+import { CLOUDFLARE_BYPASS_ALLOWED_IPS_STRING } from '../constants/cloudflareCidrs';
 
 interface AddPeerModalProps {
   isOpen: boolean;
@@ -10,8 +11,6 @@ interface AddPeerModalProps {
   defaultAllowedIps: string;
 }
 
-const CF_BYPASS_CIDRS = "224.0.0.0/3, 208.0.0.0/4, 200.0.0.0/5, 192.0.0.0/6, 196.0.0.0/7, 199.0.0.0/8, 198.128.0.0/9, 198.64.0.0/10, 198.0.0.0/11, 198.48.0.0/12, 198.32.0.0/13, 198.44.0.0/14, 198.42.0.0/15, 198.40.0.0/16, 198.41.0.0/17, 128.0.0.0/3, 176.0.0.0/4, 164.0.0.0/6, 160.0.0.0/7, 163.0.0.0/8, 162.0.0.0/9, 162.192.0.0/10, 162.160.0.0/11, 162.128.0.0/12, 162.144.0.0/13, 162.152.0.0/14, 162.156.0.0/15, 168.0.0.0/6, 174.0.0.0/7, 173.0.0.0/8, 172.128.0.0/9, 172.0.0.0/10, 172.96.0.0/11, 172.80.0.0/12, 172.72.0.0/13, 0.0.0.0/2, 64.0.0.0/3, 112.0.0.0/4, 96.0.0.0/5, 108.0.0.0/6, 106.0.0.0/7, 105.0.0.0/8, 104.128.0.0/9, 104.64.0.0/10, 104.32.0.0/11, 104.0.0.0/12";
-
 export const AddPeerModal: React.FC<AddPeerModalProps> = ({
   isOpen,
   onClose,
@@ -21,6 +20,7 @@ export const AddPeerModal: React.FC<AddPeerModalProps> = ({
   defaultAllowedIps,
 }) => {
   const [name, setName] = useState('');
+  const [instance, setInstance] = useState<'wg0' | 'wg1'>('wg0');
   const [allowedIpsPreset, setAllowedIpsPreset] = useState<'full' | 'cloudflare' | 'stealth' | 'custom'>('full');
   const [customAllowedIps, setCustomAllowedIps] = useState('0.0.0.0/1, 128.0.0.0/1');
   const [dnsPreset, setDnsPreset] = useState<'cloudflare' | 'adguard' | 'quad9' | 'custom'>('cloudflare');
@@ -30,6 +30,17 @@ export const AddPeerModal: React.FC<AddPeerModalProps> = ({
   const [error, setError] = useState<string | null>(null);
 
   if (!isOpen) return null;
+
+  const handleInstanceChange = (selected: 'wg0' | 'wg1') => {
+    setInstance(selected);
+    if (selected === 'wg1') {
+      setAllowedIpsPreset('cloudflare');
+      setMtu(1360);
+    } else {
+      setAllowedIpsPreset('full');
+      setMtu(1420);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -43,7 +54,7 @@ export const AddPeerModal: React.FC<AddPeerModalProps> = ({
 
     let finalAllowedIps = defaultAllowedIps;
     if (allowedIpsPreset === 'full') finalAllowedIps = '0.0.0.0/0, ::/0';
-    else if (allowedIpsPreset === 'cloudflare') finalAllowedIps = CF_BYPASS_CIDRS;
+    else if (allowedIpsPreset === 'cloudflare') finalAllowedIps = CLOUDFLARE_BYPASS_ALLOWED_IPS_STRING;
     else if (allowedIpsPreset === 'stealth') finalAllowedIps = '0.0.0.0/1, 128.0.0.0/1';
     else finalAllowedIps = customAllowedIps;
 
@@ -56,9 +67,13 @@ export const AddPeerModal: React.FC<AddPeerModalProps> = ({
     try {
       const res = await fetch('/api/clients', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-cookie-auth-token': localStorage.getItem('cookie_wg_auth_token') || '',
+        },
         body: JSON.stringify({
           name: name.trim(),
+          instance,
           allowedIps: finalAllowedIps,
           dns: finalDns,
           mtu,
@@ -122,6 +137,47 @@ export const AddPeerModal: React.FC<AddPeerModalProps> = ({
               required
             />
             <p className="text-[11px] text-slate-500 mt-1">Alphanumeric, hyphens and underscores only.</p>
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
+              Target Server Instance
+            </label>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => handleInstanceChange('wg0')}
+                className={`p-3 rounded-xl border text-left transition ${
+                  instance === 'wg0'
+                    ? 'bg-emerald-950/40 border-emerald-500 text-emerald-300 shadow-sm'
+                    : 'bg-[#070b14] border-slate-800 text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <div className="font-bold text-xs flex items-center gap-1.5">
+                  <Server className="w-3.5 h-3.5 text-emerald-400" />
+                  Instance 1 (wg0)
+                </div>
+                <div className="text-[11px] font-medium text-emerald-400/90 mt-0.5">Standard WireGuard</div>
+                <div className="text-[10px] text-slate-500 mt-0.5 font-mono">Port 4500 • 10.18.0.x</div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handleInstanceChange('wg1')}
+                className={`p-3 rounded-xl border text-left transition ${
+                  instance === 'wg1'
+                    ? 'bg-amber-950/40 border-amber-500 text-amber-300 shadow-sm'
+                    : 'bg-[#070b14] border-slate-800 text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <div className="font-bold text-xs flex items-center gap-1.5">
+                  <Cloud className="w-3.5 h-3.5 text-amber-400" />
+                  Instance 2 (wg1)
+                </div>
+                <div className="text-[11px] font-medium text-amber-400/90 mt-0.5">Cloudflare Anti-Flag</div>
+                <div className="text-[10px] text-slate-500 mt-0.5 font-mono">Port 4501 • 10.19.0.x</div>
+              </button>
+            </div>
           </div>
 
           <div>

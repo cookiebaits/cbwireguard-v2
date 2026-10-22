@@ -18,7 +18,7 @@ export const PeersTab: React.FC<PeersTabProps> = ({
   isRealSystemData = false,
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
-  const [filter, setFilter] = useState<'all' | 'online' | 'idle' | 'disabled'>('all');
+  const [filter, setFilter] = useState<'all' | 'wg0' | 'wg1' | 'online' | 'idle' | 'disabled'>('all');
   const [editingPeer, setEditingPeer] = useState<Peer | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [editName, setEditName] = useState('');
@@ -99,11 +99,16 @@ export const PeersTab: React.FC<PeersTabProps> = ({
   const filteredPeers = peers.filter(p => {
     const matchesSearch = p.name.toLowerCase().includes(searchTerm.toLowerCase()) || p.ip.includes(searchTerm);
     if (!matchesSearch) return false;
+    if (filter === 'wg0') return p.instance === 'wg0' || p.ip.startsWith('10.18.');
+    if (filter === 'wg1') return p.instance === 'wg1' || p.ip.startsWith('10.19.');
     if (filter === 'online') return p.enabled && p.isOnline;
     if (filter === 'idle') return p.enabled && !p.isOnline;
     if (filter === 'disabled') return !p.enabled;
     return true;
   });
+
+  const wg0Count = peers.filter(p => p.instance !== 'wg1' && !p.ip.startsWith('10.19.')).length;
+  const wg1Count = peers.filter(p => p.instance === 'wg1' || p.ip.startsWith('10.19.')).length;
 
   return (
     <div className="space-y-6">
@@ -115,14 +120,17 @@ export const PeersTab: React.FC<PeersTabProps> = ({
           </div>
           <div>
             <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-xs font-bold text-white">Zero Plain-Text Architecture</span>
+              <span className="text-xs font-bold text-white">Dual-Instance Architecture</span>
               <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-semibold">
-                Curve25519 Masked
+                wg0: Standard (Port 4500)
+              </span>
+              <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-300 border border-amber-500/20 font-semibold">
+                wg1: Anti-Flag Shield (Port 4501)
               </span>
               {isRealSystemData ? (
                 <span className="text-[10px] px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20 font-semibold flex items-center gap-1">
                   <Cpu className="w-3 h-3 text-blue-400" />
-                  Live Linux wg0 Kernel Socket
+                  Live Linux Kernel Sockets
                 </span>
               ) : (
                 <span className="text-[10px] px-2 py-0.5 rounded-full bg-purple-500/10 text-purple-300 border border-purple-500/20 font-semibold">
@@ -131,13 +139,15 @@ export const PeersTab: React.FC<PeersTabProps> = ({
               )}
             </div>
             <p className="text-[11px] text-slate-400 mt-0.5">
-              Client private keys and sensitive tokens are strictly masked in the interface. Configs and QR codes are compiled on-demand in-memory.
+              Two independent WireGuard daemons co-exist on the host. Peers can connect via Standard Full Tunnel (wg0) or Cloudflare Anti-Flag Residential Split (wg1).
             </p>
           </div>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0 text-xs font-mono text-slate-400">
-          <span>Subnet: <strong className="text-emerald-400">10.18.0.0/24</strong></span>
+        <div className="flex items-center gap-3 shrink-0 text-xs font-mono text-slate-400">
+          <span>wg0: <strong className="text-emerald-400">10.18.0.0/24</strong></span>
+          <span className="text-slate-600">•</span>
+          <span>wg1: <strong className="text-amber-400">10.19.0.0/24</strong></span>
         </div>
       </div>
 
@@ -150,7 +160,7 @@ export const PeersTab: React.FC<PeersTabProps> = ({
               type="text"
               value={searchTerm}
               onChange={e => setSearchTerm(e.target.value)}
-              placeholder="Search peer by name or IP (e.g. 10.18.0.2)..."
+              placeholder="Search peer by name or IP (e.g. 10.18.0.2 / 10.19.0.2)..."
               className="w-full pl-9 pr-4 py-2 rounded-xl bg-[#070b14] border border-slate-800 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-emerald-500 transition"
             />
           </div>
@@ -160,21 +170,29 @@ export const PeersTab: React.FC<PeersTabProps> = ({
           <div className="bg-[#070b14] p-1 rounded-xl border border-slate-800 flex items-center gap-1 text-xs">
             <button
               onClick={() => setFilter('all')}
-              className={`px-3 py-1 rounded-lg transition ${filter === 'all' ? 'bg-slate-800 text-white font-medium' : 'text-slate-400 hover:text-slate-200'}`}
+              className={`px-2.5 py-1 rounded-lg transition ${filter === 'all' ? 'bg-slate-800 text-white font-medium' : 'text-slate-400 hover:text-slate-200'}`}
             >
               All ({peers.length})
             </button>
             <button
-              onClick={() => setFilter('online')}
-              className={`px-3 py-1 rounded-lg transition ${filter === 'online' ? 'bg-emerald-950/60 text-emerald-300 font-medium' : 'text-slate-400 hover:text-slate-200'}`}
+              onClick={() => setFilter('wg0')}
+              className={`px-2.5 py-1 rounded-lg transition ${filter === 'wg0' ? 'bg-emerald-950/60 text-emerald-300 font-medium' : 'text-slate-400 hover:text-slate-200'}`}
+              title="Filter peers on Instance 1 (Standard wg0)"
             >
-              Online ({peers.filter(p => p.enabled && p.isOnline).length})
+              wg0 Standard ({wg0Count})
             </button>
             <button
-              onClick={() => setFilter('idle')}
-              className={`px-3 py-1 rounded-lg transition ${filter === 'idle' ? 'bg-slate-800 text-white font-medium' : 'text-slate-400 hover:text-slate-200'}`}
+              onClick={() => setFilter('wg1')}
+              className={`px-2.5 py-1 rounded-lg transition ${filter === 'wg1' ? 'bg-amber-950/60 text-amber-300 font-medium' : 'text-slate-400 hover:text-slate-200'}`}
+              title="Filter peers on Instance 2 (Cloudflare Anti-Flag wg1)"
             >
-              Idle ({peers.filter(p => p.enabled && !p.isOnline).length})
+              wg1 Anti-Flag ({wg1Count})
+            </button>
+            <button
+              onClick={() => setFilter('online')}
+              className={`px-2.5 py-1 rounded-lg transition ${filter === 'online' ? 'bg-blue-950/60 text-blue-300 font-medium' : 'text-slate-400 hover:text-slate-200'}`}
+            >
+              Online ({peers.filter(p => p.enabled && p.isOnline).length})
             </button>
           </div>
 
@@ -227,7 +245,18 @@ export const PeersTab: React.FC<PeersTabProps> = ({
                   <div className="space-y-1">
                     <div className="flex items-center gap-2 flex-wrap">
                       <h3 className="text-base font-bold text-white">{peer.name}</h3>
-                      <span className="font-mono text-xs px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-semibold">
+                      {peer.instance === 'wg1' || peer.ip.startsWith('10.19.') ? (
+                        <span className="text-[11px] px-2.5 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30 font-semibold flex items-center gap-1">
+                          <Cloud className="w-3 h-3 text-amber-400" />
+                          Instance 2 • wg1 (Anti-Flag)
+                        </span>
+                      ) : (
+                        <span className="text-[11px] px-2.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-semibold flex items-center gap-1">
+                          <ShieldCheck className="w-3 h-3 text-emerald-400" />
+                          Instance 1 • wg0 (Standard)
+                        </span>
+                      )}
+                      <span className="font-mono text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700 font-semibold">
                         {peer.ip}
                       </span>
                       <span className={`text-[11px] font-medium px-2 py-0.5 rounded-full border ${

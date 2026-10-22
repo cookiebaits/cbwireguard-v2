@@ -1,3 +1,17 @@
+export interface ServerInstanceInfo {
+  interfaceName: 'wg0' | 'wg1' | string;
+  name: string;
+  mode: 'standard' | 'cloudflare_anti_flag';
+  listenPort: number;
+  internalSubnet: string;
+  status: 'running' | 'stopped';
+  activePeersCount: number;
+  onlinePeersCount: number;
+  totalRx: number;
+  totalTx: number;
+  description: string;
+}
+
 export interface ServerState {
   status: 'running' | 'stopped';
   interfaceName: string;
@@ -22,6 +36,9 @@ export interface ServerState {
   isRealSystemData?: boolean;
   stealthScore?: number;
   stealthRating?: string;
+  secondaryPort?: number;
+  secondarySubnet?: string;
+  instances?: ServerInstanceInfo[];
 }
 
 export interface StealthConfig {
@@ -87,6 +104,8 @@ export interface Peer {
   transferRx: number;
   transferTx: number;
   isOnline: boolean;
+  instance?: 'wg0' | 'wg1';
+  profileMode?: 'standard' | 'cloudflare_anti_flag';
 }
 
 export interface ShieldBlockLog {

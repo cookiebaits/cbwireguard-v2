@@ -441,6 +441,8 @@ RESOLV_INIT
 	cat << 'SYSCTL_EOF' > "$SYSCTL_CONF"
 net.ipv4.ip_forward = 1
 net.ipv4.tcp_mtu_probing = 1
+net.ipv4.conf.all.rp_filter = 2
+net.ipv4.conf.default.rp_filter = 2
 net.core.default_qdisc = fq
 net.ipv4.tcp_fastopen = 3
 net.core.rmem_max = 67108864
@@ -532,13 +534,23 @@ ENV_EOF
 		HAS_TTL=1
 	fi
 
-	# Determine server address (IPv4-only if IPv6 unsupported by host)
+	SERVER_PORT_CF=$((SERVER_PORT + 1))
+	if isPortInUse "$SERVER_PORT_CF" "udp"; then
+		SERVER_PORT_CF=$((SERVER_PORT + 2))
+	fi
+
+	# Determine server address for wg0 (IPv4-only if IPv6 unsupported by host)
 	local WG_SERVER_ADDRESS="${SERVER_WG_IPV4}/24"
 	if [[ "${HAS_IPV6}" -eq 1 ]]; then
 		WG_SERVER_ADDRESS="${SERVER_WG_IPV4}/24,${SERVER_WG_IPV6}/64"
 	fi
 
-	cat << WG_SERVER_EOF > "/etc/wireguard/${SERVER_WG_NIC}.conf"
+	# --------------------------------------------------------------------------
+	# INSTANCE 1: Standard WireGuard (/etc/wireguard/wg0.conf)
+	# Clean direct VPS egress, port 4500 (or SERVER_PORT), subnet 10.18.0.0/24
+	# --------------------------------------------------------------------------
+	echo -e "${CYAN}[*] Configuring Instance 1: Standard WireGuard (wg0 | Port ${SERVER_PORT}/udp | 10.18.0.0/24)...${NC}"
+	cat << WG_SERVER_EOF > "/etc/wireguard/wg0.conf"
 [Interface]
 Address = ${WG_SERVER_ADDRESS}
 ListenPort = ${SERVER_PORT}
@@ -546,94 +558,95 @@ PrivateKey = ${SERVER_PRIV_KEY}
 MTU = 1420
 SaveConfig = false
 
-# --- STEALTH & PACKET ROUTING FIREWALL RULES ---
+# --- INSTANCE 1: STANDARD WIREGUARD RULES (Direct VPS Egress) ---
 PostUp = iptables -I INPUT 1 -p udp --dport ${SERVER_PORT} -j ACCEPT 2>/dev/null || true
-PostUp = iptables -I FORWARD 1 -i ${SERVER_WG_NIC} -j ACCEPT 2>/dev/null || true
-PostUp = iptables -I FORWARD 2 -o ${SERVER_WG_NIC} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+PostUp = iptables -I FORWARD 1 -i wg0 -j ACCEPT 2>/dev/null || true
+PostUp = iptables -I FORWARD 2 -o wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
 PostUp = iptables -I FORWARD 3 -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
-PostUp = iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 ! -o ${SERVER_WG_NIC} -j MASQUERADE 2>/dev/null || true
+PostUp = iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 ! -o wg0 -j MASQUERADE 2>/dev/null || true
 PostUp = iptables -t nat -I POSTROUTING 2 -o ${SERVER_PUB_NIC} -j MASQUERADE 2>/dev/null || true
 PostDown = iptables -D INPUT -p udp --dport ${SERVER_PORT} -j ACCEPT 2>/dev/null || true
-PostDown = iptables -D FORWARD -i ${SERVER_WG_NIC} -j ACCEPT 2>/dev/null || true
-PostDown = iptables -D FORWARD -o ${SERVER_WG_NIC} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D FORWARD -i wg0 -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D FORWARD -o wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
-PostDown = iptables -t nat -D POSTROUTING -s 10.18.0.0/24 ! -o ${SERVER_WG_NIC} -j MASQUERADE 2>/dev/null || true
+PostDown = iptables -t nat -D POSTROUTING -s 10.18.0.0/24 ! -o wg0 -j MASQUERADE 2>/dev/null || true
 PostDown = iptables -t nat -D POSTROUTING -o ${SERVER_PUB_NIC} -j MASQUERADE 2>/dev/null || true
 WG_SERVER_EOF
 
-	if [[ "${HAS_TCPMSS}" -eq 1 ]]; then
-		cat << 'EOF_MSS' >> "/etc/wireguard/${SERVER_WG_NIC}.conf"
-PostUp = iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-PostUp = iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1360 2>/dev/null || true
-PostUp = iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -o eth_dummy -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1360 2>/dev/null || true
-PostDown = iptables -t mangle -D POSTROUTING -p tcp --tcp-flags SYN,RST SYN -o eth_dummy -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-EOF_MSS
-		sed -i "s|eth_dummy|${SERVER_PUB_NIC}|g" "/etc/wireguard/${SERVER_WG_NIC}.conf"
-	fi
+	# --------------------------------------------------------------------------
+	# INSTANCE 2: Dedicated Cloudflare Anti-Flag (/etc/wireguard/wg1.conf)
+	# Anti-Turnstile residential split, port 4501, subnet 10.19.0.0/24, MSS 1360
+	# --------------------------------------------------------------------------
+	echo -e "${CYAN}[*] Configuring Instance 2: Dedicated Cloudflare Anti-Flag (wg1 | Port ${SERVER_PORT_CF}/udp | 10.19.0.0/24)...${NC}"
+	cat << WG_CF_EOF > "/etc/wireguard/wg1.conf"
+[Interface]
+Address = 10.19.0.1/24
+ListenPort = ${SERVER_PORT_CF}
+PrivateKey = ${SERVER_PRIV_KEY}
+MTU = 1360
+SaveConfig = false
 
-	if [[ "${HAS_TTL}" -eq 1 ]]; then
-		cat << 'EOF_TTL' >> "/etc/wireguard/${SERVER_WG_NIC}.conf"
-PostUp = iptables -t mangle -A POSTROUTING -o eth_dummy -j TTL --ttl-set 64 2>/dev/null || true
-PostDown = iptables -t mangle -D POSTROUTING -o eth_dummy -j TTL --ttl-set 64 2>/dev/null || true
-EOF_TTL
-		sed -i "s|eth_dummy|${SERVER_PUB_NIC}|g" "/etc/wireguard/${SERVER_WG_NIC}.conf"
-	fi
+# --- INSTANCE 2: DEDICATED CLOUDFLARE ANTI-FLAG & RESIDENTIAL BYPASS RULES ---
+PostUp = iptables -I INPUT 1 -p udp --dport ${SERVER_PORT_CF} -j ACCEPT 2>/dev/null || true
+PostUp = iptables -I FORWARD 1 -i wg1 -j ACCEPT 2>/dev/null || true
+PostUp = iptables -I FORWARD 2 -o wg1 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+PostUp = iptables -I FORWARD 3 -s 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
+PostUp = iptables -t nat -I POSTROUTING 1 -s 10.19.0.0/24 ! -o wg1 -j MASQUERADE 2>/dev/null || true
+PostUp = iptables -t nat -I POSTROUTING 2 -o ${SERVER_PUB_NIC} -j MASQUERADE 2>/dev/null || true
 
-	if [[ "${HAS_IPV6}" -eq 1 ]]; then
-		cat << 'EOF_V6' >> "/etc/wireguard/${SERVER_WG_NIC}.conf"
-PostUp = ip6tables -A FORWARD -i wg_dummy -j ACCEPT 2>/dev/null || true
-PostUp = ip6tables -A FORWARD -o wg_dummy -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
-PostUp = ip6tables -t nat -A POSTROUTING -o eth_dummy -j MASQUERADE 2>/dev/null || true
-PostDown = ip6tables -D FORWARD -i wg_dummy -j ACCEPT 2>/dev/null || true
-PostDown = ip6tables -D FORWARD -o wg_dummy -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
-PostDown = ip6tables -t nat -D POSTROUTING -o eth_dummy -j MASQUERADE 2>/dev/null || true
-EOF_V6
-		sed -i "s|wg_dummy|${SERVER_WG_NIC}|g" "/etc/wireguard/${SERVER_WG_NIC}.conf"
-		sed -i "s|eth_dummy|${SERVER_PUB_NIC}|g" "/etc/wireguard/${SERVER_WG_NIC}.conf"
-	fi
+# 2. Transparent DNS Failover to 1.1.1.1:53 (UDP + TCP DNS guarantees zero DNS stall / blackhole)
+PostUp = iptables -t nat -I PREROUTING 1 -s 10.19.0.0/24 -p udp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
+PostUp = iptables -t nat -I PREROUTING 2 -s 10.19.0.0/24 -p tcp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
 
-	chmod 600 "/etc/wireguard/${SERVER_WG_NIC}.conf"
+# 3. Anti-Fragmentation TCP MSS Clamping (PMTU clamp + MSS 1280 cap to prevent packet drops on Cloudflare TLS)
+PostUp = iptables -t mangle -I FORWARD 1 -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+PostUp = iptables -t mangle -I FORWARD 2 -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+PostUp = iptables -t mangle -I FORWARD 3 -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1280 2>/dev/null || true
+PostUp = iptables -t mangle -I FORWARD 4 -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1280 2>/dev/null || true
+
+# 4. TTL=64 Normalization (Conceals VPS hop from passive OS fingerprinting / p0f)
+PostUp = iptables -t mangle -I POSTROUTING 1 -s 10.19.0.0/24 -j TTL --ttl-set 64 2>/dev/null || true
+
+# Teardown Rules
+PostDown = iptables -D INPUT -p udp --dport ${SERVER_PORT_CF} -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D FORWARD -i wg1 -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D FORWARD -o wg1 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D FORWARD -s 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
+PostDown = iptables -t nat -D POSTROUTING -s 10.19.0.0/24 ! -o wg1 -j MASQUERADE 2>/dev/null || true
+PostDown = iptables -t nat -D POSTROUTING -o ${SERVER_PUB_NIC} -j MASQUERADE 2>/dev/null || true
+PostDown = iptables -t nat -D PREROUTING -s 10.19.0.0/24 -p udp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
+PostDown = iptables -t nat -D PREROUTING -s 10.19.0.0/24 -p tcp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1280 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1280 2>/dev/null || true
+PostDown = iptables -t mangle -D POSTROUTING -s 10.19.0.0/24 -j TTL --ttl-set 64 2>/dev/null || true
+WG_CF_EOF
+
+	chmod 600 "/etc/wireguard/wg0.conf"
+	chmod 600 "/etc/wireguard/wg1.conf"
 
 	# Clean any stale or hanging wireguard interfaces
-	wg-quick down "${SERVER_WG_NIC}" >/dev/null 2>&1 || true
-	ip link set "${SERVER_WG_NIC}" down >/dev/null 2>&1 || true
-	ip link delete dev "${SERVER_WG_NIC}" >/dev/null 2>&1 || true
-	systemctl stop "wg-quick@${SERVER_WG_NIC}" >/dev/null 2>&1 || true
+	wg-quick down wg0 >/dev/null 2>&1 || true
+	wg-quick down wg1 >/dev/null 2>&1 || true
+	ip link delete dev wg0 >/dev/null 2>&1 || true
+	ip link delete dev wg1 >/dev/null 2>&1 || true
+	systemctl stop "wg-quick@wg0" >/dev/null 2>&1 || true
+	systemctl stop "wg-quick@wg1" >/dev/null 2>&1 || true
 
 	systemctl daemon-reload >/dev/null 2>&1 || true
-	systemctl enable "wg-quick@${SERVER_WG_NIC}" >/dev/null 2>&1 || true
+	systemctl enable "wg-quick@wg0" >/dev/null 2>&1 || true
+	systemctl enable "wg-quick@wg1" >/dev/null 2>&1 || true
 
-	echo -e "${CYAN}[*] Starting WireGuard daemon (wg-quick@${SERVER_WG_NIC})...${NC}"
-	if ! systemctl restart "wg-quick@${SERVER_WG_NIC}"; then
-		echo -e "${YELLOW}[!] Notice: Initial start encountered host constraint. Auto-diagnosing and healing...${NC}"
-		journalctl -xeu "wg-quick@${SERVER_WG_NIC}" --no-pager -n 12 2>/dev/null || true
+	echo -e "${CYAN}[*] Starting WireGuard daemons (wg-quick@wg0 & wg-quick@wg1)...${NC}"
+	systemctl restart "wg-quick@wg0" 2>/dev/null || wg-quick up wg0 2>/dev/null || true
+	systemctl restart "wg-quick@wg1" 2>/dev/null || wg-quick up wg1 2>/dev/null || true
 
-		# Clean hung interface
-		wg-quick down "${SERVER_WG_NIC}" >/dev/null 2>&1 || true
-		ip link delete dev "${SERVER_WG_NIC}" >/dev/null 2>&1 || true
-
-		# Strip IPv6 if present
-		if grep -q "fd42:42:42::" "/etc/wireguard/${SERVER_WG_NIC}.conf" 2>/dev/null; then
-			echo -e "${YELLOW}[*] Stripping IPv6 addresses (host kernel lacks IPv6)...${NC}"
-			sed -i -E "s|,fd42:42:42::[0-9a-fA-F:]+/64||g" "/etc/wireguard/${SERVER_WG_NIC}.conf"
-			sed -i "/ip6tables/d" "/etc/wireguard/${SERVER_WG_NIC}.conf"
-		fi
-
-		# Strip any failing mangle targets
-		sed -i "/TTL --ttl-set/d" "/etc/wireguard/${SERVER_WG_NIC}.conf"
-		sed -i "/TCPMSS --clamp-mss-to-pmtu/d" "/etc/wireguard/${SERVER_WG_NIC}.conf"
-
-		# Re-attempt startup
-		systemctl restart "wg-quick@${SERVER_WG_NIC}" 2>/dev/null || wg-quick up "${SERVER_WG_NIC}" 2>/dev/null || true
+	if systemctl is-active --quiet "wg-quick@wg0" || wg show wg0 &>/dev/null; then
+		echo -e "${GREEN}[✔] Instance 1 (Standard wg0 | Port ${SERVER_PORT}) active!${NC}"
 	fi
-
-	if systemctl is-active --quiet "wg-quick@${SERVER_WG_NIC}" || wg show "${SERVER_WG_NIC}" &>/dev/null; then
-		echo -e "${GREEN}[✔] WireGuard interface ${SERVER_WG_NIC} started and active!${NC}"
-	else
-		echo -e "${RED}[ERROR] WireGuard failed to start. Journal log:${NC}"
-		journalctl -xeu "wg-quick@${SERVER_WG_NIC}" --no-pager -n 20 2>/dev/null || true
+	if systemctl is-active --quiet "wg-quick@wg1" || wg show wg1 &>/dev/null; then
+		echo -e "${GREEN}[✔] Instance 2 (Cloudflare Anti-Flag wg1 | Port ${SERVER_PORT_CF}) active!${NC}"
 	fi
 
 	# Auto-Configure Essential Cloudflare Anti-Flag & Mask ISP Host Engine Components
@@ -800,15 +813,16 @@ function newClientInternal() {
 	local HOME_DIR
 	HOME_DIR=$(getHomeDirForClient "${CLIENT_NAME}")
 
-	local SUBNET_BASE
-	SUBNET_BASE=$(echo "${SERVER_WG_IPV4:-10.18.0.1}" | cut -d'.' -f1-3)
-	[[ -z "$SUBNET_BASE" ]] && SUBNET_BASE="10.18.0"
+	SERVER_PORT_CF=${SERVER_PORT_CF:-$((SERVER_PORT + 1))}
+
+	local SUBNET_BASE="10.18.0"
 	local OCTET=2
-	while grep -q "${SUBNET_BASE}.${OCTET}/32" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" 2>/dev/null; do
+	while grep -q "${SUBNET_BASE}.${OCTET}/32" "/etc/wireguard/wg0.conf" 2>/dev/null; do
 		((OCTET++))
 	done
 
-	local CLIENT_WG_IPV4="${SUBNET_BASE}.${OCTET}"
+	local CLIENT_WG_IPV4="10.18.0.${OCTET}"
+	local CLIENT_WG_CF_IPV4="10.19.0.${OCTET}"
 	local CLIENT_WG_IPV6="fd42:42:42::${OCTET}"
 
 	local CLIENT_PRIV_KEY
@@ -818,13 +832,16 @@ function newClientInternal() {
 	local CLIENT_PRE_SHARED_KEY
 	CLIENT_PRE_SHARED_KEY=$(wg genpsk)
 
-	local ENDPOINT="${SERVER_PUB_IP}:${SERVER_PORT}"
+	local ENDPOINT_WG0="${SERVER_PUB_IP}:${SERVER_PORT}"
+	local ENDPOINT_WG1="${SERVER_PUB_IP}:${SERVER_PORT_CF}"
 
 	mkdir -p /etc/wireguard/clients
 	local CLIENT_CONF_PATH="/etc/wireguard/clients/${CLIENT_NAME}.conf"
+	local STANDARD_CONF_PATH="/etc/wireguard/clients/${CLIENT_NAME}-standard.conf"
+	local CF_SHIELD_CONF="/etc/wireguard/clients/${CLIENT_NAME}-cloudflare-shield.conf"
 
 	local HAS_SERVER_IPV6=0
-	if grep -q "fd42:42:42::" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" 2>/dev/null; then
+	if grep -q "fd42:42:42::" "/etc/wireguard/wg0.conf" 2>/dev/null; then
 		HAS_SERVER_IPV6=1
 	fi
 
@@ -840,7 +857,15 @@ function newClientInternal() {
 		CLIENT_DNS_LINE="${CLIENT_DNS_1}, ${CLIENT_DNS_2}"
 	fi
 
+	# --------------------------------------------------------------------------
+	# 1. Generate Instance 1 Standard Config (wg0 | Port 4500 | 10.18.0.x)
+	# --------------------------------------------------------------------------
 	cat << CLIENT_EOF > "$CLIENT_CONF_PATH"
+# ==============================================================================
+# 🛡️ Instance 1: Standard WireGuard Profile
+# Interface: wg0 | Port: ${SERVER_PORT} | Subnet: 10.18.0.0/24
+# Clean, direct VPS egress without Cloudflare split-routing.
+# ==============================================================================
 [Interface]
 PrivateKey = ${CLIENT_PRIV_KEY}
 Address = ${CLIENT_ADDRESS}
@@ -850,15 +875,18 @@ MTU = 1420
 [Peer]
 PublicKey = ${SERVER_PUB_KEY}
 PresharedKey = ${CLIENT_PRE_SHARED_KEY}
-Endpoint = ${ENDPOINT}
+Endpoint = ${ENDPOINT_WG0}
 AllowedIPs = ${ALLOWED_IPS:-0.0.0.0/0, ::/0}
 PersistentKeepalive = 25
 CLIENT_EOF
 
 	chmod 600 "$CLIENT_CONF_PATH"
+	cp "$CLIENT_CONF_PATH" "$STANDARD_CONF_PATH"
 	cp "$CLIENT_CONF_PATH" "${HOME_DIR}/${CLIENT_NAME}.conf" 2>/dev/null || cp "$CLIENT_CONF_PATH" "/root/${CLIENT_NAME}.conf"
+	cp "$STANDARD_CONF_PATH" "${HOME_DIR}/${CLIENT_NAME}-standard.conf" 2>/dev/null || cp "$STANDARD_CONF_PATH" "/root/${CLIENT_NAME}-standard.conf"
 
-	cat << PEER_EOF >> "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf"
+	# Register Peer in wg0.conf
+	cat << PEER_EOF >> "/etc/wireguard/wg0.conf"
 
 ### Client ${CLIENT_NAME}
 [Peer]
@@ -868,71 +896,87 @@ AllowedIPs = ${PEER_ALLOWED_IPS}
 PEER_EOF
 
 	if command -v wg-quick &>/dev/null && command -v wg &>/dev/null; then
-		wg syncconf "${SERVER_WG_NIC:-wg0}" <(wg-quick strip "${SERVER_WG_NIC:-wg0}") 2>/dev/null || true
+		wg syncconf wg0 <(wg-quick strip wg0) 2>/dev/null || true
 	fi
 
-	local IS_CF_SHIELD=0
-	if [[ "${CF_AUTO_ENABLE:-n}" =~ ^[Yy]$ && -f /etc/wireguard/cloudflare_shield_enabled ]]; then
-		IS_CF_SHIELD=1
-	fi
-
-	echo -e "${GREEN}[✔] Peer ${CLIENT_NAME} created successfully! (${CLIENT_WG_IPV4})${NC}"
-
-	if [[ "$IS_CF_SHIELD" -eq 1 ]]; then
-		# Generate Dedicated Cloudflare Anti-Flag & ISP Host Masking Residential Split Profile ONLY if enabled
-		local CF_SHIELD_CONF="/etc/wireguard/clients/${CLIENT_NAME}-cloudflare-shield.conf"
-		# Mathematically exact 170-CIDR complement excluding all 15 Cloudflare IPv4 ranges (AS13335)
-		local CF_SPLIT_ALLOWED_IPS="0.0.0.0/2, 64.0.0.0/3, 96.0.0.0/6, 100.0.0.0/7, 102.0.0.0/8, 103.0.0.0/12, 103.16.0.0/14, 103.20.0.0/16, 103.21.0.0/17, 103.21.128.0/18, 103.21.192.0/19, 103.21.224.0/20, 103.21.240.0/22, 103.21.248.0/21, 103.22.0.0/17, 103.22.128.0/18, 103.22.192.0/21, 103.22.204.0/22, 103.22.208.0/20, 103.22.224.0/19, 103.23.0.0/16, 103.24.0.0/14, 103.28.0.0/15, 103.30.0.0/16, 103.31.0.0/22, 103.31.8.0/21, 103.31.16.0/20, 103.31.32.0/19, 103.31.64.0/18, 103.31.128.0/17, 103.32.0.0/11, 103.64.0.0/10, 103.128.0.0/9, 104.0.0.0/12, 104.28.0.0/14, 104.32.0.0/11, 104.64.0.0/10, 104.128.0.0/9, 105.0.0.0/8, 106.0.0.0/7, 108.0.0.0/9, 108.128.0.0/11, 108.160.0.0/15, 108.162.0.0/17, 108.162.128.0/18, 108.163.0.0/16, 108.164.0.0/14, 108.168.0.0/13, 108.176.0.0/12, 108.192.0.0/10, 109.0.0.0/8, 110.0.0.0/7, 112.0.0.0/4, 128.0.0.0/7, 130.0.0.0/8, 131.0.0.0/18, 131.0.64.0/21, 131.0.76.0/22, 131.0.80.0/20, 131.0.96.0/19, 131.0.128.0/17, 131.1.0.0/16, 131.2.0.0/15, 131.4.0.0/14, 131.8.0.0/13, 131.16.0.0/12, 131.32.0.0/11, 131.64.0.0/10, 131.128.0.0/9, 132.0.0.0/6, 136.0.0.0/6, 140.0.0.0/8, 141.0.0.0/10, 141.64.0.0/11, 141.96.0.0/14, 141.100.0.0/16, 141.101.0.0/18, 141.101.128.0/17, 141.102.0.0/15, 141.104.0.0/13, 141.112.0.0/12, 141.128.0.0/9, 142.0.0.0/7, 144.0.0.0/4, 160.0.0.0/7, 162.0.0.0/9, 162.128.0.0/12, 162.144.0.0/13, 162.152.0.0/14, 162.156.0.0/15, 162.160.0.0/11, 162.192.0.0/10, 163.0.0.0/8, 164.0.0.0/6, 168.0.0.0/6, 172.0.0.0/10, 172.72.0.0/13, 172.80.0.0/12, 172.96.0.0/11, 172.128.0.0/9, 173.0.0.0/9, 173.128.0.0/10, 173.192.0.0/11, 173.224.0.0/12, 173.240.0.0/14, 173.244.0.0/16, 173.245.0.0/19, 173.245.32.0/20, 173.245.64.0/18, 173.245.128.0/17, 173.246.0.0/15, 173.248.0.0/13, 174.0.0.0/7, 176.0.0.0/5, 184.0.0.0/6, 188.0.0.0/10, 188.64.0.0/11, 188.96.0.0/12, 188.112.0.0/15, 188.114.0.0/18, 188.114.64.0/19, 188.114.112.0/20, 188.114.128.0/17, 188.115.0.0/16, 188.116.0.0/14, 188.120.0.0/13, 188.128.0.0/9, 189.0.0.0/8, 190.0.0.0/10, 190.64.0.0/12, 190.80.0.0/13, 190.88.0.0/14, 190.92.0.0/16, 190.93.0.0/17, 190.93.128.0/18, 190.93.192.0/19, 190.93.224.0/20, 190.94.0.0/15, 190.96.0.0/11, 190.128.0.0/9, 191.0.0.0/8, 192.0.0.0/6, 196.0.0.0/8, 197.0.0.0/9, 197.128.0.0/10, 197.192.0.0/11, 197.224.0.0/13, 197.232.0.0/15, 197.234.0.0/17, 197.234.128.0/18, 197.234.192.0/19, 197.234.224.0/20, 197.234.244.0/22, 197.234.248.0/21, 197.235.0.0/16, 197.236.0.0/14, 197.240.0.0/12, 198.0.0.0/11, 198.32.0.0/13, 198.40.0.0/16, 198.41.0.0/17, 198.42.0.0/15, 198.44.0.0/14, 198.48.0.0/12, 198.64.0.0/10, 198.128.0.0/9, 199.0.0.0/8, 200.0.0.0/5, 208.0.0.0/4, 224.0.0.0/3"
-		cat << CF_CLIENT_EOF > "$CF_SHIELD_CONF"
-# ☁️ Cloudflare Anti-Flag & Residential ISP Mask Profile
-# Encrypts & routes standard traffic via WireGuard VPS, while routing Cloudflare
-# Edge & Turnstile directly via your home ISP to eliminate Turnstile bot blocks.
+	# --------------------------------------------------------------------------
+	# 2. Generate Instance 2 Dedicated Cloudflare Anti-Flag Config
+	# (wg1 | Port 4501 | 10.19.0.x | Chunked 170-CIDR Complement)
+	# --------------------------------------------------------------------------
+	cat << CF_CLIENT_EOF > "$CF_SHIELD_CONF"
+# ==============================================================================
+# ☁️ Instance 2: Dedicated Cloudflare Anti-Flag WireGuard Profile
+# Interface: wg1 | Port: ${SERVER_PORT_CF} | Subnet: 10.19.0.0/24
+#
+# Solves Cloudflare WAF, Turnstile challenges, and Datacenter ASN blocks.
+# Routes all standard internet traffic securely through WireGuard VPS.
+# Routes all 15 Cloudflare edge CDN & Turnstile subnets directly via your home ISP,
+# preventing session IP mismatches and eliminating infinite verification loops.
+# ==============================================================================
 [Interface]
 PrivateKey = ${CLIENT_PRIV_KEY}
-Address = ${CLIENT_ADDRESS}
+Address = ${CLIENT_WG_CF_IPV4}/32
 DNS = ${CLIENT_DNS_LINE}
-MTU = 1420
+MTU = 1360
 
 [Peer]
 PublicKey = ${SERVER_PUB_KEY}
 PresharedKey = ${CLIENT_PRE_SHARED_KEY}
-Endpoint = ${ENDPOINT}
-AllowedIPs = ${CF_SPLIT_ALLOWED_IPS}
+Endpoint = ${ENDPOINT_WG1}
+AllowedIPs = 0.0.0.0/2, 64.0.0.0/3, 96.0.0.0/6, 100.0.0.0/7, 102.0.0.0/8, 103.0.0.0/12, 103.16.0.0/14, 103.20.0.0/16, 103.21.0.0/17, 103.21.128.0/18, 103.21.192.0/19, 103.21.224.0/20, 103.21.240.0/22, 103.21.248.0/21
+AllowedIPs = 103.22.0.0/17, 103.22.128.0/18, 103.22.192.0/21, 103.22.204.0/22, 103.22.208.0/20, 103.22.224.0/19, 103.23.0.0/16, 103.24.0.0/14, 103.28.0.0/15, 103.30.0.0/16, 103.31.0.0/22, 103.31.8.0/21, 103.31.16.0/20, 103.31.32.0/19
+AllowedIPs = 103.31.64.0/18, 103.31.128.0/17, 103.32.0.0/11, 103.64.0.0/10, 103.128.0.0/9, 104.0.0.0/12, 104.28.0.0/14, 104.32.0.0/11, 104.64.0.0/10, 104.128.0.0/9, 105.0.0.0/8, 106.0.0.0/7, 108.0.0.0/9, 108.128.0.0/11
+AllowedIPs = 108.160.0.0/15, 108.162.0.0/17, 108.162.128.0/18, 108.163.0.0/16, 108.164.0.0/14, 108.168.0.0/13, 108.176.0.0/12, 108.192.0.0/10, 109.0.0.0/8, 110.0.0.0/7, 112.0.0.0/4, 128.0.0.0/7, 130.0.0.0/8, 131.0.0.0/18
+AllowedIPs = 131.0.64.0/21, 131.0.76.0/22, 131.0.80.0/20, 131.0.96.0/19, 131.0.128.0/17, 131.1.0.0/16, 131.2.0.0/15, 131.4.0.0/14, 131.8.0.0/13, 131.16.0.0/12, 131.32.0.0/11, 131.64.0.0/10, 131.128.0.0/9, 132.0.0.0/6
+AllowedIPs = 136.0.0.0/6, 140.0.0.0/8, 141.0.0.0/10, 141.64.0.0/11, 141.96.0.0/14, 141.100.0.0/16, 141.101.0.0/18, 141.101.128.0/17, 141.102.0.0/15, 141.104.0.0/13, 141.112.0.0/12, 141.128.0.0/9, 142.0.0.0/7, 144.0.0.0/4
+AllowedIPs = 160.0.0.0/7, 162.0.0.0/9, 162.128.0.0/12, 162.144.0.0/13, 162.152.0.0/14, 162.156.0.0/15, 162.160.0.0/11, 162.192.0.0/10, 163.0.0.0/8, 164.0.0.0/6, 168.0.0.0/6, 172.0.0.0/10, 172.72.0.0/13, 172.80.0.0/12
+AllowedIPs = 172.96.0.0/11, 172.128.0.0/9, 173.0.0.0/9, 173.128.0.0/10, 173.192.0.0/11, 173.224.0.0/12, 173.240.0.0/14, 173.244.0.0/16, 173.245.0.0/19, 173.245.32.0/20, 173.245.64.0/18, 173.245.128.0/17, 173.246.0.0/15, 173.248.0.0/13
+AllowedIPs = 174.0.0.0/7, 176.0.0.0/5, 184.0.0.0/6, 188.0.0.0/10, 188.64.0.0/11, 188.96.0.0/12, 188.112.0.0/15, 188.114.0.0/18, 188.114.64.0/19, 188.114.112.0/20, 188.114.128.0/17, 188.115.0.0/16, 188.116.0.0/14, 188.120.0.0/13
+AllowedIPs = 188.128.0.0/9, 189.0.0.0/8, 190.0.0.0/10, 190.64.0.0/12, 190.80.0.0/13, 190.88.0.0/14, 190.92.0.0/16, 190.93.0.0/17, 190.93.128.0/18, 190.93.192.0/19, 190.93.224.0/20, 190.94.0.0/15, 190.96.0.0/11, 190.128.0.0/9
+AllowedIPs = 191.0.0.0/8, 192.0.0.0/6, 196.0.0.0/8, 197.0.0.0/9, 197.128.0.0/10, 197.192.0.0/11, 197.224.0.0/13, 197.232.0.0/15, 197.234.0.0/17, 197.234.128.0/18, 197.234.192.0/19, 197.234.224.0/20, 197.234.244.0/22, 197.234.248.0/21
+AllowedIPs = 197.235.0.0/16, 197.236.0.0/14, 197.240.0.0/12, 198.0.0.0/11, 198.32.0.0/13, 198.40.0.0/16, 198.41.0.0/17, 198.42.0.0/15, 198.44.0.0/14, 198.48.0.0/12, 198.64.0.0/10, 198.128.0.0/9, 199.0.0.0/8, 200.0.0.0/5
+AllowedIPs = 208.0.0.0/4, 224.0.0.0/3
 PersistentKeepalive = 25
 CF_CLIENT_EOF
-		chmod 600 "$CF_SHIELD_CONF"
-		cp "$CF_SHIELD_CONF" "${HOME_DIR}/${CLIENT_NAME}-cloudflare-shield.conf" 2>/dev/null || cp "$CF_SHIELD_CONF" "/root/${CLIENT_NAME}-cloudflare-shield.conf"
 
-		echo -e "  ${BOLD}1. Standard Full Tunnel:${NC}       ${GREEN}${HOME_DIR}/${CLIENT_NAME}.conf${NC}"
-		echo -e "  ${BOLD}2. Cloudflare Anti-Flag Profile:${NC} ${CYAN}${HOME_DIR}/${CLIENT_NAME}-cloudflare-shield.conf${NC}\n"
+	chmod 600 "$CF_SHIELD_CONF"
+	cp "$CF_SHIELD_CONF" "${HOME_DIR}/${CLIENT_NAME}-cloudflare-shield.conf" 2>/dev/null || cp "$CF_SHIELD_CONF" "/root/${CLIENT_NAME}-cloudflare-shield.conf"
 
-		echo -e "${CYAN}${BOLD}📋 Standard Client Configuration (${CLIENT_NAME}.conf):${NC}"
-		echo -e "${YELLOW}-----------------------------------------------------------------${NC}"
-		cat "$CLIENT_CONF_PATH"
-		echo -e "${YELLOW}-----------------------------------------------------------------${NC}\n"
+	# Register Peer in wg1.conf if wg1 exists
+	if [[ -f "/etc/wireguard/wg1.conf" ]]; then
+		cat << CF_PEER_EOF >> "/etc/wireguard/wg1.conf"
 
-		if command -v qrencode &>/dev/null; then
-			echo -e "${PURPLE}${BOLD}📱 Scan Standard Full Tunnel QR Code (${CLIENT_NAME}.conf):${NC}\n"
-			qrencode -t ansiutf8 < "$CLIENT_CONF_PATH"
-			echo ""
-			echo -e "${CYAN}${BOLD}📱 (Optional) Scan Cloudflare Anti-Flag Residential Split QR Code (${CLIENT_NAME}-cloudflare-shield.conf):${NC}\n"
-			qrencode -t ansiutf8 < "$CF_SHIELD_CONF"
-			echo ""
+### Client ${CLIENT_NAME}
+[Peer]
+PublicKey = ${CLIENT_PUB_KEY}
+PresharedKey = ${CLIENT_PRE_SHARED_KEY}
+AllowedIPs = ${CLIENT_WG_CF_IPV4}/32
+CF_PEER_EOF
+
+		if command -v wg-quick &>/dev/null && command -v wg &>/dev/null; then
+			wg syncconf wg1 <(wg-quick strip wg1) 2>/dev/null || true
 		fi
-	else
-		rm -f "/etc/wireguard/clients/${CLIENT_NAME}-cloudflare-shield.conf" "${HOME_DIR}/${CLIENT_NAME}-cloudflare-shield.conf" "/root/${CLIENT_NAME}-cloudflare-shield.conf" 2>/dev/null || true
-		echo -e "  ${BOLD}Client Profile Path:${NC} ${GREEN}${HOME_DIR}/${CLIENT_NAME}.conf${NC}\n"
+	fi
 
-		echo -e "${CYAN}${BOLD}📋 WireGuard Client Configuration (${CLIENT_NAME}.conf):${NC}"
-		echo -e "${YELLOW}-----------------------------------------------------------------${NC}"
-		cat "$CLIENT_CONF_PATH"
-		echo -e "${YELLOW}-----------------------------------------------------------------${NC}\n"
+	echo -e "${GREEN}[✔] Peer ${CLIENT_NAME} added to both WireGuard instances!${NC}"
+	echo -e "   • Instance 1 (Standard):      ${CLIENT_WG_IPV4} on port ${SERVER_PORT}"
+	echo -e "   • Instance 2 (Anti-Flag):     ${CLIENT_WG_CF_IPV4} on port ${SERVER_PORT_CF}\n"
 
-		if command -v qrencode &>/dev/null; then
-			echo -e "${PURPLE}${BOLD}📱 Scan QR Code with WireGuard App on iOS / Android / Desktop:${NC}\n"
-			qrencode -t ansiutf8 < "$CLIENT_CONF_PATH"
-			echo ""
-		fi
+	echo -e "  ${BOLD}1. Standard Full Tunnel:${NC}       ${GREEN}${HOME_DIR}/${CLIENT_NAME}-standard.conf${NC}"
+	echo -e "  ${BOLD}2. Cloudflare Anti-Flag Profile:${NC} ${CYAN}${HOME_DIR}/${CLIENT_NAME}-cloudflare-shield.conf${NC}\n"
+
+	echo -e "${CYAN}${BOLD}📋 Standard Client Configuration (${CLIENT_NAME}-standard.conf):${NC}"
+	echo -e "${YELLOW}-----------------------------------------------------------------${NC}"
+	cat "$STANDARD_CONF_PATH"
+	echo -e "${YELLOW}-----------------------------------------------------------------${NC}\n"
+
+	if command -v qrencode &>/dev/null; then
+		echo -e "${PURPLE}${BOLD}📱 [1/2] Scan Instance 1 Standard Full Tunnel QR Code (Port ${SERVER_PORT}):${NC}\n"
+		qrencode -t ansiutf8 < "$STANDARD_CONF_PATH"
+		echo ""
+		echo -e "${CYAN}${BOLD}📱 [2/2] Scan Instance 2 Cloudflare Anti-Flag Residential QR Code (Port ${SERVER_PORT_CF}):${NC}\n"
+		qrencode -t ansiutf8 < "$CF_SHIELD_CONF"
+		echo ""
 	fi
 }
 
@@ -1007,18 +1051,30 @@ function showClientQr() {
 	local TARGET_CLIENT
 	TARGET_CLIENT=$(grep -E "^### Client" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" | cut -d ' ' -f 3 | sed -n "${CLIENT_NUMBER}"p)
 
-	local CONF_PATH="/etc/wireguard/clients/${TARGET_CLIENT}.conf"
-	if [[ -f "$CONF_PATH" ]]; then
-		echo -e "\n${GREEN}Configuration File:${NC} $CONF_PATH\n"
-		cat "$CONF_PATH"
+	local CONF_STD="/etc/wireguard/clients/${TARGET_CLIENT}-standard.conf"
+	local CONF_CF="/etc/wireguard/clients/${TARGET_CLIENT}-cloudflare-shield.conf"
+	[[ ! -f "$CONF_STD" ]] && CONF_STD="/etc/wireguard/clients/${TARGET_CLIENT}.conf"
+
+	if [[ -f "$CONF_STD" ]]; then
+		echo -e "\n${GREEN}${BOLD}📋 Instance 1 (Standard Full Tunnel | Port ${SERVER_PORT:-4500}):${NC} $CONF_STD\n"
+		cat "$CONF_STD"
 		echo ""
 		if command -v qrencode &>/dev/null; then
-			echo -e "${PURPLE}${BOLD}📱 Scan QR Code with WireGuard App:${NC}\n"
-			qrencode -t ansiutf8 < "$CONF_PATH"
+			echo -e "${PURPLE}${BOLD}📱 [1/2] Scan Instance 1 Standard Full Tunnel QR Code:${NC}\n"
+			qrencode -t ansiutf8 < "$CONF_STD"
 			echo ""
 		fi
-	else
-		echo -e "${RED}Client config file not found at $CONF_PATH${NC}"
+	fi
+
+	if [[ -f "$CONF_CF" ]]; then
+		echo -e "\n${CYAN}${BOLD}📋 Instance 2 (Dedicated Cloudflare Anti-Flag | Port ${SERVER_PORT_CF:-4501}):${NC} $CONF_CF\n"
+		cat "$CONF_CF"
+		echo ""
+		if command -v qrencode &>/dev/null; then
+			echo -e "${CYAN}${BOLD}📱 [2/2] Scan Instance 2 Cloudflare Anti-Flag Residential Split QR Code:${NC}\n"
+			qrencode -t ansiutf8 < "$CONF_CF"
+			echo ""
+		fi
 	fi
 }
 
@@ -1045,18 +1101,22 @@ function revokeClient() {
 	local TARGET_PUB_KEY
 	TARGET_PUB_KEY=$(grep -A 2 "### Client ${TARGET_CLIENT}" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" | grep "PublicKey" | awk '{print $3}')
 
-	sed -i "/^### Client ${TARGET_CLIENT}\$/,/^$/d" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf"
+	sed -i "/^### Client ${TARGET_CLIENT}\$/,/^$/d" "/etc/wireguard/wg0.conf" 2>/dev/null || true
+	sed -i "/^### Client ${TARGET_CLIENT}\$/,/^$/d" "/etc/wireguard/wg1.conf" 2>/dev/null || true
 
 	rm -f "/etc/wireguard/clients/${TARGET_CLIENT}.conf"
+	rm -f "/etc/wireguard/clients/${TARGET_CLIENT}-standard.conf"
+	rm -f "/etc/wireguard/clients/${TARGET_CLIENT}-cloudflare-shield.conf"
 	local HOME_DIR
 	HOME_DIR=$(getHomeDirForClient "${TARGET_CLIENT}")
-	rm -f "${HOME_DIR}/${TARGET_CLIENT}.conf" "/root/${TARGET_CLIENT}.conf" 2>/dev/null || true
+	rm -f "${HOME_DIR}/${TARGET_CLIENT}.conf" "${HOME_DIR}/${TARGET_CLIENT}-standard.conf" "${HOME_DIR}/${TARGET_CLIENT}-cloudflare-shield.conf" "/root/${TARGET_CLIENT}.conf" "/root/${TARGET_CLIENT}-standard.conf" "/root/${TARGET_CLIENT}-cloudflare-shield.conf" 2>/dev/null || true
 
 	if command -v wg-quick &>/dev/null && command -v wg &>/dev/null; then
-		wg syncconf "${SERVER_WG_NIC:-wg0}" <(wg-quick strip "${SERVER_WG_NIC:-wg0}") 2>/dev/null || true
+		wg syncconf wg0 <(wg-quick strip wg0) 2>/dev/null || true
+		wg syncconf wg1 <(wg-quick strip wg1) 2>/dev/null || true
 	fi
 
-	echo -e "${GREEN}[✔] Client ${TARGET_CLIENT} revoked successfully.${NC}\n"
+	echo -e "${GREEN}[✔] Client ${TARGET_CLIENT} revoked successfully from both instances.${NC}\n"
 }
 
 function backupRestoreManager() {
@@ -1816,14 +1876,25 @@ function uninstallWg() {
 # ------------------------------------------------------------------------------
 function manageMenu() {
 	while true; do
+		local WG0_STATUS="${RED}STOPPED${NC}"
+		local WG1_STATUS="${RED}STOPPED${NC}"
+		if systemctl is-active --quiet wg-quick@wg0 2>/dev/null || wg show wg0 &>/dev/null; then
+			WG0_STATUS="${GREEN}ACTIVE${NC}"
+		fi
+		if systemctl is-active --quiet wg-quick@wg1 2>/dev/null || wg show wg1 &>/dev/null; then
+			WG1_STATUS="${GREEN}ACTIVE${NC}"
+		fi
+
 		echo -e "\n${PURPLE}=================================================================${NC}"
 		echo -e "              ${GREEN}${BOLD}🍪  Cookie's Easy WireGuard Manager${NC}"
 		echo -e "${PURPLE}=================================================================${NC}"
+		echo -e "  ${BOLD}Instance 1 (Standard):${NC}  wg0 | Port ${SERVER_PORT:-4500}/udp | 10.18.0.0/24 [${WG0_STATUS}]"
+		echo -e "  ${BOLD}Instance 2 (Anti-Flag):${NC} wg1 | Port ${SERVER_PORT_CF:-4501}/udp | 10.19.0.0/24 [${WG1_STATUS}]"
 		echo -e "${PURPLE}┌──────────────────────────────────────────────────────────────┐${NC}"
 		echo -e "${PURPLE}│${NC}                      ${CYAN}${BOLD}Main Menu Actions${NC}                       ${PURPLE}│${NC}"
 		echo -e "${PURPLE}├──────────────────────────────────────────────────────────────┤${NC}"
-		echo -e "${PURPLE}│${NC} ${BOLD}[1]${NC} Setup WireGuard server                                   ${PURPLE}│${NC}"
-		echo -e "${PURPLE}│${NC} ${BOLD}[2]${NC} Add new client (peer)                                    ${PURPLE}│${NC}"
+		echo -e "${PURPLE}│${NC} ${BOLD}[1]${NC} Setup WireGuard servers (Instances 1 & 2)                ${PURPLE}│${NC}"
+		echo -e "${PURPLE}│${NC} ${BOLD}[2]${NC} Add new client (peer to both instances)                  ${PURPLE}│${NC}"
 		echo -e "${PURPLE}│${NC} ${BOLD}[3]${NC} Configure clients (Check/Edit/Remove)                   ${PURPLE}│${NC}"
 		echo -e "${PURPLE}│${NC} ${BOLD}[4]${NC} Backup & Restore Manager                                 ${PURPLE}│${NC}"
 		echo -e "${PURPLE}│${NC} ${BOLD}[5]${NC} Domain-Based Split Tunneling                             ${PURPLE}│${NC}"

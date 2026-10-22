@@ -82,6 +82,7 @@ export const QrModal: React.FC<QrModalProps> = ({ peer, onClose, initialAntiFlag
         </div>
 
         {/* Profile Mode Selector Tabs */}
+        {/* Profile Mode Selector Tabs */}
         <div className="grid grid-cols-2 gap-2 mb-4 p-1 bg-[#070b14] rounded-2xl border border-slate-800">
           <button
             type="button"
@@ -94,10 +95,10 @@ export const QrModal: React.FC<QrModalProps> = ({ peer, onClose, initialAntiFlag
           >
             <div className="flex items-center gap-1.5 font-bold">
               <Shield className="w-3.5 h-3.5" />
-              <span>Standard Full Tunnel (Default)</span>
+              <span>Instance 1: Standard Full Tunnel (wg0)</span>
             </div>
             <span className={`text-[10px] mt-0.5 ${profileType === 'standard' ? 'text-emerald-100' : 'text-slate-500'}`}>
-              0.0.0.0/0, ::/0 • 100% Encrypted via WireGuard
+              Port 4500 • 0.0.0.0/0, ::/0 • Direct VPS Egress
             </span>
           </button>
 
@@ -112,10 +113,10 @@ export const QrModal: React.FC<QrModalProps> = ({ peer, onClose, initialAntiFlag
           >
             <div className="flex items-center gap-1.5 font-bold">
               <Cloud className="w-3.5 h-3.5" />
-              <span>Cloudflare Anti-Flag (Residential Split)</span>
+              <span>Instance 2: Cloudflare Anti-Flag (wg1)</span>
             </div>
             <span className={`text-[10px] mt-0.5 ${profileType === 'antiFlag' ? 'text-amber-100' : 'text-slate-500'}`}>
-              Bypasses Turnstile & WAF Datacenter ASN Blocks
+              Port 4501 • 170-CIDR Split • Bypasses Turnstile Loops
             </span>
           </button>
         </div>
@@ -125,14 +126,14 @@ export const QrModal: React.FC<QrModalProps> = ({ peer, onClose, initialAntiFlag
           <div className="flex items-start gap-2 p-2.5 mb-4 rounded-xl bg-amber-500/10 border border-amber-500/25 text-amber-200 text-xs">
             <CheckCircle2 className="w-4 h-4 shrink-0 text-amber-400 mt-0.5" />
             <div className="leading-relaxed">
-              <strong className="text-white">Cloudflare WAF & ISP Masking Active:</strong> Encrypts all internet traffic via VPS, but routes Cloudflare WAF, Turnstile, and CDN subnets through your home ISP. Completely stops Datacenter ASN blocks and Turnstile loops!
+              <strong className="text-white">Instance 2 (Dedicated Anti-Flag wg1 | Port 4501):</strong> Encrypts all internet traffic via VPS, but splits all 15 Cloudflare Edge CDN & Turnstile ranges (170 CIDRs) through your home ISP. MSS clamped to 1280 & PMTU with TTL=64 normalization to eliminate 403 Forbidden Ray ID rejections and captcha loops!
             </div>
           </div>
         ) : (
           <div className="flex items-start gap-2 p-2.5 mb-4 rounded-xl bg-slate-800/60 border border-slate-700/60 text-slate-300 text-xs">
             <Shield className="w-4 h-4 shrink-0 text-slate-400 mt-0.5" />
             <div className="leading-relaxed">
-              <strong className="text-white">Standard Full Tunnel (0.0.0.0/0):</strong> All traffic routes through VPS. Cloudflare-protected sites will inspect your VPS datacenter ASN.
+              <strong className="text-white">Instance 1 (Standard WireGuard wg0 | Port 4500):</strong> Pure direct full-tunnel VPS egress (0.0.0.0/0, ::/0). All internet requests route through the VPS interface.
             </div>
           </div>
         )}

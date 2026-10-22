@@ -7,6 +7,7 @@ import path from 'path';
 import fs from 'fs';
 import { execSync } from 'child_process';
 import { fileURLToPath } from 'url';
+import { CLOUDFLARE_BYPASS_CIDRS, formatWireguardAllowedIps } from './src/constants/cloudflareCidrs.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -39,7 +40,20 @@ const PORT = getListenPort();
 app.use(cors());
 app.use(express.json());
 
-// In-Memory WireGuard State Store
+export interface ServerInstanceInfo {
+  interfaceName: 'wg0' | 'wg1' | string;
+  name: string;
+  mode: 'standard' | 'cloudflare_anti_flag';
+  listenPort: number;
+  internalSubnet: string;
+  status: 'running' | 'stopped';
+  activePeersCount: number;
+  onlinePeersCount: number;
+  totalRx: number;
+  totalTx: number;
+  description: string;
+}
+
 interface Peer {
   id: string;
   name: string;
@@ -57,6 +71,8 @@ interface Peer {
   transferRx: number;
   transferTx: number;
   isOnline: boolean;
+  instance?: 'wg0' | 'wg1';
+  profileMode?: 'standard' | 'cloudflare_anti_flag';
 }
 
 interface ShieldBlockLog {
@@ -237,8 +253,10 @@ let serverState = {
   interfaceName: 'wg0',
   publicIp: initialDetectedIp,
   listenPort: initialDetectedPort,
+  secondaryPort: initialDetectedPort === 4500 ? 4501 : (initialDetectedPort + 1),
   webPort: initialDetectedWebPort,
   internalSubnet: '10.18.0.1/24',
+  secondarySubnet: '10.19.0.1/24',
   serverPublicKey: 'vQz7F2RzL1L4D2024WgServerPubKeyCookie999=',
   serverPrivateKey: generateWgKey(),
   ipForwarding: true,
@@ -371,25 +389,13 @@ function syncFromLiveWireguard() {
 
     serverState.isRealSystemData = true;
 
-    // Read wg show wg0 dump
-    const dump = execSync('wg show wg0 dump 2>/dev/null', { encoding: 'utf8' }).trim().split('\n');
-    if (dump.length === 0) return;
-
-    // Line 0: <private_key> <public_key> <listen_port> <fwmark>
-    const serverLine = dump[0].split('\t');
-    if (serverLine.length >= 3) {
-      serverState.serverPublicKey = serverLine[1];
-      serverState.serverPrivateKey = serverLine[0];
-      serverState.listenPort = parseInt(serverLine[2], 10);
-    }
-
     // Read client configs from /etc/wireguard/clients/*.conf to map client names
     const clientNameMap = new Map<string, string>();
     if (fs.existsSync('/etc/wireguard/clients')) {
       const files = fs.readdirSync('/etc/wireguard/clients');
       for (const file of files) {
         if (file.endsWith('.conf')) {
-          const clientName = file.replace('.conf', '');
+          const clientName = file.replace('.conf', '').replace('-cloudflare-shield', '').replace('-standard', '');
           try {
             const confContent = fs.readFileSync(`/etc/wireguard/clients/${file}`, 'utf8');
             const match = confContent.match(/PrivateKey\s*=\s*([^\s]+)/i);
@@ -403,58 +409,85 @@ function syncFromLiveWireguard() {
       }
     }
 
-    // Subsequent lines: <public_key> <preshared_key> <endpoint> <allowed_ips> <latest_handshake> <transfer_rx> <transfer_tx> <persistent_keepalive>
     const livePeers: Peer[] = [];
-    for (let i = 1; i < dump.length; i++) {
-      const pLine = dump[i].split('\t');
-      if (pLine.length >= 7) {
-        const pubKey = pLine[0];
-        const psk = pLine[1] !== '(none)' ? pLine[1] : '';
-        const endpoint = pLine[2] !== '(none)' ? pLine[2] : null;
-        const allowedIps = pLine[3];
-        const lastHandshakeEpoch = parseInt(pLine[4], 10);
-        const rxBytes = parseInt(pLine[5], 10);
-        const txBytes = parseInt(pLine[6], 10);
+    const ifaces = ['wg0', 'wg1'];
 
-        const assignedIp = allowedIps.split(',')[0].replace('/32', '');
-        const clientName = clientNameMap.get(pubKey) || `device-${pubKey.slice(0, 6)}`;
+    for (const iface of ifaces) {
+      try {
+        const dumpOut = execSync(`wg show ${iface} dump 2>/dev/null`, { encoding: 'utf8' }).trim();
+        if (!dumpOut) continue;
+        const lines = dumpOut.split('\n');
+        if (lines.length === 0) continue;
 
-        const nowSec = Math.floor(Date.now() / 1000);
-        const diffSec = nowSec - lastHandshakeEpoch;
-        let handshakeFormatted = 'Never connected';
-        let isOnline = false;
-
-        if (lastHandshakeEpoch > 0) {
-          if (diffSec < 60) handshakeFormatted = `${diffSec} seconds ago`;
-          else if (diffSec < 3600) handshakeFormatted = `${Math.floor(diffSec / 60)} minutes ago`;
-          else if (diffSec < 86400) handshakeFormatted = `${Math.floor(diffSec / 3600)} hours ago`;
-          else handshakeFormatted = `${Math.floor(diffSec / 86400)} days ago`;
-
-          isOnline = diffSec < 180;
+        // Line 0: <private_key> <public_key> <listen_port> <fwmark>
+        const serverLine = lines[0].split('\t');
+        if (serverLine.length >= 3 && iface === 'wg0') {
+          serverState.serverPublicKey = serverLine[1];
+          serverState.serverPrivateKey = serverLine[0];
+          serverState.listenPort = parseInt(serverLine[2], 10);
+        } else if (serverLine.length >= 3 && iface === 'wg1') {
+          serverState.secondaryPort = parseInt(serverLine[2], 10);
         }
 
-        livePeers.push({
-          id: `live-${pubKey.slice(0, 8)}`,
-          name: clientName,
-          ip: assignedIp,
-          publicKey: pubKey,
-          privateKey: 'ENCRYPTED_ON_VPS',
-          presharedKey: psk,
-          allowedIps,
-          dns: serverState.defaultDns,
-          mtu: serverState.defaultMtu,
-          createdAt: new Date().toISOString(),
-          enabled: true,
-          endpoint,
-          lastHandshake: handshakeFormatted,
-          transferRx: rxBytes,
-          transferTx: txBytes,
-          isOnline,
-        });
-      }
+        // Subsequent lines: peers
+        for (let i = 1; i < lines.length; i++) {
+          const pLine = lines[i].split('\t');
+          if (pLine.length >= 7) {
+            const pubKey = pLine[0];
+            const psk = pLine[1] !== '(none)' ? pLine[1] : '';
+            const endpoint = pLine[2] !== '(none)' ? pLine[2] : null;
+            const allowedIps = pLine[3];
+            const lastHandshakeEpoch = parseInt(pLine[4], 10);
+            const rxBytes = parseInt(pLine[5], 10);
+            const txBytes = parseInt(pLine[6], 10);
+
+            const assignedIp = allowedIps.split(',')[0].replace('/32', '');
+            const clientName = clientNameMap.get(pubKey) || `device-${pubKey.slice(0, 6)}`;
+
+            const nowSec = Math.floor(Date.now() / 1000);
+            const diffSec = nowSec - lastHandshakeEpoch;
+            let handshakeFormatted = 'Never connected';
+            let isOnline = false;
+
+            if (lastHandshakeEpoch > 0) {
+              if (diffSec < 60) handshakeFormatted = `${diffSec} seconds ago`;
+              else if (diffSec < 3600) handshakeFormatted = `${Math.floor(diffSec / 60)} minutes ago`;
+              else if (diffSec < 86400) handshakeFormatted = `${Math.floor(diffSec / 3600)} hours ago`;
+              else handshakeFormatted = `${Math.floor(diffSec / 86400)} days ago`;
+
+              isOnline = diffSec < 180;
+            }
+
+            const isWg1 = iface === 'wg1' || assignedIp.startsWith('10.19.');
+
+            livePeers.push({
+              id: `live-${iface}-${pubKey.slice(0, 8)}`,
+              name: clientName,
+              ip: assignedIp,
+              publicKey: pubKey,
+              privateKey: 'ENCRYPTED_ON_VPS',
+              presharedKey: psk,
+              allowedIps,
+              dns: serverState.defaultDns,
+              mtu: isWg1 ? 1360 : serverState.defaultMtu,
+              createdAt: new Date().toISOString(),
+              enabled: true,
+              endpoint,
+              lastHandshake: handshakeFormatted,
+              transferRx: rxBytes,
+              transferTx: txBytes,
+              isOnline,
+              instance: isWg1 ? 'wg1' : 'wg0',
+              profileMode: isWg1 ? 'cloudflare_anti_flag' : 'standard',
+            });
+          }
+        }
+      } catch (e) {}
     }
 
-    peers = livePeers;
+    if (livePeers.length > 0) {
+      peers = livePeers;
+    }
   } catch (err) {}
 }
 
@@ -656,8 +689,72 @@ function maskKey(key: string): string {
   return key.slice(0, 4) + '••••••••••••••••••••••••••••••••••••' + key.slice(-4);
 }
 
-// Helper to construct WireGuard server config
-function generateServerConfigText(): string {
+// Helper to construct WireGuard server config for wg0 (Standard) or wg1 (Cloudflare Anti-Flag)
+function generateServerConfigText(iface: 'wg0' | 'wg1' = 'wg0'): string {
+  if (iface === 'wg1') {
+    const port = serverState.secondaryPort || (serverState.listenPort + 1);
+    let conf = `[Interface]
+Address = ${serverState.secondarySubnet || '10.19.0.1/24'}
+ListenPort = ${port}
+PrivateKey = ${serverState.serverPrivateKey}
+MTU = 1360
+SaveConfig = false
+
+# --- INSTANCE 2: DEDICATED CLOUDFLARE ANTI-FLAG & RESIDENTIAL BYPASS RULES ---
+# 1. Forwarding & NAT Masquerade
+PostUp = iptables -I INPUT 1 -p udp --dport ${port} -j ACCEPT 2>/dev/null || true
+PostUp = iptables -I FORWARD 1 -i wg1 -j ACCEPT 2>/dev/null || true
+PostUp = iptables -I FORWARD 2 -o wg1 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+PostUp = iptables -I FORWARD 3 -s 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
+PostUp = iptables -t nat -I POSTROUTING 1 -s 10.19.0.0/24 ! -o wg1 -j MASQUERADE 2>/dev/null || true
+PostUp = iptables -t nat -I POSTROUTING 2 -o eth0 -j MASQUERADE 2>/dev/null || true
+
+# 2. Transparent DNS Failover to 1.1.1.1:53 (UDP + TCP DNS guarantees zero DNS stall / blackhole)
+PostUp = iptables -t nat -I PREROUTING 1 -s 10.19.0.0/24 -p udp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
+PostUp = iptables -t nat -I PREROUTING 2 -s 10.19.0.0/24 -p tcp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
+
+# 3. Anti-Fragmentation TCP MSS Clamping (PMTU clamp + MSS 1280 cap to prevent packet drops on Cloudflare TLS)
+PostUp = iptables -t mangle -I FORWARD 1 -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+PostUp = iptables -t mangle -I FORWARD 2 -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+PostUp = iptables -t mangle -I FORWARD 3 -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1280 2>/dev/null || true
+PostUp = iptables -t mangle -I FORWARD 4 -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1280 2>/dev/null || true
+
+# 4. TTL=64 Normalization (Conceals VPS hop from passive OS fingerprinting / p0f)
+PostUp = iptables -t mangle -I POSTROUTING 1 -s 10.19.0.0/24 -j TTL --ttl-set 64 2>/dev/null || true
+
+# Teardown Rules
+PostDown = iptables -D INPUT -p udp --dport ${port} -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D FORWARD -i wg1 -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D FORWARD -o wg1 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D FORWARD -s 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
+PostDown = iptables -t nat -D POSTROUTING -s 10.19.0.0/24 ! -o wg1 -j MASQUERADE 2>/dev/null || true
+PostDown = iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE 2>/dev/null || true
+PostDown = iptables -t nat -D PREROUTING -s 10.19.0.0/24 -p udp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
+PostDown = iptables -t nat -D PREROUTING -s 10.19.0.0/24 -p tcp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1280 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1280 2>/dev/null || true
+PostDown = iptables -t mangle -D POSTROUTING -s 10.19.0.0/24 -j TTL --ttl-set 64 2>/dev/null || true
+
+# --- Instance 2 Configured Peers (10.19.0.x) ---
+`;
+    peers
+      .filter(p => p.enabled && (p.instance === 'wg1' || p.ip.startsWith('10.19.')))
+      .forEach(p => {
+        const clientIp = p.ip.startsWith('10.19.') ? p.ip : p.ip.replace('10.18.', '10.19.');
+        conf += `
+# Peer: ${p.name}
+[Peer]
+PublicKey = ${p.publicKey}
+PresharedKey = ${p.presharedKey}
+AllowedIPs = ${clientIp}/32
+`;
+      });
+    return conf;
+  }
+
+  // Otherwise Instance 1: Standard wg0
   let conf = `[Interface]
 Address = ${serverState.internalSubnet}
 ListenPort = ${serverState.listenPort}
@@ -665,76 +762,96 @@ PrivateKey = ${serverState.serverPrivateKey}
 MTU = ${serverState.defaultMtu}
 SaveConfig = false
 
-# --- STEALTH & PACKET NORMALIZATION FIREWALL RULES ---
+# --- INSTANCE 1: STANDARD WIREGUARD RULES (Direct VPS Egress) ---
 # 1. Forwarding & NAT Masquerade
-PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
-`;
+PostUp = iptables -I INPUT 1 -p udp --dport ${serverState.listenPort} -j ACCEPT 2>/dev/null || true
+PostUp = iptables -I FORWARD 1 -i wg0 -j ACCEPT 2>/dev/null || true
+PostUp = iptables -I FORWARD 2 -o wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+PostUp = iptables -I FORWARD 3 -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
+PostUp = iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 ! -o wg0 -j MASQUERADE 2>/dev/null || true
+PostUp = iptables -t nat -I POSTROUTING 2 -o eth0 -j MASQUERADE 2>/dev/null || true
 
-  if (stealthConfig.mssClamping) {
-    conf += `# 2. TCP MSS Clamping to PMTU (Prevents TLS fragmentation and VPN fingerprinting)\nPostUp = iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -o eth0 -j TCPMSS --clamp-mss-to-pmtu\n`;
-  }
-
-  if (stealthConfig.ttlNormalization) {
-    conf += `# 3. TTL Normalization (Forces standard desktop TTL=64 so VPS hop is completely hidden)\nPostUp = iptables -t mangle -A POSTROUTING -o eth0 -j TTL --ttl-set 64\n`;
-  }
-
-  if (stealthConfig.tosNormalization) {
-    conf += `# 4. Zero DSCP/TOS flags to evade Deep Packet Inspection (DPI)\nPostUp = iptables -t mangle -A POSTROUTING -o eth0 -j TOS --set-tos 0x00\n`;
-  }
-
-  conf += `
 # Teardown Rules
-PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
-${stealthConfig.mssClamping ? 'PostDown = iptables -t mangle -D POSTROUTING -p tcp --tcp-flags SYN,RST SYN -o eth0 -j TCPMSS --clamp-mss-to-pmtu\n' : ''}
-${stealthConfig.ttlNormalization ? 'PostDown = iptables -t mangle -D POSTROUTING -o eth0 -j TTL --ttl-set 64\n' : ''}
-${stealthConfig.tosNormalization ? 'PostDown = iptables -t mangle -D POSTROUTING -o eth0 -j TOS --set-tos 0x00\n' : ''}
-${serverState.dokployBridge ? '# Dokploy Traefik UDP Proxy Bridge Active\n' : ''}
-# --- Configured Peers ---
-`;
+PostDown = iptables -D INPUT -p udp --dport ${serverState.listenPort} -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D FORWARD -i wg0 -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D FORWARD -o wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D FORWARD -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
+PostDown = iptables -t nat -D POSTROUTING -s 10.18.0.0/24 ! -o wg0 -j MASQUERADE 2>/dev/null || true
+PostDown = iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE 2>/dev/null || true
 
-  peers.forEach(p => {
-    if (p.enabled) {
+# --- Instance 1 Configured Peers (10.18.0.x) ---
+`;
+  peers
+    .filter(p => p.enabled && (p.instance !== 'wg1' && !p.ip.startsWith('10.19.')))
+    .forEach(p => {
+      const clientIp = p.ip.startsWith('10.18.') ? p.ip : p.ip.replace('10.19.', '10.18.');
       conf += `
 # Peer: ${p.name}
 [Peer]
 PublicKey = ${p.publicKey}
 PresharedKey = ${p.presharedKey}
-AllowedIPs = ${p.ip}/32
+AllowedIPs = ${clientIp}/32
 `;
-    }
-  });
+    });
 
   return conf;
 }
 
-// Mathematically exact 170-CIDR complement that completely excludes all 15 official Cloudflare IPv4 CIDRs (AS13335).
-// Routes 100% of non-Cloudflare internet traffic through WireGuard VPS, while Cloudflare WAF, Turnstile, and CDN subnets
-// route directly via the client's home ISP, preventing datacenter ASN blocks and Turnstile verification loops.
-export const CLOUDFLARE_BYPASS_ALLOWED_IPS = "0.0.0.0/2, 64.0.0.0/3, 96.0.0.0/6, 100.0.0.0/7, 102.0.0.0/8, 103.0.0.0/12, 103.16.0.0/14, 103.20.0.0/16, 103.21.0.0/17, 103.21.128.0/18, 103.21.192.0/19, 103.21.224.0/20, 103.21.240.0/22, 103.21.248.0/21, 103.22.0.0/17, 103.22.128.0/18, 103.22.192.0/21, 103.22.204.0/22, 103.22.208.0/20, 103.22.224.0/19, 103.23.0.0/16, 103.24.0.0/14, 103.28.0.0/15, 103.30.0.0/16, 103.31.0.0/22, 103.31.8.0/21, 103.31.16.0/20, 103.31.32.0/19, 103.31.64.0/18, 103.31.128.0/17, 103.32.0.0/11, 103.64.0.0/10, 103.128.0.0/9, 104.0.0.0/12, 104.28.0.0/14, 104.32.0.0/11, 104.64.0.0/10, 104.128.0.0/9, 105.0.0.0/8, 106.0.0.0/7, 108.0.0.0/9, 108.128.0.0/11, 108.160.0.0/15, 108.162.0.0/17, 108.162.128.0/18, 108.163.0.0/16, 108.164.0.0/14, 108.168.0.0/13, 108.176.0.0/12, 108.192.0.0/10, 109.0.0.0/8, 110.0.0.0/7, 112.0.0.0/4, 128.0.0.0/7, 130.0.0.0/8, 131.0.0.0/18, 131.0.64.0/21, 131.0.76.0/22, 131.0.80.0/20, 131.0.96.0/19, 131.0.128.0/17, 131.1.0.0/16, 131.2.0.0/15, 131.4.0.0/14, 131.8.0.0/13, 131.16.0.0/12, 131.32.0.0/11, 131.64.0.0/10, 131.128.0.0/9, 132.0.0.0/6, 136.0.0.0/6, 140.0.0.0/8, 141.0.0.0/10, 141.64.0.0/11, 141.96.0.0/14, 141.100.0.0/16, 141.101.0.0/18, 141.101.128.0/17, 141.102.0.0/15, 141.104.0.0/13, 141.112.0.0/12, 141.128.0.0/9, 142.0.0.0/7, 144.0.0.0/4, 160.0.0.0/7, 162.0.0.0/9, 162.128.0.0/12, 162.144.0.0/13, 162.152.0.0/14, 162.156.0.0/15, 162.160.0.0/11, 162.192.0.0/10, 163.0.0.0/8, 164.0.0.0/6, 168.0.0.0/6, 172.0.0.0/10, 172.72.0.0/13, 172.80.0.0/12, 172.96.0.0/11, 172.128.0.0/9, 173.0.0.0/9, 173.128.0.0/10, 173.192.0.0/11, 173.224.0.0/12, 173.240.0.0/14, 173.244.0.0/16, 173.245.0.0/19, 173.245.32.0/20, 173.245.64.0/18, 173.245.128.0/17, 173.246.0.0/15, 173.248.0.0/13, 174.0.0.0/7, 176.0.0.0/5, 184.0.0.0/6, 188.0.0.0/10, 188.64.0.0/11, 188.96.0.0/12, 188.112.0.0/15, 188.114.0.0/18, 188.114.64.0/19, 188.114.112.0/20, 188.114.128.0/17, 188.115.0.0/16, 188.116.0.0/14, 188.120.0.0/13, 188.128.0.0/9, 189.0.0.0/8, 190.0.0.0/10, 190.64.0.0/12, 190.80.0.0/13, 190.88.0.0/14, 190.92.0.0/16, 190.93.0.0/17, 190.93.128.0/18, 190.93.192.0/19, 190.93.224.0/20, 190.94.0.0/15, 190.96.0.0/11, 190.128.0.0/9, 191.0.0.0/8, 192.0.0.0/6, 196.0.0.0/8, 197.0.0.0/9, 197.128.0.0/10, 197.192.0.0/11, 197.224.0.0/13, 197.232.0.0/15, 197.234.0.0/17, 197.234.128.0/18, 197.234.192.0/19, 197.234.224.0/20, 197.234.244.0/22, 197.234.248.0/21, 197.235.0.0/16, 197.236.0.0/14, 197.240.0.0/12, 198.0.0.0/11, 198.32.0.0/13, 198.40.0.0/16, 198.41.0.0/17, 198.42.0.0/15, 198.44.0.0/14, 198.48.0.0/12, 198.64.0.0/10, 198.128.0.0/9, 199.0.0.0/8, 200.0.0.0/5, 208.0.0.0/4, 224.0.0.0/3";
+// Mathematically exact 170-CIDR complement string for compatibility
+export const CLOUDFLARE_BYPASS_ALLOWED_IPS = CLOUDFLARE_BYPASS_CIDRS.join(', ');
 
-// Helper to construct Client WireGuard Config (Standard or Cloudflare Anti-Flag Residential Split)
+// Helper to construct Client WireGuard Config (Standard wg0 or Cloudflare Anti-Flag wg1)
 function generateClientConfigText(peer: Peer, antiFlag: boolean = false): string {
-  const allowed = antiFlag ? CLOUDFLARE_BYPASS_ALLOWED_IPS : peer.allowedIps;
-  const header = antiFlag
-    ? `# ☁️ Cloudflare Anti-Flag & ISP Host Masking Residential Split Profile
-# Routes standard web traffic securely encrypted through WireGuard VPS.
-# Routes all Cloudflare WAF, Turnstile challenges, and CDN subnets directly via your home ISP,
-# completely bypassing VPS Datacenter ASN blocks and eliminating infinite Turnstile loops!
-`
-    : `# Standard WireGuard Tunnel Profile
-`;
+  const isInstance2 = antiFlag || peer.instance === 'wg1';
+  const targetPort = isInstance2 ? (serverState.secondaryPort || (serverState.listenPort + 1)) : serverState.listenPort;
+  const targetIp = isInstance2
+    ? (peer.ip.startsWith('10.19.') ? peer.ip : peer.ip.replace('10.18.', '10.19.'))
+    : (peer.ip.startsWith('10.18.') ? peer.ip : peer.ip.replace('10.19.', '10.18.'));
 
-  return `${header}[Interface]
+  if (isInstance2) {
+    const formattedAllowedIps = formatWireguardAllowedIps(CLOUDFLARE_BYPASS_CIDRS, 14);
+    return `# ==============================================================================
+# ☁️ Instance 2: Cloudflare Anti-Flag Dedicated WireGuard Profile
+# Interface: wg1 | Port: ${targetPort} | Subnet: 10.19.0.0/24
+#
+# Solves Cloudflare WAF, Turnstile challenges, and Datacenter ASN blocks.
+# Routes all standard internet traffic securely through your WireGuard VPS.
+# Routes all 15 Cloudflare edge CDN & Turnstile subnets directly via your home ISP,
+# preventing session IP mismatches and eliminating infinite verification loops.
+# ==============================================================================
+[Interface]
 PrivateKey = ${peer.privateKey}
-Address = ${peer.ip}/32
-DNS = ${peer.dns}
-MTU = ${peer.mtu}
+Address = ${targetIp}/32
+DNS = ${peer.dns || '1.1.1.1, 1.0.0.1'}
+MTU = 1360
 
 [Peer]
 PublicKey = ${serverState.serverPublicKey}
 PresharedKey = ${peer.presharedKey}
-Endpoint = ${serverState.publicIp}:${serverState.listenPort}
-AllowedIPs = ${allowed}
+Endpoint = ${serverState.publicIp}:${targetPort}
+${formattedAllowedIps}
+PersistentKeepalive = 25
+`;
+  }
+
+  return `# ==============================================================================
+# 🛡️ Instance 1: Standard WireGuard Profile
+# Interface: wg0 | Port: ${targetPort} | Subnet: 10.18.0.0/24
+#
+# Clean, direct VPS egress without Cloudflare split-routing.
+# 100% of all internet traffic routes through the WireGuard VPS tunnel.
+# ==============================================================================
+[Interface]
+PrivateKey = ${peer.privateKey}
+Address = ${targetIp}/32
+DNS = ${peer.dns || '1.1.1.1, 1.0.0.1'}
+MTU = ${peer.mtu || 1420}
+
+[Peer]
+PublicKey = ${serverState.serverPublicKey}
+PresharedKey = ${peer.presharedKey}
+Endpoint = ${serverState.publicIp}:${targetPort}
+AllowedIPs = ${peer.allowedIps || '0.0.0.0/0, ::/0'}
 PersistentKeepalive = 25
 `;
 }
@@ -838,6 +955,38 @@ app.get('/api/server', requireVpnOrAuth, (_req: Request, res: Response) => {
   const totalRx = peers.reduce((sum, p) => sum + p.transferRx, 0);
   const totalTx = peers.reduce((sum, p) => sum + p.transferTx, 0);
 
+  const wg0Peers = peers.filter(p => p.instance !== 'wg1' && !p.ip.startsWith('10.19.'));
+  const wg1Peers = peers.filter(p => p.instance === 'wg1' || p.ip.startsWith('10.19.'));
+
+  const instances: ServerInstanceInfo[] = [
+    {
+      interfaceName: 'wg0',
+      name: 'Instance 1: Standard WireGuard',
+      mode: 'standard',
+      listenPort: serverState.listenPort,
+      internalSubnet: '10.18.0.0/24',
+      status: serverState.status,
+      activePeersCount: wg0Peers.filter(p => p.enabled).length,
+      onlinePeersCount: wg0Peers.filter(p => p.enabled && p.isOnline).length,
+      totalRx: wg0Peers.reduce((sum, p) => sum + p.transferRx, 0),
+      totalTx: wg0Peers.reduce((sum, p) => sum + p.transferTx, 0),
+      description: 'Standard full-tunnel direct VPS egress. Clean routing on port 4500.',
+    },
+    {
+      interfaceName: 'wg1',
+      name: 'Instance 2: Dedicated Cloudflare Anti-Flag',
+      mode: 'cloudflare_anti_flag',
+      listenPort: serverState.secondaryPort || (serverState.listenPort + 1),
+      internalSubnet: '10.19.0.0/24',
+      status: serverState.status,
+      activePeersCount: wg1Peers.filter(p => p.enabled).length,
+      onlinePeersCount: wg1Peers.filter(p => p.enabled && p.isOnline).length,
+      totalRx: wg1Peers.reduce((sum, p) => sum + p.transferRx, 0),
+      totalTx: wg1Peers.reduce((sum, p) => sum + p.transferTx, 0),
+      description: 'Zero-Challenge residential bypass (170-CIDR complement), MSS 1360 clamping, and TTL normalization on port 4501.',
+    },
+  ];
+
   // Zero plain-text: server private key is masked
   res.json({
     ...serverState,
@@ -849,6 +998,7 @@ app.get('/api/server', requireVpnOrAuth, (_req: Request, res: Response) => {
     totalTx,
     stealthScore: stealthConfig.overallScore,
     stealthRating: stealthConfig.rating,
+    instances,
   });
 });
 
@@ -860,47 +1010,58 @@ app.post('/api/server/action', requireVpnOrAuth, (req: Request, res: Response) =
     serverState.status = 'running';
     serverState.uptimeStartedAt = Date.now();
     try {
-      if (checkLiveWireguard()) execSync('systemctl start wg-quick@wg0 2>/dev/null || true');
+      if (checkLiveWireguard()) {
+        execSync('systemctl start wg-quick@wg0 2>/dev/null || true');
+        execSync('systemctl start wg-quick@wg1 2>/dev/null || true');
+      }
     } catch (e) {}
     journalLogs.unshift({
       id: `log-${Date.now()}`,
       timestamp: now,
       level: 'info',
       service: 'wg-quick',
-      message: `[#] wg-quick up wg0: Interface initialized at ${serverState.publicIp}:${serverState.listenPort}`,
+      message: `[#] Both WireGuard instances (wg0:${serverState.listenPort} & wg1:${serverState.secondaryPort || (serverState.listenPort + 1)}) started.`,
     });
   } else if (action === 'stop') {
     serverState.status = 'stopped';
     try {
-      if (checkLiveWireguard()) execSync('systemctl stop wg-quick@wg0 2>/dev/null || true');
+      if (checkLiveWireguard()) {
+        execSync('systemctl stop wg-quick@wg0 2>/dev/null || true');
+        execSync('systemctl stop wg-quick@wg1 2>/dev/null || true');
+      }
     } catch (e) {}
     journalLogs.unshift({
       id: `log-${Date.now()}`,
       timestamp: now,
       level: 'warn',
       service: 'wg-quick',
-      message: '[#] wg-quick down wg0: Server paused. Interfaces disassembled.',
+      message: '[#] wg-quick down wg0 & wg1: Server paused. Interfaces disassembled.',
     });
   } else if (action === 'restart') {
     serverState.status = 'running';
     serverState.uptimeStartedAt = Date.now();
     try {
-      if (checkLiveWireguard()) execSync('systemctl restart wg-quick@wg0 2>/dev/null || true');
+      if (checkLiveWireguard()) {
+        execSync('systemctl restart wg-quick@wg0 2>/dev/null || true');
+        execSync('systemctl restart wg-quick@wg1 2>/dev/null || true');
+      }
     } catch (e) {}
     journalLogs.unshift({
       id: `log-${Date.now()}`,
       timestamp: now,
       level: 'info',
       service: 'wg-quick',
-      message: '[#] Server gracefully restarted. Stealth mangle and peer routing rules reloaded with zero packet drop.',
+      message: '[#] Both WireGuard instances gracefully restarted with zero packet drop.',
     });
   }
 
   res.json({ success: true, serverState });
 });
 
-app.get('/api/server/config', requireVpnOrAuth, (_req: Request, res: Response) => {
-  const configText = generateServerConfigText();
+app.get('/api/server/config', requireVpnOrAuth, (req: Request, res: Response) => {
+  const iface = (req.query.interface === 'wg1' || req.query.iface === 'wg1') ? 'wg1' : 'wg0';
+  const configText = generateServerConfigText(iface);
+  res.setHeader('Content-Disposition', `attachment; filename="${iface}.conf"`);
   res.type('text/plain').send(configText);
 });
 
@@ -924,13 +1085,16 @@ app.get('/api/clients', requireVpnOrAuth, (_req: Request, res: Response) => {
 
 app.post('/api/clients', requireVpnOrAuth, async (req: Request, res: Response) => {
   try {
-    const { name, allowedIps, dns, mtu } = req.body;
+    const { name, allowedIps, dns, mtu, instance } = req.body;
     const cleanName = (name || '').replace(/[^a-zA-Z0-9_-]/g, '') || `device-${Date.now().toString().slice(-4)}`;
+    const selectedInstance: 'wg0' | 'wg1' = instance === 'wg1' ? 'wg1' : 'wg0';
+    const isAntiFlag = selectedInstance === 'wg1';
 
+    const subnetPrefix = isAntiFlag ? '10.19.0' : '10.18.0';
     const usedIps = new Set(peers.map(p => p.ip));
-    let nextIp = '10.18.0.2';
+    let nextIp = `${subnetPrefix}.2`;
     for (let i = 2; i <= 254; i++) {
-      const candidate = `10.18.0.${i}`;
+      const candidate = `${subnetPrefix}.${i}`;
       if (!usedIps.has(candidate)) {
         nextIp = candidate;
         break;
@@ -944,9 +1108,9 @@ app.post('/api/clients', requireVpnOrAuth, async (req: Request, res: Response) =
       publicKey: generateWgKey(),
       privateKey: generateWgKey(),
       presharedKey: generateWgKey(),
-      allowedIps: allowedIps || serverState.defaultAllowedIps,
+      allowedIps: allowedIps || (isAntiFlag ? CLOUDFLARE_BYPASS_ALLOWED_IPS : serverState.defaultAllowedIps),
       dns: dns || serverState.defaultDns,
-      mtu: mtu ? parseInt(mtu, 10) : serverState.defaultMtu,
+      mtu: mtu ? parseInt(mtu, 10) : (isAntiFlag ? 1360 : serverState.defaultMtu),
       createdAt: new Date().toISOString(),
       enabled: true,
       endpoint: null,
@@ -954,20 +1118,33 @@ app.post('/api/clients', requireVpnOrAuth, async (req: Request, res: Response) =
       transferRx: 0,
       transferTx: 0,
       isOnline: false,
+      instance: selectedInstance,
+      profileMode: isAntiFlag ? 'cloudflare_anti_flag' : 'standard',
     };
 
-    // If running on live VPS host with WireGuard installed, inject live into kernel
+    // If running on live VPS host with WireGuard installed, generate configs and inject
     if (checkLiveWireguard()) {
       try {
-        const clientConfPath = `/etc/wireguard/clients/${cleanName}.conf`;
-        fs.writeFileSync(clientConfPath, generateClientConfigText(newPeer, false), { mode: 0o600 });
+        const standardConfPath = `/etc/wireguard/clients/${cleanName}-standard.conf`;
+        fs.writeFileSync(standardConfPath, generateClientConfigText(newPeer, false), { mode: 0o600 });
         const cfShieldPath = `/etc/wireguard/clients/${cleanName}-cloudflare-shield.conf`;
         fs.writeFileSync(cfShieldPath, generateClientConfigText(newPeer, true), { mode: 0o600 });
-        execSync(`wg set wg0 peer "${newPeer.publicKey}" allowed-ips "${newPeer.ip}/32" 2>/dev/null || true`);
+
+        // Add to wg0
+        execSync(`wg set wg0 peer "${newPeer.publicKey}" allowed-ips "10.18.0.${nextIp.split('.')[3]}/32" 2>/dev/null || true`);
         fs.appendFileSync(
           '/etc/wireguard/wg0.conf',
-          `\n[Peer]\nPublicKey = ${newPeer.publicKey}\nPresharedKey = ${newPeer.presharedKey}\nAllowedIPs = ${newPeer.ip}/32\n`
+          `\n[Peer]\nPublicKey = ${newPeer.publicKey}\nPresharedKey = ${newPeer.presharedKey}\nAllowedIPs = 10.18.0.${nextIp.split('.')[3]}/32\n`
         );
+
+        // Add to wg1 if present
+        if (fs.existsSync('/etc/wireguard/wg1.conf')) {
+          execSync(`wg set wg1 peer "${newPeer.publicKey}" allowed-ips "10.19.0.${nextIp.split('.')[3]}/32" 2>/dev/null || true`);
+          fs.appendFileSync(
+            '/etc/wireguard/wg1.conf',
+            `\n[Peer]\nPublicKey = ${newPeer.publicKey}\nPresharedKey = ${newPeer.presharedKey}\nAllowedIPs = 10.19.0.${nextIp.split('.')[3]}/32\n`
+          );
+        }
       } catch (e) {}
     }
 
@@ -1027,8 +1204,15 @@ app.delete('/api/clients/:id', requireVpnOrAuth, (req: Request, res: Response) =
   if (checkLiveWireguard()) {
     try {
       execSync(`wg set wg0 peer "${deleted.publicKey}" remove 2>/dev/null || true`);
+      execSync(`wg set wg1 peer "${deleted.publicKey}" remove 2>/dev/null || true`);
       if (fs.existsSync(`/etc/wireguard/clients/${deleted.name}.conf`)) {
         fs.unlinkSync(`/etc/wireguard/clients/${deleted.name}.conf`);
+      }
+      if (fs.existsSync(`/etc/wireguard/clients/${deleted.name}-standard.conf`)) {
+        fs.unlinkSync(`/etc/wireguard/clients/${deleted.name}-standard.conf`);
+      }
+      if (fs.existsSync(`/etc/wireguard/clients/${deleted.name}-cloudflare-shield.conf`)) {
+        fs.unlinkSync(`/etc/wireguard/clients/${deleted.name}-cloudflare-shield.conf`);
       }
     } catch (e) {}
   }
