@@ -70,6 +70,26 @@ Standard WireGuard deployments on personal VPS hosts frequently trigger anti-fra
 | **Google BBR + FQ Pacing** | Eliminates datacenter bufferbloat and latency spikes, delivering smooth residential-like throughput. | `net.core.default_qdisc = fq` & `net.ipv4.tcp_congestion_control = bbr` |
 | **TOS / DSCP DPI Camouflage** | Clears non-standard Type of Service bits, removing unique WireGuard packet markers. | `iptables -t mangle -A POSTROUTING -j TOS --set-tos 0x00` |
 | **Domain Split-Tunneling** | Routes Netflix, Disney+, Hulu, Chase, and OpenAI around datacenter ASN blocks directly. | Pre-configured subnet CIDR routing tables |
+| **Cloudflare Anti-Flag (170 CIDRs)** | Routes standard web traffic via VPS while routing all 15 Cloudflare edge CIDRs via local residential ISP. | Mathematically exact 170-CIDR complement in `AllowedIPs` |
+| **Cloudflare WARP Egress (AS13335)** | Conceals VPS datacenter ASN under Cloudflare's own consumer edge network, eliminating Turnstile captcha loops. | `warp-cli` / `wgcf` upstream routing |
+| **Transparent DNS Redundancy** | Auto-redirects internal DNS queries to Cloudflare Anycast (1.1.1.1:53) to guarantee zero client connection stalls. | `iptables -t nat -A PREROUTING -p udp --dport 53 -j DNAT --to 1.1.1.1:53` |
+
+---
+
+## ☁️ Cloudflare Anti-Flag & Turnstile Zero-Challenge Engine
+
+Cloudflare Turnstile and Bot Management inspect incoming traffic for datacenter IP ASNs (DigitalOcean, AWS, Hetzner, Vultr, OVH) and mismatched TCP packet signatures. This causes frequent 403 Forbidden Ray ID errors and infinite captcha loops.
+
+Cookie's WireGuard solves this with dual anti-flag paths:
+
+1. **Client-Side Residential Split Profile (`<device>-cloudflare-shield.conf`)**:
+   - Uses a mathematically complete **170-CIDR complement** that covers all 4.29 billion IPv4 addresses EXCEPT the 15 official Cloudflare IPv4 ranges (AS13335).
+   - Encrypts 100% of standard web traffic through WireGuard VPS.
+   - Cloudflare-protected sites and Turnstile challenges resolve and connect directly via your client device's native home/mobile ISP, entirely bypassing datacenter ASN filters with zero captcha challenges!
+2. **Server-Side Cloudflare WARP Upstream Egress (`AS13335`)**:
+   - For full-tunnel setups, routes outbound packets through Cloudflare's internal edge network (`warp=on`), presenting Cloudflare's own trusted consumer ASN to destination servers.
+3. **Transparent DNS & Interface Failover**:
+   - Interface-agnostic NAT masquerading and automatic DNS DNAT failover ensure that data packets and domain lookups **always transmit reliably**, preventing post-install connection stalls.
 
 ---
 

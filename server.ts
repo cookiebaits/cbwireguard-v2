@@ -707,9 +707,10 @@ AllowedIPs = ${p.ip}/32
   return conf;
 }
 
-// Inverted CIDR set that excludes all Cloudflare IPv4 ranges (AS13335)
-// Routes all internet traffic through WireGuard EXCEPT Cloudflare WAF, Turnstile, and Cloudflare CDN
-export const CLOUDFLARE_BYPASS_ALLOWED_IPS = "224.0.0.0/3, 208.0.0.0/4, 200.0.0.0/5, 192.0.0.0/6, 196.0.0.0/7, 199.0.0.0/8, 198.128.0.0/9, 198.64.0.0/10, 198.0.0.0/11, 198.48.0.0/12, 198.32.0.0/13, 198.44.0.0/14, 198.42.0.0/15, 198.40.0.0/16, 198.41.0.0/17, 128.0.0.0/3, 176.0.0.0/4, 164.0.0.0/6, 160.0.0.0/7, 163.0.0.0/8, 162.0.0.0/9, 162.192.0.0/10, 162.160.0.0/11, 162.128.0.0/12, 162.144.0.0/13, 162.152.0.0/14, 162.156.0.0/15, 168.0.0.0/6, 174.0.0.0/7, 173.0.0.0/8, 172.128.0.0/9, 172.0.0.0/10, 172.96.0.0/11, 172.80.0.0/12, 172.72.0.0/13, 0.0.0.0/2, 64.0.0.0/3, 112.0.0.0/4, 96.0.0.0/5, 108.0.0.0/6, 106.0.0.0/7, 105.0.0.0/8, 104.128.0.0/9, 104.64.0.0/10, 104.32.0.0/11, 104.0.0.0/12";
+// Mathematically exact 170-CIDR complement that completely excludes all 15 official Cloudflare IPv4 CIDRs (AS13335).
+// Routes 100% of non-Cloudflare internet traffic through WireGuard VPS, while Cloudflare WAF, Turnstile, and CDN subnets
+// route directly via the client's home ISP, preventing datacenter ASN blocks and Turnstile verification loops.
+export const CLOUDFLARE_BYPASS_ALLOWED_IPS = "0.0.0.0/2, 64.0.0.0/3, 96.0.0.0/6, 100.0.0.0/7, 102.0.0.0/8, 103.0.0.0/12, 103.16.0.0/14, 103.20.0.0/16, 103.21.0.0/17, 103.21.128.0/18, 103.21.192.0/19, 103.21.224.0/20, 103.21.240.0/22, 103.21.248.0/21, 103.22.0.0/17, 103.22.128.0/18, 103.22.192.0/21, 103.22.204.0/22, 103.22.208.0/20, 103.22.224.0/19, 103.23.0.0/16, 103.24.0.0/14, 103.28.0.0/15, 103.30.0.0/16, 103.31.0.0/22, 103.31.8.0/21, 103.31.16.0/20, 103.31.32.0/19, 103.31.64.0/18, 103.31.128.0/17, 103.32.0.0/11, 103.64.0.0/10, 103.128.0.0/9, 104.0.0.0/12, 104.28.0.0/14, 104.32.0.0/11, 104.64.0.0/10, 104.128.0.0/9, 105.0.0.0/8, 106.0.0.0/7, 108.0.0.0/9, 108.128.0.0/11, 108.160.0.0/15, 108.162.0.0/17, 108.162.128.0/18, 108.163.0.0/16, 108.164.0.0/14, 108.168.0.0/13, 108.176.0.0/12, 108.192.0.0/10, 109.0.0.0/8, 110.0.0.0/7, 112.0.0.0/4, 128.0.0.0/7, 130.0.0.0/8, 131.0.0.0/18, 131.0.64.0/21, 131.0.76.0/22, 131.0.80.0/20, 131.0.96.0/19, 131.0.128.0/17, 131.1.0.0/16, 131.2.0.0/15, 131.4.0.0/14, 131.8.0.0/13, 131.16.0.0/12, 131.32.0.0/11, 131.64.0.0/10, 131.128.0.0/9, 132.0.0.0/6, 136.0.0.0/6, 140.0.0.0/8, 141.0.0.0/10, 141.64.0.0/11, 141.96.0.0/14, 141.100.0.0/16, 141.101.0.0/18, 141.101.128.0/17, 141.102.0.0/15, 141.104.0.0/13, 141.112.0.0/12, 141.128.0.0/9, 142.0.0.0/7, 144.0.0.0/4, 160.0.0.0/7, 162.0.0.0/9, 162.128.0.0/12, 162.144.0.0/13, 162.152.0.0/14, 162.156.0.0/15, 162.160.0.0/11, 162.192.0.0/10, 163.0.0.0/8, 164.0.0.0/6, 168.0.0.0/6, 172.0.0.0/10, 172.72.0.0/13, 172.80.0.0/12, 172.96.0.0/11, 172.128.0.0/9, 173.0.0.0/9, 173.128.0.0/10, 173.192.0.0/11, 173.224.0.0/12, 173.240.0.0/14, 173.244.0.0/16, 173.245.0.0/19, 173.245.32.0/20, 173.245.64.0/18, 173.245.128.0/17, 173.246.0.0/15, 173.248.0.0/13, 174.0.0.0/7, 176.0.0.0/5, 184.0.0.0/6, 188.0.0.0/10, 188.64.0.0/11, 188.96.0.0/12, 188.112.0.0/15, 188.114.0.0/18, 188.114.64.0/19, 188.114.112.0/20, 188.114.128.0/17, 188.115.0.0/16, 188.116.0.0/14, 188.120.0.0/13, 188.128.0.0/9, 189.0.0.0/8, 190.0.0.0/10, 190.64.0.0/12, 190.80.0.0/13, 190.88.0.0/14, 190.92.0.0/16, 190.93.0.0/17, 190.93.128.0/18, 190.93.192.0/19, 190.93.224.0/20, 190.94.0.0/15, 190.96.0.0/11, 190.128.0.0/9, 191.0.0.0/8, 192.0.0.0/6, 196.0.0.0/8, 197.0.0.0/9, 197.128.0.0/10, 197.192.0.0/11, 197.224.0.0/13, 197.232.0.0/15, 197.234.0.0/17, 197.234.128.0/18, 197.234.192.0/19, 197.234.224.0/20, 197.234.244.0/22, 197.234.248.0/21, 197.235.0.0/16, 197.236.0.0/14, 197.240.0.0/12, 198.0.0.0/11, 198.32.0.0/13, 198.40.0.0/16, 198.41.0.0/17, 198.42.0.0/15, 198.44.0.0/14, 198.48.0.0/12, 198.64.0.0/10, 198.128.0.0/9, 199.0.0.0/8, 200.0.0.0/5, 208.0.0.0/4, 224.0.0.0/3";
 
 // Helper to construct Client WireGuard Config (Standard or Cloudflare Anti-Flag Residential Split)
 function generateClientConfigText(peer: Peer, antiFlag: boolean = false): string {
@@ -1137,17 +1138,25 @@ nameserver 8.8.8.8
 EOF_RESOLV
         cp /tmp/clean_resolv.conf /etc/resolv.conf 2>/dev/null || true
         rm -f /tmp/clean_resolv.conf
-        systemctl stop dnsmasq 2>/dev/null || true
         DEF_IF=$(ip -4 route show default 2>/dev/null | awk '/dev/ {for (i=1; i<=NF; i++) if ($i == "dev") print $(i+1)}' | head -n1 || echo eth0)
         iptables -I FORWARD 1 -i wg0 -j ACCEPT 2>/dev/null || true
         iptables -I FORWARD 2 -o wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
         iptables -I FORWARD 3 -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
+        iptables -I FORWARD 4 -d 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
         iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 ! -o wg0 -j MASQUERADE 2>/dev/null || true
-        iptables -t nat -I POSTROUTING 2 -o "$DEF_IF" -j MASQUERADE 2>/dev/null || true
+        iptables -t nat -I POSTROUTING 2 -s 10.18.0.0/24 -o "$DEF_IF" -j MASQUERADE 2>/dev/null || true
+        iptables -I INPUT 1 -i wg0 -p udp --dport 53 -j ACCEPT 2>/dev/null || true
+        iptables -I INPUT 2 -i wg0 -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
+        iptables -t nat -D PREROUTING -i wg0 -d 10.18.0.1 -p udp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
+        iptables -t nat -D PREROUTING -i wg0 -d 10.18.0.1 -p tcp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
+        iptables -t nat -A PREROUTING -i wg0 -d 10.18.0.1 -p udp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
+        iptables -t nat -A PREROUTING -i wg0 -d 10.18.0.1 -p tcp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
+        iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
         iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-        iptables -t mangle -I FORWARD 2 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1360 2>/dev/null || true
-        iptables -t mangle -I POSTROUTING 1 -p tcp --tcp-flags SYN,RST SYN -o "$DEF_IF" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-        iptables -t mangle -I POSTROUTING 2 -j TTL --ttl-set 64 2>/dev/null || true
+        iptables -t mangle -D POSTROUTING -p tcp --tcp-flags SYN,RST SYN ! -o wg0 -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+        iptables -t mangle -I POSTROUTING 1 -p tcp --tcp-flags SYN,RST SYN ! -o wg0 -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+        iptables -t mangle -D POSTROUTING ! -o wg0 -j TTL --ttl-set 64 2>/dev/null || true
+        iptables -t mangle -A POSTROUTING ! -o wg0 -j TTL --ttl-set 64 2>/dev/null || true
         systemctl restart wg-quick@wg0 2>/dev/null || true
       `, { timeout: 8000, shell: '/bin/bash' });
     }

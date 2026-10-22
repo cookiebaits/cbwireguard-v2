@@ -363,7 +363,7 @@ function installWireGuard() {
 	if [[ "${OS}" == "ubuntu" || "${OS}" == "debian" ]]; then
 		local NEED_APT_INSTALL=0
 		local MISSING_PKGS=()
-		for pkg in wireguard wireguard-tools iptables qrencode curl jq iproute2 iptables-persistent net-tools; do
+		for pkg in wireguard wireguard-tools iptables qrencode curl jq iproute2 iptables-persistent net-tools ipset; do
 			if ! dpkg -s "$pkg" &>/dev/null; then
 				NEED_APT_INSTALL=1
 				MISSING_PKGS+=("$pkg")
@@ -881,7 +881,8 @@ PEER_EOF
 	if [[ "$IS_CF_SHIELD" -eq 1 ]]; then
 		# Generate Dedicated Cloudflare Anti-Flag & ISP Host Masking Residential Split Profile ONLY if enabled
 		local CF_SHIELD_CONF="/etc/wireguard/clients/${CLIENT_NAME}-cloudflare-shield.conf"
-		local CF_SPLIT_ALLOWED_IPS="224.0.0.0/3, 208.0.0.0/4, 200.0.0.0/5, 192.0.0.0/6, 196.0.0.0/7, 199.0.0.0/8, 198.128.0.0/9, 198.64.0.0/10, 198.0.0.0/11, 198.48.0.0/12, 198.32.0.0/13, 198.44.0.0/14, 198.42.0.0/15, 198.40.0.0/16, 198.41.0.0/17, 128.0.0.0/3, 176.0.0.0/4, 164.0.0.0/6, 160.0.0.0/7, 163.0.0.0/8, 162.0.0.0/9, 162.192.0.0/10, 162.160.0.0/11, 162.128.0.0/12, 162.144.0.0/13, 162.152.0.0/14, 162.156.0.0/15, 168.0.0.0/6, 174.0.0.0/7, 173.0.0.0/8, 172.128.0.0/9, 172.0.0.0/10, 172.96.0.0/11, 172.80.0.0/12, 172.72.0.0/13, 0.0.0.0/2, 64.0.0.0/3, 112.0.0.0/4, 96.0.0.0/5, 108.0.0.0/6, 106.0.0.0/7, 105.0.0.0/8, 104.128.0.0/9, 104.64.0.0/10, 104.32.0.0/11, 104.0.0.0/12"
+		# Mathematically exact 170-CIDR complement excluding all 15 Cloudflare IPv4 ranges (AS13335)
+		local CF_SPLIT_ALLOWED_IPS="0.0.0.0/2, 64.0.0.0/3, 96.0.0.0/6, 100.0.0.0/7, 102.0.0.0/8, 103.0.0.0/12, 103.16.0.0/14, 103.20.0.0/16, 103.21.0.0/17, 103.21.128.0/18, 103.21.192.0/19, 103.21.224.0/20, 103.21.240.0/22, 103.21.248.0/21, 103.22.0.0/17, 103.22.128.0/18, 103.22.192.0/21, 103.22.204.0/22, 103.22.208.0/20, 103.22.224.0/19, 103.23.0.0/16, 103.24.0.0/14, 103.28.0.0/15, 103.30.0.0/16, 103.31.0.0/22, 103.31.8.0/21, 103.31.16.0/20, 103.31.32.0/19, 103.31.64.0/18, 103.31.128.0/17, 103.32.0.0/11, 103.64.0.0/10, 103.128.0.0/9, 104.0.0.0/12, 104.28.0.0/14, 104.32.0.0/11, 104.64.0.0/10, 104.128.0.0/9, 105.0.0.0/8, 106.0.0.0/7, 108.0.0.0/9, 108.128.0.0/11, 108.160.0.0/15, 108.162.0.0/17, 108.162.128.0/18, 108.163.0.0/16, 108.164.0.0/14, 108.168.0.0/13, 108.176.0.0/12, 108.192.0.0/10, 109.0.0.0/8, 110.0.0.0/7, 112.0.0.0/4, 128.0.0.0/7, 130.0.0.0/8, 131.0.0.0/18, 131.0.64.0/21, 131.0.76.0/22, 131.0.80.0/20, 131.0.96.0/19, 131.0.128.0/17, 131.1.0.0/16, 131.2.0.0/15, 131.4.0.0/14, 131.8.0.0/13, 131.16.0.0/12, 131.32.0.0/11, 131.64.0.0/10, 131.128.0.0/9, 132.0.0.0/6, 136.0.0.0/6, 140.0.0.0/8, 141.0.0.0/10, 141.64.0.0/11, 141.96.0.0/14, 141.100.0.0/16, 141.101.0.0/18, 141.101.128.0/17, 141.102.0.0/15, 141.104.0.0/13, 141.112.0.0/12, 141.128.0.0/9, 142.0.0.0/7, 144.0.0.0/4, 160.0.0.0/7, 162.0.0.0/9, 162.128.0.0/12, 162.144.0.0/13, 162.152.0.0/14, 162.156.0.0/15, 162.160.0.0/11, 162.192.0.0/10, 163.0.0.0/8, 164.0.0.0/6, 168.0.0.0/6, 172.0.0.0/10, 172.72.0.0/13, 172.80.0.0/12, 172.96.0.0/11, 172.128.0.0/9, 173.0.0.0/9, 173.128.0.0/10, 173.192.0.0/11, 173.224.0.0/12, 173.240.0.0/14, 173.244.0.0/16, 173.245.0.0/19, 173.245.32.0/20, 173.245.64.0/18, 173.245.128.0/17, 173.246.0.0/15, 173.248.0.0/13, 174.0.0.0/7, 176.0.0.0/5, 184.0.0.0/6, 188.0.0.0/10, 188.64.0.0/11, 188.96.0.0/12, 188.112.0.0/15, 188.114.0.0/18, 188.114.64.0/19, 188.114.112.0/20, 188.114.128.0/17, 188.115.0.0/16, 188.116.0.0/14, 188.120.0.0/13, 188.128.0.0/9, 189.0.0.0/8, 190.0.0.0/10, 190.64.0.0/12, 190.80.0.0/13, 190.88.0.0/14, 190.92.0.0/16, 190.93.0.0/17, 190.93.128.0/18, 190.93.192.0/19, 190.93.224.0/20, 190.94.0.0/15, 190.96.0.0/11, 190.128.0.0/9, 191.0.0.0/8, 192.0.0.0/6, 196.0.0.0/8, 197.0.0.0/9, 197.128.0.0/10, 197.192.0.0/11, 197.224.0.0/13, 197.232.0.0/15, 197.234.0.0/17, 197.234.128.0/18, 197.234.192.0/19, 197.234.224.0/20, 197.234.244.0/22, 197.234.248.0/21, 197.235.0.0/16, 197.236.0.0/14, 197.240.0.0/12, 198.0.0.0/11, 198.32.0.0/13, 198.40.0.0/16, 198.41.0.0/17, 198.42.0.0/15, 198.44.0.0/14, 198.48.0.0/12, 198.64.0.0/10, 198.128.0.0/9, 199.0.0.0/8, 200.0.0.0/5, 208.0.0.0/4, 224.0.0.0/3"
 		cat << CF_CLIENT_EOF > "$CF_SHIELD_CONF"
 # ☁️ Cloudflare Anti-Flag & Residential ISP Mask Profile
 # Encrypts & routes standard traffic via WireGuard VPS, while routing Cloudflare
@@ -1133,10 +1134,11 @@ filterwin2k
 # Strict interface isolation: bind ONLY to internal WireGuard tunnel, preserving host resolver
 interface=${SERVER_WG_NIC:-wg0}
 except-interface=lo
-bind-interfaces
+bind-dynamic
 listen-address=${SERVER_WG_IPV4:-10.18.0.1}
 no-resolv
 server=1.1.1.1
+server=1.0.0.1
 server=8.8.8.8
 DNSMASQ_STEALTH_EOF
 
@@ -1174,8 +1176,6 @@ DNSMASQ_STEALTH_EOF
 			if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
 				if command -v ipset &>/dev/null; then
 					ipset add wg_split_v4 "$ip" 2>/dev/null || true
-				else
-					iptables -t nat -A POSTROUTING -d "$ip" -o "${SERVER_PUB_NIC:-eth0}" -j MASQUERADE 2>/dev/null || true
 				fi
 			fi
 		done
@@ -1184,8 +1184,6 @@ DNSMASQ_STEALTH_EOF
 			if [[ "$ip6" =~ : ]]; then
 				if command -v ipset &>/dev/null; then
 					ipset add wg_split_v6 "$ip6" 2>/dev/null || true
-				else
-					ip6tables -t nat -A POSTROUTING -d "$ip6" -o "${SERVER_PUB_NIC:-eth0}" -j MASQUERADE 2>/dev/null || true
 				fi
 			fi
 		done
@@ -1207,34 +1205,57 @@ DNSMASQ_STEALTH_EOF
 		done
 	fi
 
-	if command -v ipset &>/dev/null; then
-		if [[ "$MODE" == "BYPASS" ]]; then
-			iptables -t nat -A POSTROUTING -m set --match-set wg_split_v4 dst -o "${SERVER_PUB_NIC:-eth0}" -j MASQUERADE 2>/dev/null || true
-			ip6tables -t nat -A POSTROUTING -m set --match-set wg_split_v6 dst -o "${SERVER_PUB_NIC:-eth0}" -j MASQUERADE 2>/dev/null || true
-		fi
+	local DEF_NIC="${SERVER_PUB_NIC}"
+	if [[ -z "$DEF_NIC" ]]; then
+		DEF_NIC=$(ip -4 route show default 2>/dev/null | awk '/dev/ {for (i=1; i<=NF; i++) if ($i == "dev") print $(i+1)}' | head -n1 || echo "eth0")
 	fi
 
-	# GUARANTEE CORE FORWARD & MASQUERADE ARE ALWAYS ACTIVE
+	# GUARANTEE CORE FORWARD & MASQUERADE ARE ALWAYS ACTIVE AND INTERFACE-AGNOSTIC
 	iptables -I FORWARD 1 -i "${SERVER_WG_NIC:-wg0}" -j ACCEPT 2>/dev/null || true
 	iptables -I FORWARD 2 -o "${SERVER_WG_NIC:-wg0}" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
 	iptables -I FORWARD 3 -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
+	iptables -I FORWARD 4 -d 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
 	iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 ! -o "${SERVER_WG_NIC:-wg0}" -j MASQUERADE 2>/dev/null || true
+	if [[ -n "$DEF_NIC" ]]; then
+		iptables -t nat -I POSTROUTING 2 -s 10.18.0.0/24 -o "$DEF_NIC" -j MASQUERADE 2>/dev/null || true
+	fi
 	sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
 
-	# Re-apply Stealth Packet Normalization Rules
+	# Route via Cloudflare WARP interface if active, or direct
+	if ip link show CloudflareWARP &>/dev/null; then
+		iptables -t nat -I POSTROUTING 1 -m set --match-set wg_split_v4 dst -o CloudflareWARP -j MASQUERADE 2>/dev/null || true
+	elif ip link show warp0 &>/dev/null; then
+		iptables -t nat -I POSTROUTING 1 -m set --match-set wg_split_v4 dst -o warp0 -j MASQUERADE 2>/dev/null || true
+	elif command -v ipset &>/dev/null && [[ "$MODE" == "BYPASS" ]]; then
+		iptables -t nat -A POSTROUTING -m set --match-set wg_split_v4 dst ! -o "${SERVER_WG_NIC:-wg0}" -j MASQUERADE 2>/dev/null || true
+		ip6tables -t nat -A POSTROUTING -m set --match-set wg_split_v6 dst ! -o "${SERVER_WG_NIC:-wg0}" -j MASQUERADE 2>/dev/null || true
+	fi
+
+	# TRANSPARENT DNS FAILOVER & ANONYMIZATION:
+	# Ensures clients querying internal IP (10.18.0.1:53) never experience timeout even if local dnsmasq is inactive
+	iptables -I INPUT 1 -i "${SERVER_WG_NIC:-wg0}" -p udp --dport 53 -j ACCEPT 2>/dev/null || true
+	iptables -I INPUT 2 -i "${SERVER_WG_NIC:-wg0}" -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
+	iptables -t nat -D PREROUTING -i "${SERVER_WG_NIC:-wg0}" -d "${SERVER_WG_IPV4:-10.18.0.1}" -p udp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
+	iptables -t nat -D PREROUTING -i "${SERVER_WG_NIC:-wg0}" -d "${SERVER_WG_IPV4:-10.18.0.1}" -p tcp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
+	if ! systemctl is-active --quiet dnsmasq 2>/dev/null; then
+		iptables -t nat -A PREROUTING -i "${SERVER_WG_NIC:-wg0}" -d "${SERVER_WG_IPV4:-10.18.0.1}" -p udp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
+		iptables -t nat -A PREROUTING -i "${SERVER_WG_NIC:-wg0}" -d "${SERVER_WG_IPV4:-10.18.0.1}" -p tcp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
+	fi
+
+	# Re-apply Stealth Packet Normalization Rules (Clean non-colliding order)
 	local TARGET_TTL=64
 	local TARGET_MSS=1360
 	if [[ -f /etc/wireguard/emulate_windows_ttl ]]; then
 		TARGET_TTL=128
 	fi
+	iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 	iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-	iptables -t mangle -I FORWARD 2 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss ${TARGET_MSS} 2>/dev/null || true
-	iptables -t mangle -D POSTROUTING -p tcp --tcp-flags SYN,RST SYN -o "${SERVER_PUB_NIC:-eth0}" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-	iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -o "${SERVER_PUB_NIC:-eth0}" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-	iptables -t mangle -D POSTROUTING -o "${SERVER_PUB_NIC:-eth0}" -j TTL --ttl-set 64 2>/dev/null || true
-	iptables -t mangle -D POSTROUTING -o "${SERVER_PUB_NIC:-eth0}" -j TTL --ttl-set 128 2>/dev/null || true
-	iptables -t mangle -A POSTROUTING -o "${SERVER_PUB_NIC:-eth0}" -j TTL --ttl-set ${TARGET_TTL} 2>/dev/null || true
-	ip6tables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -o "${SERVER_PUB_NIC:-eth0}" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+	iptables -t mangle -D POSTROUTING -p tcp --tcp-flags SYN,RST SYN ! -o "${SERVER_WG_NIC:-wg0}" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+	iptables -t mangle -I POSTROUTING 1 -p tcp --tcp-flags SYN,RST SYN ! -o "${SERVER_WG_NIC:-wg0}" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+	iptables -t mangle -D POSTROUTING ! -o "${SERVER_WG_NIC:-wg0}" -j TTL --ttl-set 64 2>/dev/null || true
+	iptables -t mangle -D POSTROUTING ! -o "${SERVER_WG_NIC:-wg0}" -j TTL --ttl-set 128 2>/dev/null || true
+	iptables -t mangle -A POSTROUTING ! -o "${SERVER_WG_NIC:-wg0}" -j TTL --ttl-set ${TARGET_TTL} 2>/dev/null || true
+	ip6tables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN ! -o "${SERVER_WG_NIC:-wg0}" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 
 	# Protect host DNS resolvers from corruption
 	if ! grep -q -E "nameserver [0-9]" /etc/resolv.conf 2>/dev/null || grep -q "127.0.0.1" /etc/resolv.conf 2>/dev/null; then
@@ -1558,14 +1579,29 @@ RESOLV_CLEAN_EOF
 	iptables -I FORWARD 1 -i "${SERVER_WG_NIC:-wg0}" -j ACCEPT 2>/dev/null || true
 	iptables -I FORWARD 2 -o "${SERVER_WG_NIC:-wg0}" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
 	iptables -I FORWARD 3 -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
-	# Ensure outgoing NAT
+	iptables -I FORWARD 4 -d 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
+	# Ensure outgoing NAT (interface-agnostic + default NIC)
 	iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 ! -o "${SERVER_WG_NIC:-wg0}" -j MASQUERADE 2>/dev/null || true
-	iptables -t nat -I POSTROUTING 2 -o "${DEF_NIC}" -j MASQUERADE 2>/dev/null || true
+	if [[ -n "$DEF_NIC" ]]; then
+		iptables -t nat -I POSTROUTING 2 -s 10.18.0.0/24 -o "${DEF_NIC}" -j MASQUERADE 2>/dev/null || true
+	fi
+	# Transparent DNS DNAT failover: if client requests 10.18.0.1:53, guarantee resolution via 1.1.1.1
+	iptables -I INPUT 1 -i "${SERVER_WG_NIC:-wg0}" -p udp --dport 53 -j ACCEPT 2>/dev/null || true
+	iptables -I INPUT 2 -i "${SERVER_WG_NIC:-wg0}" -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
+	iptables -t nat -D PREROUTING -i "${SERVER_WG_NIC:-wg0}" -d 10.18.0.1 -p udp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
+	iptables -t nat -D PREROUTING -i "${SERVER_WG_NIC:-wg0}" -d 10.18.0.1 -p tcp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
+	iptables -t nat -A PREROUTING -i "${SERVER_WG_NIC:-wg0}" -d 10.18.0.1 -p udp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
+	iptables -t nat -A PREROUTING -i "${SERVER_WG_NIC:-wg0}" -d 10.18.0.1 -p tcp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
 	# MSS Clamping & TTL Normalization
+	local TARGET_TTL=64
+	[[ -f /etc/wireguard/emulate_windows_ttl ]] && TARGET_TTL=128
+	iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 	iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-	iptables -t mangle -I FORWARD 2 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1360 2>/dev/null || true
-	iptables -t mangle -I POSTROUTING 1 -p tcp --tcp-flags SYN,RST SYN -o "${DEF_NIC}" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-	iptables -t mangle -I POSTROUTING 2 -o "${DEF_NIC}" -j TTL --ttl-set 64 2>/dev/null || true
+	iptables -t mangle -D POSTROUTING -p tcp --tcp-flags SYN,RST SYN ! -o "${SERVER_WG_NIC:-wg0}" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+	iptables -t mangle -I POSTROUTING 1 -p tcp --tcp-flags SYN,RST SYN ! -o "${SERVER_WG_NIC:-wg0}" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+	iptables -t mangle -D POSTROUTING ! -o "${SERVER_WG_NIC:-wg0}" -j TTL --ttl-set 64 2>/dev/null || true
+	iptables -t mangle -D POSTROUTING ! -o "${SERVER_WG_NIC:-wg0}" -j TTL --ttl-set 128 2>/dev/null || true
+	iptables -t mangle -A POSTROUTING ! -o "${SERVER_WG_NIC:-wg0}" -j TTL --ttl-set ${TARGET_TTL} 2>/dev/null || true
 
 	if curl -sSf --max-time 4 https://www.cloudflare.com/cdn-cgi/trace >/dev/null 2>&1; then
 		echo -e "${GREEN}[✔] Health Auto-Repair COMPLETE: Host DNS, WireGuard forwarding and connectivity verified!${NC}\n"
@@ -1621,9 +1657,17 @@ function cloudflareAntiFlagEngine() {
 				if command -v warp-cli &>/dev/null; then
 					warp-cli register 2>/dev/null || true
 					warp-cli add-excluded-route "${SERVER_PUB_IP}/32" 2>/dev/null || true
-					warp-cli set-mode proxy 2>/dev/null || true
+					warp-cli add-excluded-route "0.0.0.0/0:22" 2>/dev/null || true
+					warp-cli add-excluded-route "0.0.0.0/0:${SERVER_PORT:-4500}" 2>/dev/null || true
+					warp-cli add-excluded-route "0.0.0.0/0:${WEB_PORT:-51821}" 2>/dev/null || true
+					warp-cli set-mode warp 2>/dev/null || warp-cli mode warp 2>/dev/null || warp-cli set-mode proxy 2>/dev/null || true
 					warp-cli connect 2>/dev/null || true
-					echo -e "${GREEN}[✔] Official Cloudflare WARP running in Safe Local Proxy mode (127.0.0.1:40000).${NC}"
+					if ip link show CloudflareWARP &>/dev/null; then
+						echo -e "${GREEN}[✔] Official Cloudflare WARP active on tunnel interface (CloudflareWARP - AS13335).${NC}"
+						iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 -o CloudflareWARP -j MASQUERADE 2>/dev/null || true
+					else
+						echo -e "${GREEN}[✔] Cloudflare WARP active in safe proxy mode (127.0.0.1:40000).${NC}"
+					fi
 					echo -e "${GREEN}[✔] Outgoing Cloudflare packets mapped to AS13335 without disrupting SSH or default networking.${NC}"
 				else
 					echo -e "${YELLOW}[*] Cloudflare WARP upstream routing registered.${NC}"
@@ -1661,13 +1705,13 @@ function cloudflareAntiFlagEngine() {
 			4)
 				if [[ -f /etc/wireguard/emulate_windows_ttl ]]; then
 					rm -f /etc/wireguard/emulate_windows_ttl
-					iptables -t mangle -D POSTROUTING -o "${SERVER_PUB_NIC:-eth0}" -j TTL --ttl-set 128 2>/dev/null || true
-					iptables -t mangle -A POSTROUTING -o "${SERVER_PUB_NIC:-eth0}" -j TTL --ttl-set 64 2>/dev/null || true
+					iptables -t mangle -D POSTROUTING ! -o "${SERVER_WG_NIC:-wg0}" -j TTL --ttl-set 128 2>/dev/null || true
+					iptables -t mangle -A POSTROUTING ! -o "${SERVER_WG_NIC:-wg0}" -j TTL --ttl-set 64 2>/dev/null || true
 					echo -e "${GREEN}[✔] Switched to Standard Desktop Unix/macOS Stack (TTL=64).${NC}\n"
 				else
 					touch /etc/wireguard/emulate_windows_ttl
-					iptables -t mangle -D POSTROUTING -o "${SERVER_PUB_NIC:-eth0}" -j TTL --ttl-set 64 2>/dev/null || true
-					iptables -t mangle -A POSTROUTING -o "${SERVER_PUB_NIC:-eth0}" -j TTL --ttl-set 128 2>/dev/null || true
+					iptables -t mangle -D POSTROUTING ! -o "${SERVER_WG_NIC:-wg0}" -j TTL --ttl-set 64 2>/dev/null || true
+					iptables -t mangle -A POSTROUTING ! -o "${SERVER_WG_NIC:-wg0}" -j TTL --ttl-set 128 2>/dev/null || true
 					echo -e "${GREEN}[✔] Switched to Windows 10/11 Desktop Stack Emulation (TTL=128, MSS=1360).${NC}"
 					echo -e "${GREEN}[✔] Anti-p0f OS fingerprinting protection active! Cloudflare sees Windows PC.${NC}\n"
 				fi
@@ -1675,8 +1719,13 @@ function cloudflareAntiFlagEngine() {
 			5)
 				echo -e "\n${CYAN}[*] Performing Live Cloudflare CDN Trace & Anti-Bot Diagnostic...${NC}"
 				if command -v curl &>/dev/null; then
-					local TRACE_OUT
-					TRACE_OUT=$(curl -sSf --max-time 4 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
+					local TRACE_OUT=""
+					if [[ -f /etc/wireguard/warp_egress_enabled ]] && isPortInUse 40000 "tcp"; then
+						TRACE_OUT=$(curl -x socks5h://127.0.0.1:40000 -sSf --max-time 4 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
+					fi
+					if [[ -z "$TRACE_OUT" ]]; then
+						TRACE_OUT=$(curl -sSf --max-time 4 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
+					fi
 					if [[ -n "$TRACE_OUT" ]]; then
 						echo -e "${BOLD}Cloudflare Edge Diagnostics:${NC}"
 						echo "$TRACE_OUT" | sed 's/^/  /'
@@ -1684,7 +1733,7 @@ function cloudflareAntiFlagEngine() {
 						if echo "$TRACE_OUT" | grep -q "warp=on"; then
 							echo -e "${GREEN}[✔] Cloudflare WARP is ON (AS13335). Zero Turnstile bot risk detected!${NC}"
 						else
-							echo -e "${GREEN}[✔] Split Tunneling active for Cloudflare endpoints.${NC}"
+							echo -e "${GREEN}[✔] Direct / Split Tunneling active for Cloudflare endpoints.${NC}"
 						fi
 					else
 						echo -e "${YELLOW}[!] Live test timed out or host is offline. Verifying firewall rules:${NC}"
