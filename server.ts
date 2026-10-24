@@ -232,6 +232,72 @@ try {
   }
 } catch (e) {}
 
+// OpenSSL AES-256-CBC PBKDF2 compatible encryption helper (interoperable with easy_wireguard.sh)
+function encryptConfigToOpenSSLBuffer(text: string, password: string): Buffer {
+  const salt = crypto.randomBytes(8);
+  const keyAndIv = crypto.pbkdf2Sync(password, salt, 100000, 48, 'sha256');
+  const key = keyAndIv.subarray(0, 32);
+  const iv = keyAndIv.subarray(32, 48);
+  const cipher = crypto.createCipheriv('aes-256-cbc', key, iv);
+  const encrypted = Buffer.concat([cipher.update(text, 'utf8'), cipher.final()]);
+  return Buffer.concat([Buffer.from('Salted__', 'utf8'), salt, encrypted]);
+}
+
+function decryptConfigFromOpenSSLBuffer(buffer: Buffer, password: string): string {
+  if (buffer.subarray(0, 8).toString('utf8') !== 'Salted__') {
+    return buffer.toString('utf8');
+  }
+  const salt = buffer.subarray(8, 16);
+  const ciphertext = buffer.subarray(16);
+  const keyAndIv = crypto.pbkdf2Sync(password, salt, 100000, 48, 'sha256');
+  const key = keyAndIv.subarray(0, 32);
+  const iv = keyAndIv.subarray(32, 48);
+  const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
+  return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
+}
+
+// Scans /root and $HOME for any loose .conf files, encrypts them into easy_wireguard/ and unlinks them from root
+function cleanupRootDirectory(): number {
+  let cleanedCount = 0;
+  try {
+    const easyWgDir = '/root/easy_wireguard';
+    if (!fs.existsSync(easyWgDir)) {
+      try { fs.mkdirSync(easyWgDir, { recursive: true, mode: 0o700 }); } catch (e) {}
+    }
+    if (!fs.existsSync('/etc/wireguard/clients')) {
+      try { fs.mkdirSync('/etc/wireguard/clients', { recursive: true, mode: 0o700 }); } catch (e) {}
+    }
+
+    const searchDirs = ['/root'];
+    if (process.env.HOME && process.env.HOME !== '/root' && !searchDirs.includes(process.env.HOME)) {
+      searchDirs.push(process.env.HOME);
+    }
+
+    for (const dir of searchDirs) {
+      if (!fs.existsSync(dir)) continue;
+      try {
+        const files = fs.readdirSync(dir);
+        for (const file of files) {
+          if (file.endsWith('.conf') && file !== 'resolv.conf' && file !== 'sysctl.conf') {
+            const fullPath = path.join(dir, file);
+            try {
+              const content = fs.readFileSync(fullPath, 'utf8');
+              if (content.includes('[Interface]') || content.includes('PrivateKey') || content.includes('AllowedIPs')) {
+                const encBuf = encryptConfigToOpenSSLBuffer(content, adminPasskey);
+                fs.writeFileSync(path.join(easyWgDir, `${file}.enc`), encBuf, { mode: 0o600 });
+                fs.writeFileSync(path.join('/etc/wireguard/clients', `${file}.enc`), encBuf, { mode: 0o600 });
+                fs.unlinkSync(fullPath);
+                cleanedCount++;
+              }
+            } catch (e) {}
+          }
+        }
+      } catch (e) {}
+    }
+  } catch (e) {}
+  return cleanedCount;
+}
+
 // Initial dynamic values
 const initialDetectedIp = getAutoDetectedPublicIp();
 const initialDetectedPort = getAutoDetectedWgPort();
@@ -348,39 +414,70 @@ function syncFromLiveWireguard() {
     serverState.listenPort = getAutoDetectedWgPort();
     serverState.webPort = getAutoDetectedWebPort();
 
+    // 2. Ensure root directory is free of loose .conf files (auto-sweep to /root/easy_wireguard/ encrypted)
+    cleanupRootDirectory();
+
+    const searchDirs = ['/root/easy_wireguard', '/etc/wireguard/clients'];
+
     if (!checkLiveWireguard()) {
       serverState.isRealSystemData = false;
-      // Also scan /etc/wireguard/clients for any generated configs
-      if (fs.existsSync('/etc/wireguard/clients') && peers.length === 0) {
-        const files = fs.readdirSync('/etc/wireguard/clients');
+      // Also scan /root/easy_wireguard and /etc/wireguard/clients for any generated encrypted configs
+      if (peers.length === 0) {
         const foundPeers: Peer[] = [];
-        for (const file of files) {
-          if (file.endsWith('.conf')) {
-            const clientName = file.replace('.conf', '');
-            try {
-              const conf = fs.readFileSync(`/etc/wireguard/clients/${file}`, 'utf8');
-              const addrMatch = conf.match(/Address\s*=\s*([^\s\/]+)/i);
-              const privMatch = conf.match(/PrivateKey\s*=\s*([^\s]+)/i);
-              foundPeers.push({
-                id: `peer-${clientName}`,
-                name: clientName,
-                ip: addrMatch ? addrMatch[1] : '10.18.0.2',
-                publicKey: 'LIVE_KERNEL_KEY',
-                privateKey: privMatch ? privMatch[1] : generateWgKey(),
-                presharedKey: generateWgKey(),
-                allowedIps: serverState.defaultAllowedIps,
-                dns: serverState.defaultDns,
-                mtu: serverState.defaultMtu,
-                createdAt: new Date().toISOString(),
-                enabled: true,
-                endpoint: null,
-                lastHandshake: 'Awaiting connection',
-                transferRx: 0,
-                transferTx: 0,
-                isOnline: false,
-              });
-            } catch (e) {}
-          }
+        const seenNames = new Set<string>();
+
+        for (const dir of searchDirs) {
+          if (!fs.existsSync(dir)) continue;
+          try {
+            const files = fs.readdirSync(dir);
+            for (const file of files) {
+              if (file.endsWith('.conf.enc') || file.endsWith('.conf')) {
+                const baseName = file.replace(/\.conf(\.enc)?$/, '').replace('-cloudflare-shield', '').replace('-standard', '');
+                if (seenNames.has(baseName)) continue;
+                seenNames.add(baseName);
+                try {
+                  let conf = '';
+                  const fullPath = `${dir}/${file}`;
+                  if (file.endsWith('.conf.enc')) {
+                    const buf = fs.readFileSync(fullPath);
+                    conf = decryptConfigFromOpenSSLBuffer(buf, adminPasskey);
+                  } else {
+                    conf = fs.readFileSync(fullPath, 'utf8');
+                  }
+
+                  const addrMatch = conf.match(/Address\s*=\s*([^\s\/]+)/i);
+                  const privMatch = conf.match(/PrivateKey\s*=\s*([^\s]+)/i);
+                  const pskMatch = conf.match(/PresharedKey\s*=\s*([^\s]+)/i);
+
+                  let pubKey = 'LIVE_KERNEL_KEY';
+                  if (privMatch) {
+                    try {
+                      pubKey = execSync(`echo "${privMatch[1]}" | wg pubkey 2>/dev/null`, { encoding: 'utf8' }).trim() || 'LIVE_KERNEL_KEY';
+                    } catch (e) {}
+                  }
+
+                  foundPeers.push({
+                    id: `peer-${baseName}`,
+                    name: baseName,
+                    ip: addrMatch ? addrMatch[1] : '10.18.0.2',
+                    publicKey: pubKey,
+                    privateKey: privMatch ? privMatch[1] : generateWgKey(),
+                    presharedKey: pskMatch ? pskMatch[1] : generateWgKey(),
+                    allowedIps: serverState.defaultAllowedIps,
+                    dns: serverState.defaultDns,
+                    mtu: serverState.defaultMtu,
+                    createdAt: new Date().toISOString(),
+                    enabled: true,
+                    endpoint: null,
+                    lastHandshake: 'Awaiting connection',
+                    transferRx: 0,
+                    transferTx: 0,
+                    isOnline: false,
+                  });
+                } catch (e) {}
+              }
+            }
+          } catch (e) {}
         }
         if (foundPeers.length > 0) peers = foundPeers;
       }
@@ -389,24 +486,46 @@ function syncFromLiveWireguard() {
 
     serverState.isRealSystemData = true;
 
-    // Read client configs from /etc/wireguard/clients/*.conf to map client names
+    // Read client configs from /root/easy_wireguard and /etc/wireguard/clients (.conf.enc and .conf) to map client names and keys
     const clientNameMap = new Map<string, string>();
-    if (fs.existsSync('/etc/wireguard/clients')) {
-      const files = fs.readdirSync('/etc/wireguard/clients');
-      for (const file of files) {
-        if (file.endsWith('.conf')) {
-          const clientName = file.replace('.conf', '').replace('-cloudflare-shield', '').replace('-standard', '');
-          try {
-            const confContent = fs.readFileSync(`/etc/wireguard/clients/${file}`, 'utf8');
-            const match = confContent.match(/PrivateKey\s*=\s*([^\s]+)/i);
-            if (match) {
-              const clientPriv = match[1];
-              const clientPub = execSync(`echo "${clientPriv}" | wg pubkey 2>/dev/null`, { encoding: 'utf8' }).trim();
-              if (clientPub) clientNameMap.set(clientPub, clientName);
-            }
-          } catch (e) {}
+    const clientPrivMap = new Map<string, string>();
+    const clientPskMap = new Map<string, string>();
+
+    for (const dir of searchDirs) {
+      if (!fs.existsSync(dir)) continue;
+      try {
+        const files = fs.readdirSync(dir);
+        for (const file of files) {
+          if (file.endsWith('.conf.enc') || file.endsWith('.conf')) {
+            const baseName = file.replace(/\.conf(\.enc)?$/, '').replace('-cloudflare-shield', '').replace('-standard', '');
+            try {
+              let confContent = '';
+              const fullPath = `${dir}/${file}`;
+              if (file.endsWith('.conf.enc')) {
+                const buf = fs.readFileSync(fullPath);
+                confContent = decryptConfigFromOpenSSLBuffer(buf, adminPasskey);
+              } else {
+                confContent = fs.readFileSync(fullPath, 'utf8');
+              }
+
+              const privMatch = confContent.match(/PrivateKey\s*=\s*([^\s]+)/i);
+              const pskMatch = confContent.match(/PresharedKey\s*=\s*([^\s]+)/i);
+              if (privMatch) {
+                const clientPriv = privMatch[1];
+                let clientPub = '';
+                try {
+                  clientPub = execSync(`echo "${clientPriv}" | wg pubkey 2>/dev/null`, { encoding: 'utf8' }).trim();
+                } catch (e) {}
+                if (clientPub) {
+                  if (!clientNameMap.has(clientPub)) clientNameMap.set(clientPub, baseName);
+                  if (!clientPrivMap.has(clientPub)) clientPrivMap.set(clientPub, clientPriv);
+                  if (pskMatch && !clientPskMap.has(clientPub)) clientPskMap.set(clientPub, pskMatch[1]);
+                }
+              }
+            } catch (e) {}
+          }
         }
-      }
+      } catch (e) {}
     }
 
     const livePeers: Peer[] = [];
@@ -434,7 +553,7 @@ function syncFromLiveWireguard() {
           const pLine = lines[i].split('\t');
           if (pLine.length >= 7) {
             const pubKey = pLine[0];
-            const psk = pLine[1] !== '(none)' ? pLine[1] : '';
+            const psk = pLine[1] !== '(none)' ? pLine[1] : (clientPskMap.get(pubKey) || '');
             const endpoint = pLine[2] !== '(none)' ? pLine[2] : null;
             const allowedIps = pLine[3];
             const lastHandshakeEpoch = parseInt(pLine[4], 10);
@@ -465,7 +584,7 @@ function syncFromLiveWireguard() {
               name: clientName,
               ip: assignedIp,
               publicKey: pubKey,
-              privateKey: 'ENCRYPTED_ON_VPS',
+              privateKey: clientPrivMap.get(pubKey) || 'ENCRYPTED_ON_VPS',
               presharedKey: psk,
               allowedIps,
               dns: serverState.defaultDns,
@@ -1125,10 +1244,37 @@ app.post('/api/clients', requireVpnOrAuth, async (req: Request, res: Response) =
     // If running on live VPS host with WireGuard installed, generate configs and inject
     if (checkLiveWireguard()) {
       try {
-        const standardConfPath = `/etc/wireguard/clients/${cleanName}-standard.conf`;
-        fs.writeFileSync(standardConfPath, generateClientConfigText(newPeer, false), { mode: 0o600 });
-        const cfShieldPath = `/etc/wireguard/clients/${cleanName}-cloudflare-shield.conf`;
-        fs.writeFileSync(cfShieldPath, generateClientConfigText(newPeer, true), { mode: 0o600 });
+        const easyWgDir = '/root/easy_wireguard';
+        fs.mkdirSync(easyWgDir, { recursive: true, mode: 0o700 });
+        fs.mkdirSync('/etc/wireguard/clients', { recursive: true, mode: 0o700 });
+
+        const stdConfText = generateClientConfigText(newPeer, false);
+        const cfConfText = generateClientConfigText(newPeer, true);
+
+        // Store AES-256-CBC PBKDF2 encrypted files (Zero unencrypted files in root)
+        const stdEnc = encryptConfigToOpenSSLBuffer(stdConfText, adminPasskey);
+        const cfEnc = encryptConfigToOpenSSLBuffer(cfConfText, adminPasskey);
+
+        fs.writeFileSync(`${easyWgDir}/${cleanName}-standard.conf.enc`, stdEnc, { mode: 0o600 });
+        fs.writeFileSync(`${easyWgDir}/${cleanName}.conf.enc`, stdEnc, { mode: 0o600 });
+        fs.writeFileSync(`/etc/wireguard/clients/${cleanName}-standard.conf.enc`, stdEnc, { mode: 0o600 });
+        fs.writeFileSync(`/etc/wireguard/clients/${cleanName}.conf.enc`, stdEnc, { mode: 0o600 });
+
+        fs.writeFileSync(`${easyWgDir}/${cleanName}-cloudflare-shield.conf.enc`, cfEnc, { mode: 0o600 });
+        fs.writeFileSync(`/etc/wireguard/clients/${cleanName}-cloudflare-shield.conf.enc`, cfEnc, { mode: 0o600 });
+
+        // Clean any unencrypted files from /root or export
+        const cleanFiles = [
+          `/root/${cleanName}.conf`,
+          `/root/${cleanName}-standard.conf`,
+          `/root/${cleanName}-cloudflare-shield.conf`,
+          `/etc/wireguard/clients/${cleanName}.conf`,
+          `/etc/wireguard/clients/${cleanName}-standard.conf`,
+          `/etc/wireguard/clients/${cleanName}-cloudflare-shield.conf`,
+        ];
+        cleanFiles.forEach(f => {
+          try { fs.unlinkSync(f); } catch (e) {}
+        });
 
         // Add to wg0
         execSync(`wg set wg0 peer "${newPeer.publicKey}" allowed-ips "10.18.0.${nextIp.split('.')[3]}/32" 2>/dev/null || true`);
@@ -1155,7 +1301,7 @@ app.post('/api/clients', requireVpnOrAuth, async (req: Request, res: Response) =
       timestamp: new Date().toISOString(),
       level: 'info',
       service: 'hot-reload',
-      message: `Zero-downtime injection: Peer ${cleanName} (${newPeer.ip}/32) live added without restart.`,
+      message: `Zero-downtime injection: Peer ${cleanName} (${newPeer.ip}/32) encrypted into easy_wireguard/ folder and added to kernel.`,
     });
 
     res.status(201).json({
@@ -1200,19 +1346,23 @@ app.delete('/api/clients/:id', requireVpnOrAuth, (req: Request, res: Response) =
 
   const deleted = peers.splice(index, 1)[0];
 
-  // Remove live from kernel if running on host
+  // Remove live from kernel and delete encrypted files from easy_wireguard
   if (checkLiveWireguard()) {
     try {
       execSync(`wg set wg0 peer "${deleted.publicKey}" remove 2>/dev/null || true`);
       execSync(`wg set wg1 peer "${deleted.publicKey}" remove 2>/dev/null || true`);
-      if (fs.existsSync(`/etc/wireguard/clients/${deleted.name}.conf`)) {
-        fs.unlinkSync(`/etc/wireguard/clients/${deleted.name}.conf`);
-      }
-      if (fs.existsSync(`/etc/wireguard/clients/${deleted.name}-standard.conf`)) {
-        fs.unlinkSync(`/etc/wireguard/clients/${deleted.name}-standard.conf`);
-      }
-      if (fs.existsSync(`/etc/wireguard/clients/${deleted.name}-cloudflare-shield.conf`)) {
-        fs.unlinkSync(`/etc/wireguard/clients/${deleted.name}-cloudflare-shield.conf`);
+      const easyWgDir = '/root/easy_wireguard';
+      const filePrefixes = [
+        `${deleted.name}`,
+        `${deleted.name}-standard`,
+        `${deleted.name}-cloudflare-shield`,
+      ];
+      for (const prefix of filePrefixes) {
+        try { fs.unlinkSync(`${easyWgDir}/${prefix}.conf.enc`); } catch (e) {}
+        try { fs.unlinkSync(`${easyWgDir}/${prefix}.conf`); } catch (e) {}
+        try { fs.unlinkSync(`/etc/wireguard/clients/${prefix}.conf.enc`); } catch (e) {}
+        try { fs.unlinkSync(`/etc/wireguard/clients/${prefix}.conf`); } catch (e) {}
+        try { fs.unlinkSync(`/root/${prefix}.conf`); } catch (e) {}
       }
     } catch (e) {}
   }
@@ -1222,7 +1372,7 @@ app.delete('/api/clients/:id', requireVpnOrAuth, (req: Request, res: Response) =
     timestamp: new Date().toISOString(),
     level: 'warn',
     service: 'peer-revoke',
-    message: `Peer ${deleted.name} (${deleted.ip}) revoked. Removed from WireGuard interface.`,
+    message: `Peer ${deleted.name} (${deleted.ip}) revoked. Removed from WireGuard interface and encrypted disk storage.`,
   });
 
   res.json({ success: true, revokedId: id });
@@ -1233,7 +1383,33 @@ app.get('/api/clients/:id/config', requireVpnOrAuth, (req: Request, res: Respons
   if (!peer) return res.status(404).json({ error: 'Client not found' });
 
   const isAntiFlag = req.query.antiFlag === 'true' || req.query.mode === 'anti-flag' || req.query.mode === 'shield';
-  const conf = generateClientConfigText(peer, isAntiFlag);
+  let conf = '';
+
+  // Attempt to read directly from AES-256 encrypted storage in easy_wireguard/
+  const targetPrefix = isAntiFlag ? `${peer.name}-cloudflare-shield` : `${peer.name}-standard`;
+  const candidateEncFiles = [
+    `/root/easy_wireguard/${targetPrefix}.conf.enc`,
+    `/root/easy_wireguard/${peer.name}.conf.enc`,
+    `/etc/wireguard/clients/${targetPrefix}.conf.enc`,
+    `/etc/wireguard/clients/${peer.name}.conf.enc`,
+  ];
+  for (const cPath of candidateEncFiles) {
+    if (fs.existsSync(cPath)) {
+      try {
+        const buf = fs.readFileSync(cPath);
+        const decrypted = decryptConfigFromOpenSSLBuffer(buf, adminPasskey);
+        if (decrypted && decrypted.includes('[Interface]')) {
+          conf = decrypted;
+          break;
+        }
+      } catch (e) {}
+    }
+  }
+
+  if (!conf) {
+    conf = generateClientConfigText(peer, isAntiFlag);
+  }
+
   const filename = isAntiFlag ? `${peer.name}-cloudflare-shield.conf` : `${peer.name}.conf`;
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
   res.type('text/plain').send(conf);
@@ -1245,7 +1421,33 @@ app.get('/api/clients/:id/qr', requireVpnOrAuth, async (req: Request, res: Respo
 
   try {
     const isAntiFlag = req.query.antiFlag === 'true' || req.query.mode === 'anti-flag' || req.query.mode === 'shield';
-    const conf = generateClientConfigText(peer, isAntiFlag);
+    let conf = '';
+
+    // Attempt to read directly from AES-256 encrypted storage in easy_wireguard/
+    const targetPrefix = isAntiFlag ? `${peer.name}-cloudflare-shield` : `${peer.name}-standard`;
+    const candidateEncFiles = [
+      `/root/easy_wireguard/${targetPrefix}.conf.enc`,
+      `/root/easy_wireguard/${peer.name}.conf.enc`,
+      `/etc/wireguard/clients/${targetPrefix}.conf.enc`,
+      `/etc/wireguard/clients/${peer.name}.conf.enc`,
+    ];
+    for (const cPath of candidateEncFiles) {
+      if (fs.existsSync(cPath)) {
+        try {
+          const buf = fs.readFileSync(cPath);
+          const decrypted = decryptConfigFromOpenSSLBuffer(buf, adminPasskey);
+          if (decrypted && decrypted.includes('[Interface]')) {
+            conf = decrypted;
+            break;
+          }
+        } catch (e) {}
+      }
+    }
+
+    if (!conf) {
+      conf = generateClientConfigText(peer, isAntiFlag);
+    }
+
     const qrDataUrl = await QRCode.toDataURL(conf, {
       errorCorrectionLevel: 'L',
       margin: 2,
@@ -1265,6 +1467,19 @@ app.get('/api/clients/:id/qr', requireVpnOrAuth, async (req: Request, res: Respo
   } catch (err: any) {
     res.status(500).json({ error: 'Failed to generate QR code' });
   }
+});
+
+// Endpoint to trigger root directory clean & secure into easy_wireguard/
+app.post('/api/server/clean-root', requireVpnOrAuth, (_req: Request, res: Response) => {
+  const count = cleanupRootDirectory();
+  journalLogs.unshift({
+    id: `log-${Date.now()}`,
+    timestamp: new Date().toISOString(),
+    level: 'info',
+    service: 'storage-guard',
+    message: `Storage sweep complete: ${count} loose config files encrypted into easy_wireguard/ and removed from root directory.`,
+  });
+  res.json({ success: true, cleanedCount: count, directory: '/root/easy_wireguard' });
 });
 
 // 3. Stealth Management & Unblocking Diagnostics API

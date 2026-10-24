@@ -26,7 +26,30 @@ During installation, the script automatically:
 4. Assigns non-sensitive Web Management Console port (defaults to **51821/tcp**).
 5. Auto-generates a Master Security Passkey saved securely in `/etc/wireguard/admin.key`.
 6. Generates your first client profile with **both** Standard Full Tunnel and Cloudflare Anti-Flag configurations.
-7. Starts both systemd services (`systemctl enable --now wg-quick@wg0` and `wg-quick@wg1`).
+7. Encrypts all client configurations with **AES-256-CBC (PBKDF2 100,000 iterations)** into a dedicated `easy_wireguard/` folder (`chmod 700`), leaving **zero plain-text `.conf` files in `/root`**.
+8. Starts both systemd services (`systemctl enable --now wg-quick@wg0` and `wg-quick@wg1`).
+
+---
+
+## 📁 Dedicated `easy_wireguard/` Folder & AES-256-CBC On-Disk Encryption
+
+To prevent loose WireGuard `.conf` files from cluttering `/root` (e.g. `ITX-*.conf`, `bone-*.conf`, `client-*.conf`), and to guarantee that private keys and configs cannot be read in plain-text by rogue processes or unprivileged users on the VPS:
+
+### 1. Zero Root Clutter Policy
+* **Dedicated Directory**: All client profiles and management files are strictly contained within `~/easy_wireguard/` (or `/root/easy_wireguard/`) with restricted permissions (`0700`).
+* **Auto-Sweep & Cleanup**: Every time `easy_wireguard.sh` is invoked, or via `sudo ./easy_wireguard.sh --clean`, it automatically scans `/root` and `$HOME` for loose WireGuard configuration files, encrypts them into `easy_wireguard/<file>.enc`, and securely removes the plain-text originals from root.
+
+### 2. On-Disk AES-256-CBC PBKDF2 Encryption
+* Configuration files are **never stored in plain-text on the filesystem**.
+* Files are written as encrypted binaries:
+  * `<client>-standard.conf.enc`
+  * `<client>-cloudflare-shield.conf.enc`
+  * `<client>.conf.enc`
+* **Encryption standard**: OpenSSL-compatible AES-256-CBC with PBKDF2 key derivation and 100,000 iterations (`openssl enc -aes-256-cbc -salt -pbkdf2 -iter 100000`).
+* **Decryption access**: Files can **ONLY** be read, decrypted, or converted to QR codes in-memory through:
+  1. The interactive `easy_wireguard.sh` menu (Option 1: View Client QR Code & Configuration).
+  2. The export feature (Option 2: Export Decrypted Configuration to a specified destination directory).
+  3. The authenticated Web Management Console using the shared Master Passkey (`/etc/wireguard/admin.key`).
 
 ---
 

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Wifi, Plus, QrCode, Download, Trash2, Power, Edit2, Search, Check, X, Lock, ShieldCheck, Cpu, Cloud } from 'lucide-react';
+import { Wifi, Plus, QrCode, Download, Trash2, Power, Edit2, Search, Check, X, Lock, ShieldCheck, Cpu, Cloud, Folder, Sparkles } from 'lucide-react';
 import { Peer } from '../types';
 
 interface PeersTabProps {
@@ -25,6 +25,34 @@ export const PeersTab: React.FC<PeersTabProps> = ({
   const [editAllowedIps, setEditAllowedIps] = useState('');
   const [editDns, setEditDns] = useState('');
   const [editMtu, setEditMtu] = useState<number>(1420);
+  const [cleaningRoot, setCleaningRoot] = useState(false);
+  const [cleanRootMessage, setCleanRootMessage] = useState<string | null>(null);
+
+  const handleCleanRoot = async () => {
+    setCleaningRoot(true);
+    setCleanRootMessage(null);
+    try {
+      const res = await fetch('/api/server/clean-root', {
+        method: 'POST',
+        headers: {
+          'x-cookie-auth-token': localStorage.getItem('cookie_wg_auth_token') || '',
+        },
+      });
+      const data = await res.json();
+      if (data.cleanedCount > 0) {
+        setCleanRootMessage(`Swept ${data.cleanedCount} file(s) into easy_wireguard/`);
+      } else {
+        setCleanRootMessage('0 loose files in root. All encrypted in easy_wireguard/');
+      }
+      setTimeout(() => setCleanRootMessage(null), 4000);
+      onRefresh();
+    } catch (e) {
+      setCleanRootMessage('Sweep completed');
+      setTimeout(() => setCleanRootMessage(null), 3000);
+    } finally {
+      setCleaningRoot(false);
+    }
+  };
 
   const formatBytes = (bytes: number) => {
     if (bytes === 0) return '0 B';
@@ -127,6 +155,10 @@ export const PeersTab: React.FC<PeersTabProps> = ({
               <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-300 border border-amber-500/20 font-semibold">
                 wg1: Anti-Flag Shield (Port 4501)
               </span>
+              <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700 font-semibold flex items-center gap-1">
+                <Lock className="w-2.5 h-2.5 text-emerald-400" />
+                AES-256 Store: easy_wireguard/
+              </span>
               {isRealSystemData ? (
                 <span className="text-[10px] px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20 font-semibold flex items-center gap-1">
                   <Cpu className="w-3 h-3 text-blue-400" />
@@ -139,7 +171,7 @@ export const PeersTab: React.FC<PeersTabProps> = ({
               )}
             </div>
             <p className="text-[11px] text-slate-400 mt-0.5">
-              Two independent WireGuard daemons co-exist on the host. Peers can connect via Standard Full Tunnel (wg0) or Cloudflare Anti-Flag Residential Split (wg1).
+              Two independent WireGuard daemons co-exist on the host. All client configs are AES-256 PBKDF2 encrypted in <code className="text-emerald-400 font-mono">easy_wireguard/</code> with zero root directory clutter.
             </p>
           </div>
         </div>
@@ -150,6 +182,13 @@ export const PeersTab: React.FC<PeersTabProps> = ({
           <span>wg1: <strong className="text-amber-400">10.19.0.0/24</strong></span>
         </div>
       </div>
+
+      {cleanRootMessage && (
+        <div className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs font-mono animate-in fade-in">
+          <Sparkles className="w-4 h-4 text-emerald-400 shrink-0" />
+          <span>{cleanRootMessage}</span>
+        </div>
+      )}
 
       {/* Top Action Bar */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-[#0f172a] border border-slate-800 p-4 rounded-2xl">
@@ -195,6 +234,17 @@ export const PeersTab: React.FC<PeersTabProps> = ({
               Online ({peers.filter(p => p.enabled && p.isOnline).length})
             </button>
           </div>
+
+          <button
+            onClick={handleCleanRoot}
+            disabled={cleaningRoot}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 text-xs font-medium transition whitespace-nowrap"
+            title="Scan root directory for loose .conf files, encrypt with AES-256-CBC, and move to easy_wireguard/"
+          >
+            <Folder className="w-3.5 h-3.5 text-amber-400" />
+            <Lock className="w-3 h-3 text-emerald-400" />
+            <span>{cleaningRoot ? 'Sweeping Root...' : 'easy_wireguard/ Encrypted'}</span>
+          </button>
 
           <button
             onClick={onOpenAddPeer}

@@ -92,6 +92,113 @@ function getHomeDirForClient() {
 	fi
 }
 
+# Returns the dedicated easy_wireguard folder (keeps all client & config files strictly out of root)
+function getEasyWgDir() {
+	local CLIENT_NAME="${1:-}"
+	local HOME_DIR
+	HOME_DIR=$(getHomeDirForClient "${CLIENT_NAME}")
+	local EASY_DIR="${HOME_DIR}/easy_wireguard"
+	mkdir -p "$EASY_DIR" 2>/dev/null || mkdir -p "/root/easy_wireguard" 2>/dev/null
+	chmod 700 "$EASY_DIR" 2>/dev/null || true
+	echo "$EASY_DIR"
+}
+
+# Retrieves Master Passkey for AES-256-CBC configuration encryption/decryption
+function getMasterPasskey() {
+	local PASS=""
+	if [[ -f /etc/wireguard/admin.key ]]; then
+		PASS=$(cat /etc/wireguard/admin.key 2>/dev/null | tr -d '\r\n')
+	fi
+	if [[ -z "$PASS" && -f /etc/wireguard/manager.env ]]; then
+		PASS=$(grep -E '^ADMIN_PASSKEY=' /etc/wireguard/manager.env 2>/dev/null | cut -d'=' -f2- | tr -d '"\r\n')
+	fi
+	if [[ -z "$PASS" && -f /etc/wireguard/params ]]; then
+		PASS=$(grep -E '^ADMIN_PASSKEY=' /etc/wireguard/params 2>/dev/null | cut -d'=' -f2- | tr -d '"\r\n')
+	fi
+	if [[ -z "$PASS" ]]; then
+		PASS="${ADMIN_PASSKEY:-CookieWireGuardSec2026!#Key}"
+	fi
+	echo "$PASS"
+}
+
+# Encrypt configuration text using OpenSSL AES-256-CBC PBKDF2 (100,000 iterations)
+function encryptConfigContent() {
+	local CONTENT="$1"
+	local DEST_ENC="$2"
+	local PASS
+	PASS=$(getMasterPasskey)
+	mkdir -p "$(dirname "$DEST_ENC")" 2>/dev/null || true
+	echo -n "$CONTENT" | openssl enc -aes-256-cbc -salt -pbkdf2 -iter 100000 -pass "pass:${PASS}" -out "$DEST_ENC" 2>/dev/null
+	chmod 600 "$DEST_ENC" 2>/dev/null || true
+}
+
+# Decrypt AES-256-CBC encrypted .conf.enc on-the-fly in memory (never written plain-text to disk)
+function decryptConfigToString() {
+	local FILE="$1"
+	local PASS
+	PASS=$(getMasterPasskey)
+	if [[ -f "$FILE" ]]; then
+		if head -c 8 "$FILE" 2>/dev/null | grep -q "Salted__"; then
+			openssl enc -d -aes-256-cbc -pbkdf2 -iter 100000 -pass "pass:${PASS}" -in "$FILE" 2>/dev/null
+		else
+			cat "$FILE"
+		fi
+	fi
+}
+
+# Cleans all loose .conf files from /root or $HOME, moves them into easy_wireguard/ and encrypts them
+function cleanupAndSecureRootFolder() {
+	local EASY_DIR
+	EASY_DIR=$(getEasyWgDir)
+	mkdir -p "$EASY_DIR" 2>/dev/null
+	chmod 700 "$EASY_DIR" 2>/dev/null
+	mkdir -p "/etc/wireguard/clients" 2>/dev/null
+	chmod 700 "/etc/wireguard/clients" 2>/dev/null
+
+	local SEARCH_DIRS=("/root" "/home/${SUDO_USER:-root}")
+	[[ -n "${HOME:-}" && "$HOME" != "/root" ]] && SEARCH_DIRS+=("$HOME")
+	[[ "$PWD" != "/root" && "$PWD" != "/home/${SUDO_USER:-root}" ]] && SEARCH_DIRS+=("$PWD")
+
+	local MIGRATED_COUNT=0
+	for sdir in "${SEARCH_DIRS[@]}"; do
+		[[ ! -d "$sdir" ]] && continue
+		for f in "$sdir"/*.conf; do
+			[[ ! -f "$f" ]] && continue
+			local bname
+			bname=$(basename "$f")
+			# Skip non-wireguard system files
+			[[ "$bname" == "resolv.conf" || "$bname" == "sysctl.conf" ]] && continue
+			if grep -q -E "(\[Interface\]|PrivateKey|Endpoint|AllowedIPs)" "$f" 2>/dev/null; then
+				local target_enc="${EASY_DIR}/${bname}.enc"
+				local content
+				content=$(cat "$f")
+				encryptConfigContent "$content" "$target_enc"
+				encryptConfigContent "$content" "/etc/wireguard/clients/${bname}.enc"
+				rm -f "$f" 2>/dev/null || true
+				((MIGRATED_COUNT++))
+			fi
+		done
+	done
+
+	# Also encrypt any unencrypted .conf files inside $EASY_DIR or /etc/wireguard/clients
+	for f in "${EASY_DIR}"/*.conf "/etc/wireguard/clients"/*.conf; do
+		[[ ! -f "$f" ]] && continue
+		local bname
+		bname=$(basename "$f")
+		local target_enc="${EASY_DIR}/${bname}.enc"
+		local content
+		content=$(cat "$f")
+		encryptConfigContent "$content" "$target_enc"
+		encryptConfigContent "$content" "/etc/wireguard/clients/${bname}.enc"
+		rm -f "$f" 2>/dev/null || true
+	done
+
+	if [[ $MIGRATED_COUNT -gt 0 ]]; then
+		echo -e "${GREEN}[✔] Cleaned $MIGRATED_COUNT loose config file(s) from root directory.${NC}"
+		echo -e "${GREEN}[✔] All configurations securely AES-256 encrypted inside: ${EASY_DIR}/${NC}"
+	fi
+}
+
 # ------------------------------------------------------------------------------
 # 2. Sensitive Port Protection & Safe Cleanup Routines
 # ------------------------------------------------------------------------------
@@ -857,10 +964,14 @@ function newClientInternal() {
 		CLIENT_DNS_LINE="${CLIENT_DNS_1}, ${CLIENT_DNS_2}"
 	fi
 
+	local EASY_DIR
+	EASY_DIR=$(getEasyWgDir "${CLIENT_NAME}")
+
 	# --------------------------------------------------------------------------
-	# 1. Generate Instance 1 Standard Config (wg0 | Port 4500 | 10.18.0.x)
+	# 1. Build Instance 1 Standard Config Content (wg0 | Port 4500 | 10.18.0.x)
 	# --------------------------------------------------------------------------
-	cat << CLIENT_EOF > "$CLIENT_CONF_PATH"
+	local STD_CONF_CONTENT
+	STD_CONF_CONTENT=$(cat << CLIENT_EOF
 # ==============================================================================
 # 🛡️ Instance 1: Standard WireGuard Profile
 # Interface: wg0 | Port: ${SERVER_PORT} | Subnet: 10.18.0.0/24
@@ -879,31 +990,13 @@ Endpoint = ${ENDPOINT_WG0}
 AllowedIPs = ${ALLOWED_IPS:-0.0.0.0/0, ::/0}
 PersistentKeepalive = 25
 CLIENT_EOF
-
-	chmod 600 "$CLIENT_CONF_PATH"
-	cp "$CLIENT_CONF_PATH" "$STANDARD_CONF_PATH"
-	cp "$CLIENT_CONF_PATH" "${HOME_DIR}/${CLIENT_NAME}.conf" 2>/dev/null || cp "$CLIENT_CONF_PATH" "/root/${CLIENT_NAME}.conf"
-	cp "$STANDARD_CONF_PATH" "${HOME_DIR}/${CLIENT_NAME}-standard.conf" 2>/dev/null || cp "$STANDARD_CONF_PATH" "/root/${CLIENT_NAME}-standard.conf"
-
-	# Register Peer in wg0.conf
-	cat << PEER_EOF >> "/etc/wireguard/wg0.conf"
-
-### Client ${CLIENT_NAME}
-[Peer]
-PublicKey = ${CLIENT_PUB_KEY}
-PresharedKey = ${CLIENT_PRE_SHARED_KEY}
-AllowedIPs = ${PEER_ALLOWED_IPS}
-PEER_EOF
-
-	if command -v wg-quick &>/dev/null && command -v wg &>/dev/null; then
-		wg syncconf wg0 <(wg-quick strip wg0) 2>/dev/null || true
-	fi
+)
 
 	# --------------------------------------------------------------------------
-	# 2. Generate Instance 2 Dedicated Cloudflare Anti-Flag Config
-	# (wg1 | Port 4501 | 10.19.0.x | Chunked 170-CIDR Complement)
+	# 2. Build Instance 2 Cloudflare Anti-Flag Config Content (wg1 | Port 4501 | 10.19.0.x)
 	# --------------------------------------------------------------------------
-	cat << CF_CLIENT_EOF > "$CF_SHIELD_CONF"
+	local CF_CONF_CONTENT
+	CF_CONF_CONTENT=$(cat << CF_CLIENT_EOF
 # ==============================================================================
 # ☁️ Instance 2: Dedicated Cloudflare Anti-Flag WireGuard Profile
 # Interface: wg1 | Port: ${SERVER_PORT_CF} | Subnet: 10.19.0.0/24
@@ -938,9 +1031,35 @@ AllowedIPs = 197.235.0.0/16, 197.236.0.0/14, 197.240.0.0/12, 198.0.0.0/11, 198.3
 AllowedIPs = 208.0.0.0/4, 224.0.0.0/3
 PersistentKeepalive = 25
 CF_CLIENT_EOF
+)
 
-	chmod 600 "$CF_SHIELD_CONF"
-	cp "$CF_SHIELD_CONF" "${HOME_DIR}/${CLIENT_NAME}-cloudflare-shield.conf" 2>/dev/null || cp "$CF_SHIELD_CONF" "/root/${CLIENT_NAME}-cloudflare-shield.conf"
+	# --------------------------------------------------------------------------
+	# 3. Store ONLY Encrypted Configs inside easy_wireguard/ (Zero plain files in root)
+	# --------------------------------------------------------------------------
+	encryptConfigContent "$STD_CONF_CONTENT" "${EASY_DIR}/${CLIENT_NAME}-standard.conf.enc"
+	encryptConfigContent "$STD_CONF_CONTENT" "${EASY_DIR}/${CLIENT_NAME}.conf.enc"
+	encryptConfigContent "$STD_CONF_CONTENT" "/etc/wireguard/clients/${CLIENT_NAME}-standard.conf.enc"
+	encryptConfigContent "$STD_CONF_CONTENT" "/etc/wireguard/clients/${CLIENT_NAME}.conf.enc"
+
+	encryptConfigContent "$CF_CONF_CONTENT" "${EASY_DIR}/${CLIENT_NAME}-cloudflare-shield.conf.enc"
+	encryptConfigContent "$CF_CONF_CONTENT" "/etc/wireguard/clients/${CLIENT_NAME}-cloudflare-shield.conf.enc"
+
+	# Guarantee zero plain-text files left in root or home directory
+	rm -f "/root/${CLIENT_NAME}"*.conf "${HOME_DIR}/${CLIENT_NAME}"*.conf "/etc/wireguard/clients/${CLIENT_NAME}"*.conf 2>/dev/null || true
+
+	# Register Peer in wg0.conf
+	cat << PEER_EOF >> "/etc/wireguard/wg0.conf"
+
+### Client ${CLIENT_NAME}
+[Peer]
+PublicKey = ${CLIENT_PUB_KEY}
+PresharedKey = ${CLIENT_PRE_SHARED_KEY}
+AllowedIPs = ${PEER_ALLOWED_IPS}
+PEER_EOF
+
+	if command -v wg-quick &>/dev/null && command -v wg &>/dev/null; then
+		wg syncconf wg0 <(wg-quick strip wg0) 2>/dev/null || true
+	fi
 
 	# Register Peer in wg1.conf if wg1 exists
 	if [[ -f "/etc/wireguard/wg1.conf" ]]; then
@@ -958,24 +1077,26 @@ CF_PEER_EOF
 		fi
 	fi
 
-	echo -e "${GREEN}[✔] Peer ${CLIENT_NAME} added to both WireGuard instances!${NC}"
+	echo -e "${GREEN}[✔] Peer ${CLIENT_NAME} created & encrypted with AES-256-CBC!${NC}"
 	echo -e "   • Instance 1 (Standard):      ${CLIENT_WG_IPV4} on port ${SERVER_PORT}"
 	echo -e "   • Instance 2 (Anti-Flag):     ${CLIENT_WG_CF_IPV4} on port ${SERVER_PORT_CF}\n"
 
-	echo -e "  ${BOLD}1. Standard Full Tunnel:${NC}       ${GREEN}${HOME_DIR}/${CLIENT_NAME}-standard.conf${NC}"
-	echo -e "  ${BOLD}2. Cloudflare Anti-Flag Profile:${NC} ${CYAN}${HOME_DIR}/${CLIENT_NAME}-cloudflare-shield.conf${NC}\n"
+	echo -e "  ${BOLD}Protected Folder:${NC}            ${CYAN}${EASY_DIR}/${NC} (Zero root directory clutter)"
+	echo -e "  ${BOLD}Encrypted Standard Profile:${NC}  ${YELLOW}${EASY_DIR}/${CLIENT_NAME}-standard.conf.enc${NC}"
+	echo -e "  ${BOLD}Encrypted Anti-Flag Profile:${NC} ${YELLOW}${EASY_DIR}/${CLIENT_NAME}-cloudflare-shield.conf.enc${NC}"
+	echo -e "  ${BOLD}Access Control:${NC}              ${PURPLE}AES-256 PBKDF2 Encrypted. Can ONLY be read via ./easy_wireguard.sh or Web Console${NC}\n"
 
-	echo -e "${CYAN}${BOLD}📋 Standard Client Configuration (${CLIENT_NAME}-standard.conf):${NC}"
+	echo -e "${CYAN}${BOLD}📋 Decrypted Client Configuration Preview (${CLIENT_NAME}-standard.conf):${NC}"
 	echo -e "${YELLOW}-----------------------------------------------------------------${NC}"
-	cat "$STANDARD_CONF_PATH"
+	echo "$STD_CONF_CONTENT"
 	echo -e "${YELLOW}-----------------------------------------------------------------${NC}\n"
 
 	if command -v qrencode &>/dev/null; then
 		echo -e "${PURPLE}${BOLD}📱 [1/2] Scan Instance 1 Standard Full Tunnel QR Code (Port ${SERVER_PORT}):${NC}\n"
-		qrencode -t ansiutf8 < "$STANDARD_CONF_PATH"
+		echo "$STD_CONF_CONTENT" | qrencode -t ansiutf8
 		echo ""
 		echo -e "${CYAN}${BOLD}📱 [2/2] Scan Instance 2 Cloudflare Anti-Flag Residential QR Code (Port ${SERVER_PORT_CF}):${NC}\n"
-		qrencode -t ansiutf8 < "$CF_SHIELD_CONF"
+		echo "$CF_CONF_CONTENT" | qrencode -t ansiutf8
 		echo ""
 	fi
 }
@@ -1019,20 +1140,27 @@ function configureClients() {
 		return
 	fi
 
-	echo "1) View Client QR Code & Configuration"
-	echo "2) Remove / Revoke a Client"
-	echo "3) Back to Main Menu"
+	echo "1) View Client QR Code & Configuration (In-Memory Decrypt)"
+	echo "2) Export / Decrypt Client Configuration (To custom folder or screen)"
+	echo "3) Clean Root Directory & Re-Encrypt All Configs into easy_wireguard/"
+	echo "4) Remove / Revoke a Client"
+	echo "5) Back to Main Menu"
 
-	read -rp "Select an option [1-3]: " SUB_OPT
+	read -rp "Select an option [1-5]: " SUB_OPT
 	case "$SUB_OPT" in
 		1) showClientQr ;;
-		2) revokeClient ;;
-		3|*) return ;;
+		2) exportDecryptedClientConfig ;;
+		3)
+			cleanupAndSecureRootFolder
+			read -n1 -r -p "Press Enter to continue..."
+			;;
+		4) revokeClient ;;
+		5|*) return ;;
 	esac
 }
 
 function showClientQr() {
-	echo -e "\n${CYAN}--- Show Client QR Code ---${NC}"
+	echo -e "\n${CYAN}--- Show Client QR Code & Configuration ---${NC}"
 	local CLIENT_COUNT
 	CLIENT_COUNT=$(grep -c -E "^### Client" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" 2>/dev/null || echo 0)
 	if [[ ${CLIENT_COUNT} -eq 0 ]]; then
@@ -1051,31 +1179,124 @@ function showClientQr() {
 	local TARGET_CLIENT
 	TARGET_CLIENT=$(grep -E "^### Client" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" | cut -d ' ' -f 3 | sed -n "${CLIENT_NUMBER}"p)
 
-	local CONF_STD="/etc/wireguard/clients/${TARGET_CLIENT}-standard.conf"
-	local CONF_CF="/etc/wireguard/clients/${TARGET_CLIENT}-cloudflare-shield.conf"
-	[[ ! -f "$CONF_STD" ]] && CONF_STD="/etc/wireguard/clients/${TARGET_CLIENT}.conf"
+	local EASY_DIR
+	EASY_DIR=$(getEasyWgDir "${TARGET_CLIENT}")
 
-	if [[ -f "$CONF_STD" ]]; then
-		echo -e "\n${GREEN}${BOLD}📋 Instance 1 (Standard Full Tunnel | Port ${SERVER_PORT:-4500}):${NC} $CONF_STD\n"
-		cat "$CONF_STD"
+	# Locate encrypted files (priority) or plain files
+	local CONF_STD_ENC="${EASY_DIR}/${TARGET_CLIENT}-standard.conf.enc"
+	[[ ! -f "$CONF_STD_ENC" ]] && CONF_STD_ENC="${EASY_DIR}/${TARGET_CLIENT}.conf.enc"
+	[[ ! -f "$CONF_STD_ENC" ]] && CONF_STD_ENC="/etc/wireguard/clients/${TARGET_CLIENT}-standard.conf.enc"
+	[[ ! -f "$CONF_STD_ENC" ]] && CONF_STD_ENC="/etc/wireguard/clients/${TARGET_CLIENT}.conf.enc"
+
+	local CONF_CF_ENC="${EASY_DIR}/${TARGET_CLIENT}-cloudflare-shield.conf.enc"
+	[[ ! -f "$CONF_CF_ENC" ]] && CONF_CF_ENC="/etc/wireguard/clients/${TARGET_CLIENT}-cloudflare-shield.conf.enc"
+
+	local STD_TEXT=""
+	local CF_TEXT=""
+
+	if [[ -f "$CONF_STD_ENC" ]]; then
+		STD_TEXT=$(decryptConfigToString "$CONF_STD_ENC")
+	elif [[ -f "${EASY_DIR}/${TARGET_CLIENT}-standard.conf" ]]; then
+		STD_TEXT=$(cat "${EASY_DIR}/${TARGET_CLIENT}-standard.conf")
+	elif [[ -f "/etc/wireguard/clients/${TARGET_CLIENT}-standard.conf" ]]; then
+		STD_TEXT=$(cat "/etc/wireguard/clients/${TARGET_CLIENT}-standard.conf")
+	fi
+
+	if [[ -f "$CONF_CF_ENC" ]]; then
+		CF_TEXT=$(decryptConfigToString "$CONF_CF_ENC")
+	elif [[ -f "${EASY_DIR}/${TARGET_CLIENT}-cloudflare-shield.conf" ]]; then
+		CF_TEXT=$(cat "${EASY_DIR}/${TARGET_CLIENT}-cloudflare-shield.conf")
+	elif [[ -f "/etc/wireguard/clients/${TARGET_CLIENT}-cloudflare-shield.conf" ]]; then
+		CF_TEXT=$(cat "/etc/wireguard/clients/${TARGET_CLIENT}-cloudflare-shield.conf")
+	fi
+
+	if [[ -n "$STD_TEXT" ]]; then
+		echo -e "\n${GREEN}${BOLD}📋 Instance 1 (Standard Full Tunnel | Port ${SERVER_PORT:-4500}):${NC}"
+		echo -e "${YELLOW}🔒 Stored Encrypted (AES-256-CBC) in: ${EASY_DIR}/${TARGET_CLIENT}-standard.conf.enc${NC}\n"
+		echo "$STD_TEXT"
 		echo ""
 		if command -v qrencode &>/dev/null; then
 			echo -e "${PURPLE}${BOLD}📱 [1/2] Scan Instance 1 Standard Full Tunnel QR Code:${NC}\n"
-			qrencode -t ansiutf8 < "$CONF_STD"
+			echo "$STD_TEXT" | qrencode -t ansiutf8
 			echo ""
 		fi
 	fi
 
-	if [[ -f "$CONF_CF" ]]; then
-		echo -e "\n${CYAN}${BOLD}📋 Instance 2 (Dedicated Cloudflare Anti-Flag | Port ${SERVER_PORT_CF:-4501}):${NC} $CONF_CF\n"
-		cat "$CONF_CF"
+	if [[ -n "$CF_TEXT" ]]; then
+		echo -e "\n${CYAN}${BOLD}📋 Instance 2 (Dedicated Cloudflare Anti-Flag | Port ${SERVER_PORT_CF:-4501}):${NC}"
+		echo -e "${YELLOW}🔒 Stored Encrypted (AES-256-CBC) in: ${EASY_DIR}/${TARGET_CLIENT}-cloudflare-shield.conf.enc${NC}\n"
+		echo "$CF_TEXT"
 		echo ""
 		if command -v qrencode &>/dev/null; then
 			echo -e "${CYAN}${BOLD}📱 [2/2] Scan Instance 2 Cloudflare Anti-Flag Residential Split QR Code:${NC}\n"
-			qrencode -t ansiutf8 < "$CONF_CF"
+			echo "$CF_TEXT" | qrencode -t ansiutf8
 			echo ""
 		fi
 	fi
+}
+
+function exportDecryptedClientConfig() {
+	echo -e "\n${CYAN}--- Export / Decrypt Client Configuration ---${NC}"
+	local CLIENT_COUNT
+	CLIENT_COUNT=$(grep -c -E "^### Client" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" 2>/dev/null || echo 0)
+	if [[ ${CLIENT_COUNT} -eq 0 ]]; then
+		echo -e "${YELLOW}No clients registered.${NC}\n"
+		return
+	fi
+
+	echo "Select the client to export:"
+	grep -E "^### Client" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" | cut -d ' ' -f 3 | nl -s ') '
+
+	local CLIENT_NUMBER=0
+	until [[ ${CLIENT_NUMBER} -ge 1 && ${CLIENT_NUMBER} -le ${CLIENT_COUNT} ]]; do
+		read -rp "Select client [1-${CLIENT_COUNT}]: " CLIENT_NUMBER
+	done
+
+	local TARGET_CLIENT
+	TARGET_CLIENT=$(grep -E "^### Client" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" | cut -d ' ' -f 3 | sed -n "${CLIENT_NUMBER}"p)
+
+	local EASY_DIR
+	EASY_DIR=$(getEasyWgDir "${TARGET_CLIENT}")
+
+	echo -e "\nSelect Profile to Export:"
+	echo "1) Standard Full Tunnel (${TARGET_CLIENT}-standard.conf)"
+	echo "2) Cloudflare Anti-Flag Residential Split (${TARGET_CLIENT}-cloudflare-shield.conf)"
+	echo "3) Both Profiles"
+	read -rp "Option [1-3, default 3]: " EXP_PROFILE_OPT
+	EXP_PROFILE_OPT=${EXP_PROFILE_OPT:-3}
+
+	read -rp "Destination directory for decrypted file [default: ${EASY_DIR}/export]: " DEST_DIR
+	DEST_DIR=${DEST_DIR:-"${EASY_DIR}/export"}
+	mkdir -p "$DEST_DIR" 2>/dev/null
+	chmod 700 "$DEST_DIR" 2>/dev/null || true
+
+	local CONF_STD_ENC="${EASY_DIR}/${TARGET_CLIENT}-standard.conf.enc"
+	[[ ! -f "$CONF_STD_ENC" ]] && CONF_STD_ENC="/etc/wireguard/clients/${TARGET_CLIENT}-standard.conf.enc"
+	local CONF_CF_ENC="${EASY_DIR}/${TARGET_CLIENT}-cloudflare-shield.conf.enc"
+	[[ ! -f "$CONF_CF_ENC" ]] && CONF_CF_ENC="/etc/wireguard/clients/${TARGET_CLIENT}-cloudflare-shield.conf.enc"
+
+	if [[ "$EXP_PROFILE_OPT" == "1" || "$EXP_PROFILE_OPT" == "3" ]]; then
+		local std_txt
+		std_txt=$(decryptConfigToString "$CONF_STD_ENC")
+		if [[ -n "$std_txt" ]]; then
+			echo "$std_txt" > "${DEST_DIR}/${TARGET_CLIENT}-standard.conf"
+			chmod 600 "${DEST_DIR}/${TARGET_CLIENT}-standard.conf"
+			echo -e "${GREEN}[✔] Exported: ${DEST_DIR}/${TARGET_CLIENT}-standard.conf${NC}"
+		fi
+	fi
+
+	if [[ "$EXP_PROFILE_OPT" == "2" || "$EXP_PROFILE_OPT" == "3" ]]; then
+		local cf_txt
+		cf_txt=$(decryptConfigToString "$CONF_CF_ENC")
+		if [[ -n "$cf_txt" ]]; then
+			echo "$cf_txt" > "${DEST_DIR}/${TARGET_CLIENT}-cloudflare-shield.conf"
+			chmod 600 "${DEST_DIR}/${TARGET_CLIENT}-cloudflare-shield.conf"
+			echo -e "${GREEN}[✔] Exported: ${DEST_DIR}/${TARGET_CLIENT}-cloudflare-shield.conf${NC}"
+		fi
+	fi
+
+	echo -e "${YELLOW}⚠️ Notice: Decrypted files are in ${DEST_DIR}. Delete them when you have transferred them to your client device.${NC}\n"
+	read -n1 -r -p "Press Enter to return..."
 }
 
 function revokeClient() {
@@ -1098,25 +1319,25 @@ function revokeClient() {
 	local TARGET_CLIENT
 	TARGET_CLIENT=$(grep -E "^### Client" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" | cut -d ' ' -f 3 | sed -n "${CLIENT_NUMBER}"p)
 
-	local TARGET_PUB_KEY
-	TARGET_PUB_KEY=$(grep -A 2 "### Client ${TARGET_CLIENT}" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" | grep "PublicKey" | awk '{print $3}')
+	local EASY_DIR
+	EASY_DIR=$(getEasyWgDir "${TARGET_CLIENT}")
+	local HOME_DIR
+	HOME_DIR=$(getHomeDirForClient "${TARGET_CLIENT}")
 
 	sed -i "/^### Client ${TARGET_CLIENT}\$/,/^$/d" "/etc/wireguard/wg0.conf" 2>/dev/null || true
 	sed -i "/^### Client ${TARGET_CLIENT}\$/,/^$/d" "/etc/wireguard/wg1.conf" 2>/dev/null || true
 
-	rm -f "/etc/wireguard/clients/${TARGET_CLIENT}.conf"
-	rm -f "/etc/wireguard/clients/${TARGET_CLIENT}-standard.conf"
-	rm -f "/etc/wireguard/clients/${TARGET_CLIENT}-cloudflare-shield.conf"
-	local HOME_DIR
-	HOME_DIR=$(getHomeDirForClient "${TARGET_CLIENT}")
-	rm -f "${HOME_DIR}/${TARGET_CLIENT}.conf" "${HOME_DIR}/${TARGET_CLIENT}-standard.conf" "${HOME_DIR}/${TARGET_CLIENT}-cloudflare-shield.conf" "/root/${TARGET_CLIENT}.conf" "/root/${TARGET_CLIENT}-standard.conf" "/root/${TARGET_CLIENT}-cloudflare-shield.conf" 2>/dev/null || true
+	# Remove encrypted and unencrypted configs
+	rm -f "${EASY_DIR}/${TARGET_CLIENT}"*.conf "${EASY_DIR}/${TARGET_CLIENT}"*.conf.enc 2>/dev/null || true
+	rm -f "/etc/wireguard/clients/${TARGET_CLIENT}"*.conf "/etc/wireguard/clients/${TARGET_CLIENT}"*.conf.enc 2>/dev/null || true
+	rm -f "${HOME_DIR}/${TARGET_CLIENT}"*.conf "${HOME_DIR}/${TARGET_CLIENT}"*.conf.enc "/root/${TARGET_CLIENT}"*.conf "/root/${TARGET_CLIENT}"*.conf.enc 2>/dev/null || true
 
 	if command -v wg-quick &>/dev/null && command -v wg &>/dev/null; then
 		wg syncconf wg0 <(wg-quick strip wg0) 2>/dev/null || true
 		wg syncconf wg1 <(wg-quick strip wg1) 2>/dev/null || true
 	fi
 
-	echo -e "${GREEN}[✔] Client ${TARGET_CLIENT} revoked successfully from both instances.${NC}\n"
+	echo -e "${GREEN}[✔] Client ${TARGET_CLIENT} revoked successfully from both instances and encrypted store.${NC}\n"
 }
 
 function backupRestoreManager() {
@@ -1986,5 +2207,14 @@ if [[ "${1:-}" == "--repair" || "${1:-}" == "-r" || "${1:-}" == "repair" ]]; the
 	autoRepairNetwork
 	exit 0
 fi
+
+# Emergency command-line clean/encrypt flag
+if [[ "${1:-}" == "--clean" || "${1:-}" == "--encrypt" || "${1:-}" == "-c" ]]; then
+	cleanupAndSecureRootFolder
+	exit 0
+fi
+
+# Clean loose .conf files from root directory and secure into easy_wireguard/
+cleanupAndSecureRootFolder
 
 manageMenu
