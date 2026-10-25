@@ -75,25 +75,60 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
     <div className="space-y-6">
       {/* Dual Instances Overview Banner */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {/* Instance 1: Standard WireGuard */}
+        {/* Profile 1: Stealth Anti-Scanner & Cloudflare Gateway (FIRST) */}
+        <div className="bg-[#0f172a]/95 border border-amber-500/30 rounded-2xl p-5 shadow-xl relative overflow-hidden">
+          <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+            <div className="flex items-center gap-2">
+              <span className="w-2.5 h-2.5 rounded-full bg-amber-400 shadow-md shadow-amber-400/50 animate-ping" />
+              <span className="text-xs font-bold text-slate-200 uppercase tracking-wider">Profile 1: Stealth Anti-Scanner Gateway</span>
+            </div>
+            <span className="text-xs px-2.5 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/30 font-semibold font-mono">
+              wg0 • Unified Port {server?.listenPort || 4500}
+            </span>
+          </div>
+
+          <div className="mt-3.5 space-y-2">
+            <div className="flex items-baseline justify-between">
+              <span className="text-2xl font-black text-white font-mono">10.19.0.0/24</span>
+              <span className="text-xs text-amber-400 font-semibold">Obfuscated & Scanner Protected (MTU 1360)</span>
+            </div>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              AmneziaWG obfuscation, MTU 1360, Windows 11 TTL=128 disguise, active UDP scanner drop rate-limiting, Security DNS, and smart egress gateway. Unblocks LinkedIn 403 and bypasses Turnstile.
+            </p>
+          </div>
+
+          <div className="mt-4 pt-3 border-t border-slate-800/80 flex items-center justify-between text-xs">
+            <span className="text-slate-400">
+              Active Peers: <strong className="text-white">{wg1Instance ? wg1Instance.activePeersCount : peers.filter(p => p.instance === 'wg1' || p.ip.startsWith('10.19.')).length}</strong>
+            </span>
+            <button
+              onClick={() => handleFetchServerConf('wg0')}
+              className="px-2.5 py-1 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 text-xs font-semibold border border-amber-500/20 transition"
+            >
+              Inspect Server Conf
+            </button>
+          </div>
+        </div>
+
+        {/* Profile 2: Standard WireGuard (SECOND) */}
         <div className="bg-[#0f172a]/95 border border-emerald-500/30 rounded-2xl p-5 shadow-xl relative overflow-hidden">
           <div className="flex items-center justify-between pb-3 border-b border-slate-800">
             <div className="flex items-center gap-2">
               <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 shadow-md shadow-emerald-400/50 animate-ping" />
-              <span className="text-xs font-bold text-slate-200 uppercase tracking-wider">Instance 1: Standard WireGuard</span>
+              <span className="text-xs font-bold text-slate-200 uppercase tracking-wider">Profile 2: Standard WireGuard Full Tunnel</span>
             </div>
             <span className="text-xs px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 font-semibold font-mono">
-              wg0 • Port {server?.listenPort || 4500}
+              wg0 • Same Port {server?.listenPort || 4500}
             </span>
           </div>
 
           <div className="mt-3.5 space-y-2">
             <div className="flex items-baseline justify-between">
               <span className="text-2xl font-black text-white font-mono">10.18.0.0/24</span>
-              <span className="text-xs text-emerald-400 font-semibold">Direct VPS Egress</span>
+              <span className="text-xs text-emerald-400 font-semibold">Direct VPS Egress (MTU 1420)</span>
             </div>
             <p className="text-xs text-slate-400 leading-relaxed">
-              Standard full-tunnel WireGuard egress without Cloudflare split. All web packets routed directly through your VPS.
+              Canonical standard WireGuard egress without mangling. 100% compatibility with Amazon, checkout, retail, and banking sites.
             </p>
           </div>
 
@@ -105,42 +140,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
               onClick={() => handleFetchServerConf('wg0')}
               className="px-2.5 py-1 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 text-xs font-semibold border border-emerald-500/20 transition"
             >
-              Inspect wg0.conf
-            </button>
-          </div>
-        </div>
-
-        {/* Instance 2: Dedicated Cloudflare Anti-Flag */}
-        <div className="bg-[#0f172a]/95 border border-amber-500/30 rounded-2xl p-5 shadow-xl relative overflow-hidden">
-          <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-            <div className="flex items-center gap-2">
-              <span className="w-2.5 h-2.5 rounded-full bg-amber-400 shadow-md shadow-amber-400/50 animate-ping" />
-              <span className="text-xs font-bold text-slate-200 uppercase tracking-wider">Instance 2: Stealth Anti-Scanner Gateway</span>
-            </div>
-            <span className="text-xs px-2.5 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/30 font-semibold font-mono">
-              wg1 • Port {server?.secondaryPort || (server?.listenPort ? server.listenPort + 1 : 4501)}
-            </span>
-          </div>
-
-          <div className="mt-3.5 space-y-2">
-            <div className="flex items-baseline justify-between">
-              <span className="text-2xl font-black text-white font-mono">10.19.0.0/24</span>
-              <span className="text-xs text-amber-400 font-semibold">Obfuscated & Scanner Protected</span>
-            </div>
-            <p className="text-xs text-slate-400 leading-relaxed">
-              AmneziaWG obfuscation parameters, MTU 1360, Windows 11 TTL=128 disguise, active UDP scanner drop rate-limiting, Security DNS, and smart egress gateway. Clean AllowedIPs = 0.0.0.0/0.
-            </p>
-          </div>
-
-          <div className="mt-4 pt-3 border-t border-slate-800/80 flex items-center justify-between text-xs">
-            <span className="text-slate-400">
-              Active Peers: <strong className="text-white">{wg1Instance ? wg1Instance.activePeersCount : peers.filter(p => p.instance === 'wg1' || p.ip.startsWith('10.19.')).length}</strong>
-            </span>
-            <button
-              onClick={() => handleFetchServerConf('wg1')}
-              className="px-2.5 py-1 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 text-xs font-semibold border border-amber-500/20 transition"
-            >
-              Inspect wg1.conf
+              Inspect Server Conf
             </button>
           </div>
         </div>

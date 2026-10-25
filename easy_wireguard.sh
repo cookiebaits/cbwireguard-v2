@@ -125,8 +125,10 @@ function getMasterPasskey() {
 function encryptConfigContent() {
 	local CONTENT="$1"
 	local DEST_ENC="$2"
-	local PASS
-	PASS=$(getMasterPasskey)
+	local PASS="${3:-}"
+	if [[ -z "$PASS" ]]; then
+		PASS=$(getMasterPasskey)
+	fi
 	mkdir -p "$(dirname "$DEST_ENC")" 2>/dev/null || true
 	echo -n "$CONTENT" | openssl enc -aes-256-cbc -salt -pbkdf2 -iter 100000 -pass "pass:${PASS}" -out "$DEST_ENC" 2>/dev/null
 	chmod 600 "$DEST_ENC" 2>/dev/null || true
@@ -135,8 +137,10 @@ function encryptConfigContent() {
 # Decrypt AES-256-CBC encrypted .conf.enc on-the-fly in memory (never written plain-text to disk)
 function decryptConfigToString() {
 	local FILE="$1"
-	local PASS
-	PASS=$(getMasterPasskey)
+	local PASS="${2:-}"
+	if [[ -z "$PASS" ]]; then
+		PASS=$(getMasterPasskey)
+	fi
 	if [[ -f "$FILE" ]]; then
 		if head -c 8 "$FILE" 2>/dev/null | grep -q "Salted__"; then
 			openssl enc -d -aes-256-cbc -pbkdf2 -iter 100000 -pass "pass:${PASS}" -in "$FILE" 2>/dev/null
@@ -367,55 +371,103 @@ function installQuestions() {
 	read -rp "Server WireGuard internal IPv4: " -e -i "10.18.0.1" SERVER_WG_IPV4
 	read -rp "Server WireGuard internal IPv6: " -e -i "fd42:42:42::1" SERVER_WG_IPV6
 
-	echo -e "\n${CYAN}${BOLD}Select WireGuard Port (Stealth & Non-Sensitive Ports - Zero Web/80/443 Conflicts):${NC}"
-	echo -e "   1) ${GREEN}4500${NC}  (IPsec NAT-Traversal UDP | Stealth Encrypted Tunneling - Firewall & Carrier Safe) ${PURPLE}[RECOMMENDED STEALTH]${NC}"
-	echo -e "   2) ${GREEN}3478${NC}  (STUN / WebRTC Media UDP | FaceTime / Zoom / VoIP Bypass - Zero DPI Throttling) ${PURPLE}[STEALTH]${NC}"
+	echo -e "\n${CYAN}${BOLD}Select WireGuard Port (Unified Port - Used by Both Standard and Cloudflare Anti-Flag Profiles):${NC}"
+	echo -e "   1) ${GREEN}4500${NC}  (IPsec NAT-Traversal UDP | Stealth Encrypted Tunneling) ${PURPLE}[RECOMMENDED STEALTH]${NC}"
+	echo -e "   2) ${GREEN}3478${NC}  (STUN / WebRTC Media UDP | FaceTime / Zoom / VoIP Bypass)"
 	echo -e "   3) ${GREEN}500${NC}   (IKEv2 / IPsec Signaling UDP | Mobile Telecom Pass-Through)"
 	echo -e "   4) ${GREEN}853${NC}   (DNS-over-QUIC UDP | Modern Encrypted Transport Appearance)"
-	echo -e "   5) ${GREEN}51820${NC} (Official WireGuard Standard Port | Dedicated Non-Conflicting Protocol)"
-	echo -e "   6) ${GREEN}41194${NC} (Disguised High Tunnel UDP | Evades Low-Port Scanning & Probes)"
+	echo -e "   5) ${GREEN}51820${NC} (Official WireGuard Standard Port)"
+	echo -e "   6) ${GREEN}41194${NC} (Disguised High Tunnel UDP | Evades Low-Port Scanning)"
 	echo -e "   7) Random High-Entropy Stealth Port (49152-65535)"
-	echo -e "   8) Custom Non-Sensitive Port"
+	echo -e "   8) Custom Port (Or enter port directly, e.g. 8008)"
 
-	read -rp "Select WireGuard Port option [1-8, default 1 (4500)]: " PORT_OPTION
-	PORT_OPTION=${PORT_OPTION:-1}
-	case "${PORT_OPTION}" in
-		2) SERVER_PORT=3478 ;;
-		3) SERVER_PORT=500 ;;
-		4) SERVER_PORT=853 ;;
-		5) SERVER_PORT=51820 ;;
-		6) SERVER_PORT=41194 ;;
-		7)
-			RANDOM_PORT=$(( (RANDOM % 16383) + 49152 ))
-			SERVER_PORT="${RANDOM_PORT}"
-			echo -e "${GREEN}[✔] Generated Random Stealth High Port: ${SERVER_PORT}/udp${NC}"
-			;;
-		8)
-			while true; do
-				read -rp "Enter Custom WireGuard Port [1024-65535]: " -e -i "4500" SERVER_PORT
-				if ! [[ "$SERVER_PORT" =~ ^[0-9]+$ ]] || [[ "$SERVER_PORT" -lt 1024 || "$SERVER_PORT" -gt 65535 ]]; then
-					echo -e "${RED}[!] Invalid port. Please choose an unprivileged port between 1024 and 65535.${NC}"
-					continue
-				fi
-				if isSensitivePort "$SERVER_PORT"; then
-					echo -e "${RED}[!] Port ${SERVER_PORT} is a sensitive service port (conflicts with web/mail/DNS like 80/443/8080). Please enter a non-sensitive stealth port.${NC}"
-					continue
-				fi
-				if isPortInUse "$SERVER_PORT" "udp"; then
-					echo -e "${YELLOW}[!] Warning: Port ${SERVER_PORT}/udp is currently bound by another service on this host. Please choose another port.${NC}"
-					continue
-				fi
+	while true; do
+		read -rp "Select Port option [1-8, or type any port directly (e.g. 8008), default 1 (4500)]: " PORT_OPTION
+		PORT_OPTION=${PORT_OPTION:-1}
+
+		# Check if direct port number was entered (e.g. 8008)
+		if [[ "$PORT_OPTION" =~ ^[0-9]+$ ]] && [[ "$PORT_OPTION" -ge 1024 && "$PORT_OPTION" -le 65535 ]]; then
+			if isSensitivePort "$PORT_OPTION"; then
+				echo -e "${RED}[!] Port ${PORT_OPTION} is a sensitive service port (conflicts with 80/443/8080/22). Please choose a safe port.${NC}"
+				continue
+			fi
+			if isPortInUse "$PORT_OPTION" "udp"; then
+				echo -e "${YELLOW}[!] Warning: Port ${PORT_OPTION}/udp is currently bound by another service on this host. Choose another.${NC}"
+				continue
+			fi
+			SERVER_PORT="$PORT_OPTION"
+			break
+		fi
+
+		case "${PORT_OPTION}" in
+			1) SERVER_PORT=4500 ; break ;;
+			2) SERVER_PORT=3478 ; break ;;
+			3) SERVER_PORT=500 ; break ;;
+			4) SERVER_PORT=853 ; break ;;
+			5) SERVER_PORT=51820 ; break ;;
+			6) SERVER_PORT=41194 ; break ;;
+			7)
+				RANDOM_PORT=$(( (RANDOM % 16383) + 49152 ))
+				SERVER_PORT="${RANDOM_PORT}"
+				echo -e "${GREEN}[✔] Generated Random Stealth High Port: ${SERVER_PORT}/udp${NC}"
 				break
-			done
-			;;
-		1|*) SERVER_PORT=4500 ;;
-	esac
-	echo -e "${GREEN}[✔] WireGuard Port Selected: ${SERVER_PORT}/udp (Safe Non-Sensitive Stealth Port)${NC}"
+				;;
+			8)
+				while true; do
+					read -rp "Enter Custom WireGuard Port [1024-65535, e.g. 8008]: " -e -i "8008" CUSTOM_PORT
+					if ! [[ "$CUSTOM_PORT" =~ ^[0-9]+$ ]] || [[ "$CUSTOM_PORT" -lt 1024 || "$CUSTOM_PORT" -gt 65535 ]]; then
+						echo -e "${RED}[!] Invalid port. Enter an unprivileged port between 1024 and 65535.${NC}"
+						continue
+					fi
+					if isSensitivePort "$CUSTOM_PORT"; then
+						echo -e "${RED}[!] Port ${CUSTOM_PORT} conflicts with sensitive services (80/443/8080). Choose another.${NC}"
+						continue
+					fi
+					if isPortInUse "$CUSTOM_PORT" "udp"; then
+						echo -e "${YELLOW}[!] Warning: Port ${CUSTOM_PORT}/udp is currently in use. Choose another.${NC}"
+						continue
+					fi
+					SERVER_PORT="$CUSTOM_PORT"
+					break
+				done
+				break
+				;;
+			*)
+				echo -e "${RED}[!] Invalid option. Enter 1-8 or an unprivileged port number (1024-65535).${NC}"
+				continue
+				;;
+		esac
+	done
+
+	# Unify port: Cloudflare Anti-Flag and Standard profiles use the EXACT same port!
+	SERVER_PORT_CF="${SERVER_PORT}"
+	echo -e "${GREEN}[✔] WireGuard Port Confirmed: ${SERVER_PORT}/udp (Unified for both Standard and Cloudflare Anti-Flag profiles)${NC}"
 
 	selectDNSResolvers
 
 	read -rp "First client device name: " -e -i "my-device" CLIENT_NAME
 	CLIENT_NAME=$(echo "$CLIENT_NAME" | tr -cd '[:alnum:]_-')
+
+	echo -e "\n${PURPLE}${BOLD}🔒 Set Encryption Password for Client Configuration:${NC}"
+	echo -e "   This password encrypts your .conf file with AES-256-CBC PBKDF2."
+	echo -e "   You will be required to enter this password to view or copy the config in Option [3]."
+	CLIENT_PASSWORD=""
+	while true; do
+		read -s -rp "Enter encryption password for '${CLIENT_NAME}': " CLIENT_PASSWORD
+		echo ""
+		if [[ ${#CLIENT_PASSWORD} -lt 4 ]]; then
+			echo -e "${RED}[!] Password must be at least 4 characters long.${NC}"
+			continue
+		fi
+		read -s -rp "Confirm encryption password: " CLIENT_PASSWORD_CONFIRM
+		echo ""
+		if [[ "$CLIENT_PASSWORD" != "$CLIENT_PASSWORD_CONFIRM" ]]; then
+			echo -e "${RED}[!] Passwords do not match. Please try again.${NC}"
+			continue
+		fi
+		echo -e "${GREEN}[✔] Client Encryption Password confirmed!${NC}\n"
+		break
+	done
 
 	read -rp "Allowed IPs for generated clients: " -e -i "0.0.0.0/0, ::/0" ALLOWED_IPS
 
@@ -564,12 +616,10 @@ SYSCTL_V6_EOF
 
 	sysctl --system -q >/dev/null 2>&1 || sysctl -p "$SYSCTL_CONF" >/dev/null 2>&1 || true
 
-	# Ensure UFW / Firewalld unblock WireGuard UDP traffic & enable forwarding
-	local PORT_WG1="${SERVER_PORT_CF:-$((SERVER_PORT + 1))}"
+	# Ensure UFW / Firewalld unblock WireGuard UDP traffic & enable forwarding (Unified Port)
 	if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
-		echo -e "${CYAN}[*] UFW firewall active. Allowing WireGuard ports ${SERVER_PORT}/udp and ${PORT_WG1}/udp and enabling forwarding...${NC}"
+		echo -e "${CYAN}[*] UFW firewall active. Allowing WireGuard port ${SERVER_PORT}/udp and enabling forwarding...${NC}"
 		ufw allow "${SERVER_PORT}/udp" >/dev/null 2>&1 || true
-		ufw allow "${PORT_WG1}/udp" >/dev/null 2>&1 || true
 		ufw allow "${WEB_PORT:-51821}/tcp" >/dev/null 2>&1 || true
 		if [ -f /etc/default/ufw ]; then
 			sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw 2>/dev/null || true
@@ -578,9 +628,8 @@ SYSCTL_V6_EOF
 	fi
 
 	if command -v firewall-cmd &>/dev/null && systemctl is-active --quiet firewalld 2>/dev/null; then
-		echo -e "${CYAN}[*] Firewalld active. Opening WireGuard UDP ports ${SERVER_PORT} and ${PORT_WG1}...${NC}"
+		echo -e "${CYAN}[*] Firewalld active. Opening WireGuard UDP port ${SERVER_PORT}...${NC}"
 		firewall-cmd --add-port="${SERVER_PORT}/udp" --permanent >/dev/null 2>&1 || true
-		firewall-cmd --add-port="${PORT_WG1}/udp" --permanent >/dev/null 2>&1 || true
 		firewall-cmd --add-port="${WEB_PORT:-51821}/tcp" --permanent >/dev/null 2>&1 || true
 		firewall-cmd --add-masquerade --permanent >/dev/null 2>&1 || true
 		firewall-cmd --reload >/dev/null 2>&1 || true
@@ -605,6 +654,7 @@ SERVER_WG_NIC=${SERVER_WG_NIC}
 SERVER_WG_IPV4=${SERVER_WG_IPV4}
 SERVER_WG_IPV6=${SERVER_WG_IPV6}
 SERVER_PORT=${SERVER_PORT}
+SERVER_PORT_CF=${SERVER_PORT}
 SERVER_PRIV_KEY=${SERVER_PRIV_KEY}
 SERVER_PUB_KEY=${SERVER_PUB_KEY}
 CLIENT_DNS_1=${CLIENT_DNS_1}
@@ -638,10 +688,8 @@ ENV_EOF
 		HAS_TTL=1
 	fi
 
-	SERVER_PORT_CF=$((SERVER_PORT + 1))
-	if isPortInUse "$SERVER_PORT_CF" "udp"; then
-		SERVER_PORT_CF=$((SERVER_PORT + 2))
-	fi
+	# Guarantee port unification: Both profiles strictly share the exact port selected
+	SERVER_PORT_CF="${SERVER_PORT}"
 
 	# Determine server address for wg0 (IPv4-only if IPv6 unsupported by host)
 	local WG_SERVER_ADDRESS="${SERVER_WG_IPV4}/24"
@@ -650,86 +698,69 @@ ENV_EOF
 	fi
 
 	# --------------------------------------------------------------------------
-	# INSTANCE 1: Standard WireGuard (/etc/wireguard/wg0.conf)
-	# Clean direct VPS egress, port 4500 (or SERVER_PORT), subnet 10.18.0.0/24
+	# UNIFIED WIREGUARD SERVER (/etc/wireguard/wg0.conf)
+	# Single selected port ${SERVER_PORT}/udp serves BOTH:
+	# 1. Cloudflare Anti-Flag & Stealth Profile (10.19.0.0/24: Stealth Gateway)
+	# 2. Standard Profile (10.18.0.0/24: Canonical Direct VPS Egress)
 	# --------------------------------------------------------------------------
-	echo -e "${CYAN}[*] Configuring Instance 1: Standard WireGuard (wg0 | Port ${SERVER_PORT}/udp | 10.18.0.0/24)...${NC}"
+	echo -e "${CYAN}[*] Configuring Unified WireGuard Server (wg0 | Port ${SERVER_PORT}/udp | Subnets: 10.19.0.0/24 & 10.18.0.0/24)...${NC}"
 	cat << WG_SERVER_EOF > "/etc/wireguard/wg0.conf"
 [Interface]
-Address = ${WG_SERVER_ADDRESS}
+Address = ${WG_SERVER_ADDRESS}, 10.19.0.1/24
 ListenPort = ${SERVER_PORT}
 PrivateKey = ${SERVER_PRIV_KEY}
 MTU = 1420
 SaveConfig = false
 
-# --- INSTANCE 1: STANDARD WIREGUARD RULES (Canonical Direct VPS Egress) ---
+# --- 1. CORE NETWORKING & FIREWALL (Port ${SERVER_PORT} for Both Profiles) ---
 PostUp = sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true
 PostUp = iptables -I INPUT 1 -p udp --dport ${SERVER_PORT} -j ACCEPT 2>/dev/null || true
+PostUp = iptables -I INPUT 2 -p udp --dport ${SERVER_PORT} -m recent --set --name WG_SCANNER 2>/dev/null || true
+PostUp = iptables -I INPUT 3 -p udp --dport ${SERVER_PORT} -m recent --update --seconds 10 --hitcount 35 --name WG_SCANNER -j DROP 2>/dev/null || true
 PostUp = iptables -I FORWARD 1 -i wg0 -j ACCEPT 2>/dev/null || true
 PostUp = iptables -I FORWARD 2 -o wg0 -j ACCEPT 2>/dev/null || true
-PostUp = iptables -I FORWARD 3 -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
-PostUp = iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 -j MASQUERADE 2>/dev/null || true
-PostUp = iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-
-PostDown = iptables -D INPUT -p udp --dport ${SERVER_PORT} -j ACCEPT 2>/dev/null || true
-PostDown = iptables -D FORWARD -i wg0 -j ACCEPT 2>/dev/null || true
-PostDown = iptables -D FORWARD -o wg0 -j ACCEPT 2>/dev/null || true
-PostDown = iptables -D FORWARD -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
-PostDown = iptables -t nat -D POSTROUTING -s 10.18.0.0/24 -j MASQUERADE 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-WG_SERVER_EOF
-
-	# --------------------------------------------------------------------------
-	# INSTANCE 2: Dedicated Cloudflare Anti-Flag (/etc/wireguard/wg1.conf)
-	# Anti-Turnstile residential split, port 4501, subnet 10.19.0.0/24, MSS 1360
-	# --------------------------------------------------------------------------
-	echo -e "${CYAN}[*] Configuring Instance 2: Dedicated Cloudflare Anti-Flag (wg1 | Port ${SERVER_PORT_CF}/udp | 10.19.0.0/24)...${NC}"
-	cat << WG_CF_EOF > "/etc/wireguard/wg1.conf"
-[Interface]
-Address = 10.19.0.1/24
-ListenPort = ${SERVER_PORT_CF}
-PrivateKey = ${SERVER_PRIV_KEY}
-MTU = 1360
-SaveConfig = false
-
-# --- INSTANCE 2: DEDICATED CLOUDFLARE ANTI-FLAG & RESIDENTIAL BYPASS RULES ---
-PostUp = sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true
-PostUp = iptables -I INPUT 1 -p udp --dport ${SERVER_PORT_CF} -j ACCEPT 2>/dev/null || true
-PostUp = iptables -I FORWARD 1 -i wg1 -j ACCEPT 2>/dev/null || true
-PostUp = iptables -I FORWARD 2 -o wg1 -j ACCEPT 2>/dev/null || true
 PostUp = iptables -I FORWARD 3 -s 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
+PostUp = iptables -I FORWARD 4 -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
 PostUp = iptables -t nat -I POSTROUTING 1 -s 10.19.0.0/24 -j MASQUERADE 2>/dev/null || true
+PostUp = iptables -t nat -I POSTROUTING 2 -s 10.18.0.0/24 -j MASQUERADE 2>/dev/null || true
 
-# Anti-Fragmentation TCP MSS Clamping (PMTU clamp + MSS 1280 cap to prevent packet drops on Cloudflare TLS)
+# --- 2. PROFILE 1: CLOUDFLARE ANTI-FLAG & STEALTH PROFILE (10.19.0.0/24) ---
+# Active UDP scanner drop, PMTU MSS Clamping (prevents TLS ClientHello fragmentation on LinkedIn / Akamai), Windows 11 TTL=128 disguise
 PostUp = iptables -t mangle -I FORWARD 1 -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 PostUp = iptables -t mangle -I FORWARD 2 -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-PostUp = iptables -t mangle -I FORWARD 3 -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
-PostUp = iptables -t mangle -I FORWARD 4 -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
+PostUp = iptables -t mangle -I POSTROUTING 1 -s 10.19.0.0/24 -j TTL --ttl-set 128 2>/dev/null || true
 
-# TTL=64 Normalization (Conceals VPS hop from passive OS fingerprinting / p0f)
-PostUp = iptables -t mangle -I POSTROUTING 1 -s 10.19.0.0/24 -j TTL --ttl-set 64 2>/dev/null || true
+# --- 3. PROFILE 2: STANDARD DIRECT VPS EGRESS (10.18.0.0/24) ---
+# Direct VPS egress, PMTU clamp only. 100% Amazon/shopping/banking compatibility.
+PostUp = iptables -t mangle -I FORWARD 3 -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+PostUp = iptables -t mangle -I FORWARD 4 -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 
 # Teardown Rules
-PostDown = iptables -D INPUT -p udp --dport ${SERVER_PORT_CF} -j ACCEPT 2>/dev/null || true
-PostDown = iptables -D FORWARD -i wg1 -j ACCEPT 2>/dev/null || true
-PostDown = iptables -D FORWARD -o wg1 -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D INPUT -p udp --dport ${SERVER_PORT} -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D INPUT -p udp --dport ${SERVER_PORT} -m recent --update --seconds 10 --hitcount 35 --name WG_SCANNER -j DROP 2>/dev/null || true
+PostDown = iptables -D INPUT -p udp --dport ${SERVER_PORT} -m recent --set --name WG_SCANNER 2>/dev/null || true
+PostDown = iptables -D FORWARD -i wg0 -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D FORWARD -o wg0 -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -s 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D FORWARD -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
 PostDown = iptables -t nat -D POSTROUTING -s 10.19.0.0/24 -j MASQUERADE 2>/dev/null || true
+PostDown = iptables -t nat -D POSTROUTING -s 10.18.0.0/24 -j MASQUERADE 2>/dev/null || true
 PostDown = iptables -t mangle -D FORWARD -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 PostDown = iptables -t mangle -D FORWARD -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
-PostDown = iptables -t mangle -D POSTROUTING -s 10.19.0.0/24 -j TTL --ttl-set 64 2>/dev/null || true
-WG_CF_EOF
+PostDown = iptables -t mangle -D POSTROUTING -s 10.19.0.0/24 -j TTL --ttl-set 128 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+WG_SERVER_EOF
 
 	chmod 600 "/etc/wireguard/wg0.conf"
-	chmod 600 "/etc/wireguard/wg1.conf"
-
-	# Clean any stale or hanging wireguard interfaces
-	wg-quick down wg0 >/dev/null 2>&1 || true
+	# Clean any old wg1 instance so port conflict never occurs
 	wg-quick down wg1 >/dev/null 2>&1 || true
-	ip link delete dev wg0 >/dev/null 2>&1 || true
 	ip link delete dev wg1 >/dev/null 2>&1 || true
+	rm -f "/etc/wireguard/wg1.conf"
+
+	# Clean stale wg0 and start fresh
+	wg-quick down wg0 >/dev/null 2>&1 || true
+	ip link delete dev wg0 >/dev/null 2>&1 || true
 	systemctl stop "wg-quick@wg0" >/dev/null 2>&1 || true
 	systemctl stop "wg-quick@wg1" >/dev/null 2>&1 || true
 
@@ -780,13 +811,19 @@ amazon.co.uk
 amazon.ca
 amazon.de
 
-# LinkedIn Professional Network & Media CDN (Unblocks LinkedIn HTTP 999 Datacenter Blocks)
+# LinkedIn Professional Network & Media CDN (Unblocks LinkedIn HTTP 403 / 999 Datacenter Blocks)
 linkedin.com
 www.linkedin.com
 licdn.com
 media.licdn.com
 static.licdn.com
 lnkd.in
+platform.linkedin.com
+dms.licdn.com
+voyager.linkedin.com
+media-exp1.licdn.com
+snap.licdn.com
+px.ads.linkedin.com
 CF_INIT_DOMAINS
 
 		applyDomainSplitRulesLive
@@ -796,7 +833,7 @@ CF_INIT_DOMAINS
 		rm -f /etc/wireguard/cloudflare_shield_enabled /etc/wireguard/cloudflare_split_enabled 2>/dev/null || true
 	fi
 
-	newClientInternal "${CLIENT_NAME}"
+	newClientInternal "${CLIENT_NAME}" "${CLIENT_PASSWORD}"
 
 	echo -e "\n${GREEN}${BOLD}=================================================================${NC}"
 	echo -e "${GREEN}${BOLD}🎉 WIREGUARD SERVER INSTALLED SUCCESSFULLY!${NC}"
@@ -930,10 +967,12 @@ SERVICE_EOF
 # ------------------------------------------------------------------------------
 function newClientInternal() {
 	local CLIENT_NAME="$1"
+	local CLIENT_PASSWORD="${2:-}"
 	local HOME_DIR
 	HOME_DIR=$(getHomeDirForClient "${CLIENT_NAME}")
 
-	SERVER_PORT_CF=${SERVER_PORT_CF:-$((SERVER_PORT + 1))}
+	# Both configurations strictly use the same port selected!
+	SERVER_PORT_CF="${SERVER_PORT}"
 
 	local SUBNET_BASE="10.18.0"
 	local OCTET=2
@@ -952,8 +991,15 @@ function newClientInternal() {
 	local CLIENT_PRE_SHARED_KEY
 	CLIENT_PRE_SHARED_KEY=$(wg genpsk)
 
+	# Distinct Stealth Keypair for Cloudflare Anti-Flag Profile
+	local CLIENT_CF_PRIV_KEY
+	CLIENT_CF_PRIV_KEY=$(wg genkey)
+	local CLIENT_CF_PUB_KEY
+	CLIENT_CF_PUB_KEY=$(echo "${CLIENT_CF_PRIV_KEY}" | wg pubkey)
+
+	# BOTH profiles strictly use the EXACT SAME port!
 	local ENDPOINT_WG0="${SERVER_PUB_IP}:${SERVER_PORT}"
-	local ENDPOINT_WG1="${SERVER_PUB_IP}:${SERVER_PORT_CF}"
+	local ENDPOINT_WG1="${SERVER_PUB_IP}:${SERVER_PORT}"
 
 	mkdir -p /etc/wireguard/clients
 	local CLIENT_CONF_PATH="/etc/wireguard/clients/${CLIENT_NAME}.conf"
@@ -988,15 +1034,68 @@ function newClientInternal() {
 	local CF_ALLOWED_IPS_LINE="${STD_ALLOWED_IPS}"
 
 	# --------------------------------------------------------------------------
-	# 1. Build Instance 1 Standard Config Content (wg0 | Port 4500 | 10.18.0.x)
+	# 1. Build Profile 1: Stealth Anti-Scanner & Cloudflare Shield (FIRST)
+	# (wg0 | Unified Port ${SERVER_PORT} | Subnet: 10.19.0.x | MTU: 1360)
+	# --------------------------------------------------------------------------
+	local CF_CONF_CONTENT
+	CF_CONF_CONTENT=$(cat << CF_CLIENT_EOF
+# ==============================================================================
+# ☁️ PROFILE 1: CLOUDFLARE ANTI-FLAG & STEALTH GATEWAY
+# ==============================================================================
+# • Protocol Mode: Stealth WireGuard / AmneziaWG Obfuscation Ready
+# • Port: ${SERVER_PORT} (Unified Port - Shared with Standard Profile)
+# • Subnet / Assigned IP: ${CLIENT_WG_CF_IPV4}/32 (Subnet: 10.19.0.0/24)
+# • MTU: 1360 (Anti-Fragmentation Cloudflare-Tuned MTU)
+# • DNS: 94.140.14.14, 1.1.1.2 (Encrypted Security DNS + ECS-Stripping)
+# • Target Use Case: Cloudflare Turnstile captcha bypass, LinkedIn 403 unblocking,
+#                    evading active ISP port scanners & anti-VPN deep inspection.
+# • Server Protections: Windows 11 Desktop TTL=128 Disguise, TCP MSS PMTU Clamping,
+#                       Active UDP Scanner Drop Rate-Limiting, Smart Egress Relay.
+#
+# • AmneziaWG Obfuscation Parameters (for AmneziaWG / AWG clients):
+#   Jc = 4 | Jmin = 40 | Jmax = 70 | S1 = 15 | S2 = 20 | H1 = 1 | H2 = 2 | H3 = 3 | H4 = 4
+# ==============================================================================
+[Interface]
+PrivateKey = ${CLIENT_CF_PRIV_KEY}
+Address = ${CLIENT_WG_CF_IPV4}/32
+DNS = 94.140.14.14, 1.1.1.2
+MTU = 1360
+# AmneziaWG Obfuscation (Active when imported into AmneziaWG client):
+# Jc = 4
+# Jmin = 40
+# Jmax = 70
+# S1 = 15
+# S2 = 20
+# H1 = 1
+# H2 = 2
+# H3 = 3
+# H4 = 4
+
+[Peer]
+PublicKey = ${SERVER_PUB_KEY}
+PresharedKey = ${CLIENT_PRE_SHARED_KEY}
+Endpoint = ${ENDPOINT_WG1}
+AllowedIPs = ${CF_ALLOWED_IPS_LINE}
+PersistentKeepalive = 25
+CF_CLIENT_EOF
+)
+
+	# --------------------------------------------------------------------------
+	# 2. Build Profile 2: Standard Full-Tunnel (SECOND)
+	# (wg0 | Unified Port ${SERVER_PORT} | Subnet: 10.18.0.x | MTU: 1420)
 	# --------------------------------------------------------------------------
 	local STD_CONF_CONTENT
 	STD_CONF_CONTENT=$(cat << CLIENT_EOF
 # ==============================================================================
-# 🛡️ Instance 1: Standard WireGuard Profile
-# Interface: wg0 | Port: ${SERVER_PORT} | Subnet: 10.18.0.0/24
-# Canonical standard WireGuard full tunnel with MTU 1420.
-# Direct VPS egress for 100% compatibility with Amazon, banking, shopping, and web apps.
+# 🛡️ PROFILE 2: STANDARD WIREGUARD FULL-TUNNEL
+# ==============================================================================
+# • Protocol Mode: Canonical WireGuard (Direct VPS Egress)
+# • Port: ${SERVER_PORT} (Unified Port - Shared with Stealth Profile)
+# • Subnet / Assigned IP: ${CLIENT_ADDRESS} (Subnet: 10.18.0.0/24)
+# • MTU: 1420 (Canonical WireGuard Standard MTU)
+# • DNS: ${CLIENT_DNS_LINE} (High-Speed Standard Anycast)
+# • Target Use Case: Amazon checkout, online retail, banking, daily web browsing
+# • Zero packet mangling, zero DPI injection. 100% web compatible.
 # ==============================================================================
 [Interface]
 PrivateKey = ${CLIENT_PRIV_KEY}
@@ -1014,56 +1113,35 @@ CLIENT_EOF
 )
 
 	# --------------------------------------------------------------------------
-	# 2. Build Instance 2 Stealth Anti-Scanner Config Content (wg1 | Port 4501 | 10.19.0.x)
-	# --------------------------------------------------------------------------
-	local CF_CONF_CONTENT
-	CF_CONF_CONTENT=$(cat << CF_CLIENT_EOF
-# ==============================================================================
-# ☁️ Instance 2: Stealth Anti-Scanner & Smart Egress Gateway Profile
-# Interface: wg1 | Port: ${SERVER_PORT_CF} | Subnet: 10.19.0.0/24
-#
-# AmneziaWG Obfuscation Ready:
-# Jc = 4 | Jmin = 40 | Jmax = 70 | S1 = 15 | S2 = 20 | H1 = 1 | H2 = 2 | H3 = 3 | H4 = 4
-#
-# Features:
-# 1. Active UDP Scanner Drop Rate-Limiting
-# 2. Windows 11 Desktop TTL=128 Disguise (Anti-p0f Scanner Defense)
-# 3. Encrypted Security DNS: 94.140.14.14, 1.1.1.2
-# 4. Clean AllowedIPs = 0.0.0.0/0 (Zero client add-ons!)
-# ==============================================================================
-[Interface]
-PrivateKey = ${CLIENT_PRIV_KEY}
-Address = ${CLIENT_WG_CF_IPV4}/32
-DNS = 94.140.14.14, 1.1.1.2
-MTU = 1360
-
-[Peer]
-PublicKey = ${SERVER_PUB_KEY}
-PresharedKey = ${CLIENT_PRE_SHARED_KEY}
-Endpoint = ${ENDPOINT_WG1}
-AllowedIPs = ${CF_ALLOWED_IPS_LINE}
-PersistentKeepalive = 25
-CF_CLIENT_EOF
-)
-
-	# --------------------------------------------------------------------------
 	# 3. Store ONLY Encrypted Configs inside easy_wireguard/ (Zero plain files in root)
+	# Encrypted with client password if provided, or master key
 	# --------------------------------------------------------------------------
-	encryptConfigContent "$STD_CONF_CONTENT" "${EASY_DIR}/${CLIENT_NAME}-standard.conf.enc"
-	encryptConfigContent "$STD_CONF_CONTENT" "${EASY_DIR}/${CLIENT_NAME}.conf.enc"
-	encryptConfigContent "$STD_CONF_CONTENT" "/etc/wireguard/clients/${CLIENT_NAME}-standard.conf.enc"
-	encryptConfigContent "$STD_CONF_CONTENT" "/etc/wireguard/clients/${CLIENT_NAME}.conf.enc"
+	local ENC_KEY="${CLIENT_PASSWORD}"
+	if [[ -z "$ENC_KEY" ]]; then
+		ENC_KEY=$(getMasterPasskey)
+	fi
 
-	encryptConfigContent "$CF_CONF_CONTENT" "${EASY_DIR}/${CLIENT_NAME}-cloudflare-shield.conf.enc"
-	encryptConfigContent "$CF_CONF_CONTENT" "/etc/wireguard/clients/${CLIENT_NAME}-cloudflare-shield.conf.enc"
+	encryptConfigContent "$CF_CONF_CONTENT" "${EASY_DIR}/${CLIENT_NAME}-cloudflare-shield.conf.enc" "$ENC_KEY"
+	encryptConfigContent "$CF_CONF_CONTENT" "/etc/wireguard/clients/${CLIENT_NAME}-cloudflare-shield.conf.enc" "$ENC_KEY"
+
+	encryptConfigContent "$STD_CONF_CONTENT" "${EASY_DIR}/${CLIENT_NAME}-standard.conf.enc" "$ENC_KEY"
+	encryptConfigContent "$STD_CONF_CONTENT" "${EASY_DIR}/${CLIENT_NAME}.conf.enc" "$ENC_KEY"
+	encryptConfigContent "$STD_CONF_CONTENT" "/etc/wireguard/clients/${CLIENT_NAME}-standard.conf.enc" "$ENC_KEY"
+	encryptConfigContent "$STD_CONF_CONTENT" "/etc/wireguard/clients/${CLIENT_NAME}.conf.enc" "$ENC_KEY"
 
 	# Guarantee zero plain-text files left in root or home directory
 	rm -f "/root/${CLIENT_NAME}"*.conf "${HOME_DIR}/${CLIENT_NAME}"*.conf "/etc/wireguard/clients/${CLIENT_NAME}"*.conf 2>/dev/null || true
 
-	# Register Peer in wg0.conf
+	# Register BOTH Peers in wg0.conf (Unified Interface & Port)
 	cat << PEER_EOF >> "/etc/wireguard/wg0.conf"
 
-### Client ${CLIENT_NAME}
+### Client ${CLIENT_NAME} [Cloudflare Anti-Flag Profile - Stealth Gateway]
+[Peer]
+PublicKey = ${CLIENT_CF_PUB_KEY}
+PresharedKey = ${CLIENT_PRE_SHARED_KEY}
+AllowedIPs = ${CLIENT_WG_CF_IPV4}/32
+
+### Client ${CLIENT_NAME} [Standard Profile - Direct Egress]
 [Peer]
 PublicKey = ${CLIENT_PUB_KEY}
 PresharedKey = ${CLIENT_PRE_SHARED_KEY}
@@ -1074,47 +1152,32 @@ PEER_EOF
 		wg syncconf wg0 <(wg-quick strip wg0) 2>/dev/null || true
 	fi
 
-	# Register Peer in wg1.conf if wg1 exists
-	if [[ -f "/etc/wireguard/wg1.conf" ]]; then
-		cat << CF_PEER_EOF >> "/etc/wireguard/wg1.conf"
-
-### Client ${CLIENT_NAME}
-[Peer]
-PublicKey = ${CLIENT_PUB_KEY}
-PresharedKey = ${CLIENT_PRE_SHARED_KEY}
-AllowedIPs = ${CLIENT_WG_CF_IPV4}/32
-CF_PEER_EOF
-
-		if command -v wg-quick &>/dev/null && command -v wg &>/dev/null; then
-			wg syncconf wg1 <(wg-quick strip wg1) 2>/dev/null || true
-		fi
-	fi
-
 	echo -e "${GREEN}[✔] Peer ${CLIENT_NAME} created & encrypted with AES-256-CBC!${NC}"
-	echo -e "   • Instance 1 (Standard):      ${CLIENT_WG_IPV4} on port ${SERVER_PORT}"
-	echo -e "   • Instance 2 (Anti-Flag):     ${CLIENT_WG_CF_IPV4} on port ${SERVER_PORT_CF}\n"
+	echo -e "   • Port Selected:              ${BOLD}${SERVER_PORT}/udp${NC} (Unified - Both profiles use this exact port!)"
+	echo -e "   • Profile 1 (Stealth/CF):     ${CLIENT_WG_CF_IPV4} on port ${SERVER_PORT} (AmneziaWG Obfuscation, MTU 1360)"
+	echo -e "   • Profile 2 (Standard):       ${CLIENT_WG_IPV4} on port ${SERVER_PORT} (Direct VPS Egress, MTU 1420)\n"
 
 	echo -e "  ${BOLD}Protected Folder:${NC}            ${CYAN}${EASY_DIR}/${NC} (Zero root directory clutter)"
-	echo -e "  ${BOLD}Encrypted Standard Profile:${NC}  ${YELLOW}${EASY_DIR}/${CLIENT_NAME}-standard.conf.enc${NC}"
 	echo -e "  ${BOLD}Encrypted Anti-Flag Profile:${NC} ${YELLOW}${EASY_DIR}/${CLIENT_NAME}-cloudflare-shield.conf.enc${NC}"
-	echo -e "  ${BOLD}Access Control:${NC}              ${PURPLE}AES-256 PBKDF2 Encrypted. Can ONLY be read via ./easy_wireguard.sh or Web Console${NC}\n"
+	echo -e "  ${BOLD}Encrypted Standard Profile:${NC}  ${YELLOW}${EASY_DIR}/${CLIENT_NAME}-standard.conf.enc${NC}"
+	echo -e "  ${BOLD}Password Protection:${NC}         ${PURPLE}Protected by password. Required to view/export in [3] Configure clients${NC}\n"
 
-	echo -e "${GREEN}${BOLD}📋 [1/2] COPY & PASTE CONFIGURATION: NORMAL / STANDARD FULL TUNNEL (${CLIENT_NAME}-standard.conf):${NC}"
-	echo -e "${YELLOW}-----------------------------------------------------------------${NC}"
-	echo "$STD_CONF_CONTENT"
-	echo -e "${YELLOW}-----------------------------------------------------------------${NC}\n"
-
-	echo -e "${CYAN}${BOLD}📋 [2/2] COPY & PASTE CONFIGURATION: CLOUDFLARE ANTI-FLAG & ISP MASKING (${CLIENT_NAME}-cloudflare-shield.conf):${NC}"
+	echo -e "${CYAN}${BOLD}📋 [1/2] COPY & PASTE CONFIGURATION: CLOUDFLARE ANTI-FLAG & STEALTH (${CLIENT_NAME}-cloudflare-shield.conf):${NC}"
 	echo -e "${YELLOW}-----------------------------------------------------------------${NC}"
 	echo "$CF_CONF_CONTENT"
 	echo -e "${YELLOW}-----------------------------------------------------------------${NC}\n"
 
+	echo -e "${GREEN}${BOLD}📋 [2/2] COPY & PASTE CONFIGURATION: STANDARD FULL TUNNEL (${CLIENT_NAME}-standard.conf):${NC}"
+	echo -e "${YELLOW}-----------------------------------------------------------------${NC}"
+	echo "$STD_CONF_CONTENT"
+	echo -e "${YELLOW}-----------------------------------------------------------------${NC}\n"
+
 	if command -v qrencode &>/dev/null; then
-		echo -e "${PURPLE}${BOLD}📱 [1/2] Scan Instance 1 Standard Full Tunnel QR Code (Port ${SERVER_PORT}):${NC}\n"
-		echo "$STD_CONF_CONTENT" | qrencode -t ansiutf8
-		echo ""
-		echo -e "${CYAN}${BOLD}📱 [2/2] Scan Instance 2 Cloudflare Anti-Flag Residential QR Code (Port ${SERVER_PORT_CF}):${NC}\n"
+		echo -e "${CYAN}${BOLD}📱 [1/2] Scan Profile 1 Cloudflare Anti-Flag Stealth QR Code (Port ${SERVER_PORT}):${NC}\n"
 		echo "$CF_CONF_CONTENT" | qrencode -t ansiutf8
+		echo ""
+		echo -e "${PURPLE}${BOLD}📱 [2/2] Scan Profile 2 Standard Full Tunnel QR Code (Port ${SERVER_PORT}):${NC}\n"
+		echo "$STD_CONF_CONTENT" | qrencode -t ansiutf8
 		echo ""
 	fi
 }
@@ -1125,13 +1188,34 @@ function newClient() {
 	until [[ -n "$CLIENT_NAME" && "$CLIENT_NAME" =~ ^[a-zA-Z0-9_-]+$ ]]; do
 		read -rp "Enter client device name: " CLIENT_NAME
 		CLIENT_NAME=$(echo "$CLIENT_NAME" | tr -cd '[:alnum:]_-')
-		if grep -q "### Client ${CLIENT_NAME}$" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" 2>/dev/null; then
+		if grep -q "### Client ${CLIENT_NAME}" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" 2>/dev/null; then
 			echo -e "${ORANGE}A client with name '${CLIENT_NAME}' already exists! Choose another.${NC}"
 			CLIENT_NAME=""
 		fi
 	done
 
-	newClientInternal "$CLIENT_NAME"
+	echo -e "\n${PURPLE}${BOLD}🔒 Set Encryption Password for Client Configuration:${NC}"
+	echo -e "   This password encrypts the .conf file with AES-256-CBC PBKDF2."
+	echo -e "   You will be asked for this password to view or decrypt the config."
+	local CLIENT_PASSWORD=""
+	while true; do
+		read -s -rp "Enter encryption password for '${CLIENT_NAME}': " CLIENT_PASSWORD
+		echo ""
+		if [[ ${#CLIENT_PASSWORD} -lt 4 ]]; then
+			echo -e "${RED}[!] Password must be at least 4 characters long.${NC}"
+			continue
+		fi
+		read -s -rp "Confirm encryption password: " CLIENT_PASSWORD_CONFIRM
+		echo ""
+		if [[ "$CLIENT_PASSWORD" != "$CLIENT_PASSWORD_CONFIRM" ]]; then
+			echo -e "${RED}[!] Passwords do not match. Please try again.${NC}"
+			continue
+		fi
+		echo -e "${GREEN}[✔] Client Encryption Password confirmed!${NC}\n"
+		break
+	done
+
+	newClientInternal "$CLIENT_NAME" "$CLIENT_PASSWORD"
 }
 
 function listClients() {
@@ -1209,45 +1293,68 @@ function showClientQr() {
 	local CONF_CF_ENC="${EASY_DIR}/${TARGET_CLIENT}-cloudflare-shield.conf.enc"
 	[[ ! -f "$CONF_CF_ENC" ]] && CONF_CF_ENC="/etc/wireguard/clients/${TARGET_CLIENT}-cloudflare-shield.conf.enc"
 
+	# PASSWORD GATEWAY: Prompt user for encryption password
+	echo -e "\n${PURPLE}🔒 PASSWORD PROTECTED CONFIGURATION${NC}"
+	echo -e "Client '${BOLD}${TARGET_CLIENT}${NC}' configuration is encrypted."
+	read -s -rp "Enter decryption password for '${TARGET_CLIENT}': " ATTEMPT_PASS
+	echo ""
+
 	local STD_TEXT=""
 	local CF_TEXT=""
 
-	if [[ -f "$CONF_STD_ENC" ]]; then
-		STD_TEXT=$(decryptConfigToString "$CONF_STD_ENC")
-	elif [[ -f "${EASY_DIR}/${TARGET_CLIENT}-standard.conf" ]]; then
-		STD_TEXT=$(cat "${EASY_DIR}/${TARGET_CLIENT}-standard.conf")
-	elif [[ -f "/etc/wireguard/clients/${TARGET_CLIENT}-standard.conf" ]]; then
-		STD_TEXT=$(cat "/etc/wireguard/clients/${TARGET_CLIENT}-standard.conf")
-	fi
-
 	if [[ -f "$CONF_CF_ENC" ]]; then
-		CF_TEXT=$(decryptConfigToString "$CONF_CF_ENC")
+		CF_TEXT=$(decryptConfigToString "$CONF_CF_ENC" "$ATTEMPT_PASS")
 	elif [[ -f "${EASY_DIR}/${TARGET_CLIENT}-cloudflare-shield.conf" ]]; then
 		CF_TEXT=$(cat "${EASY_DIR}/${TARGET_CLIENT}-cloudflare-shield.conf")
 	elif [[ -f "/etc/wireguard/clients/${TARGET_CLIENT}-cloudflare-shield.conf" ]]; then
 		CF_TEXT=$(cat "/etc/wireguard/clients/${TARGET_CLIENT}-cloudflare-shield.conf")
 	fi
 
-	if [[ -n "$STD_TEXT" ]]; then
-		echo -e "\n${GREEN}${BOLD}📋 Instance 1 (Standard Full Tunnel | Port ${SERVER_PORT:-4500}):${NC}"
-		echo -e "${YELLOW}🔒 Stored Encrypted (AES-256-CBC) in: ${EASY_DIR}/${TARGET_CLIENT}-standard.conf.enc${NC}\n"
-		echo "$STD_TEXT"
-		echo ""
-		if command -v qrencode &>/dev/null; then
-			echo -e "${PURPLE}${BOLD}📱 [1/2] Scan Instance 1 Standard Full Tunnel QR Code:${NC}\n"
-			echo "$STD_TEXT" | qrencode -t ansiutf8
-			echo ""
-		fi
+	if [[ -f "$CONF_STD_ENC" ]]; then
+		STD_TEXT=$(decryptConfigToString "$CONF_STD_ENC" "$ATTEMPT_PASS")
+	elif [[ -f "${EASY_DIR}/${TARGET_CLIENT}-standard.conf" ]]; then
+		STD_TEXT=$(cat "${EASY_DIR}/${TARGET_CLIENT}-standard.conf")
+	elif [[ -f "/etc/wireguard/clients/${TARGET_CLIENT}-standard.conf" ]]; then
+		STD_TEXT=$(cat "/etc/wireguard/clients/${TARGET_CLIENT}-standard.conf")
 	fi
 
-	if [[ -n "$CF_TEXT" ]]; then
-		echo -e "\n${CYAN}${BOLD}📋 Instance 2 (Dedicated Cloudflare Anti-Flag | Port ${SERVER_PORT_CF:-4501}):${NC}"
+	# Verify decryption validity
+	local DECRYPT_OK=0
+	if [[ -n "$CF_TEXT" && "$CF_TEXT" =~ "[Interface]" ]] || [[ -n "$STD_TEXT" && "$STD_TEXT" =~ "[Interface]" ]]; then
+		DECRYPT_OK=1
+	fi
+
+	if [[ $DECRYPT_OK -eq 0 ]]; then
+		echo -e "${RED}[ERROR] Incorrect decryption password! Decryption failed.${NC}"
+		echo -e "${YELLOW}The configuration remains protected and cannot be displayed.${NC}\n"
+		read -n1 -r -p "Press Enter to return..."
+		return
+	fi
+
+	echo -e "${GREEN}[✔] Password verified! Configuration decrypted successfully.${NC}\n"
+
+	# 1. DISPLAY PROFILE 1 (STEALTH ANTI-SCANNER) FIRST
+	if [[ -n "$CF_TEXT" && "$CF_TEXT" =~ "[Interface]" ]]; then
+		echo -e "\n${CYAN}${BOLD}📋 [1/2] Profile 1: Stealth Anti-Scanner & Cloudflare Gateway (Port ${SERVER_PORT:-4500}):${NC}"
 		echo -e "${YELLOW}🔒 Stored Encrypted (AES-256-CBC) in: ${EASY_DIR}/${TARGET_CLIENT}-cloudflare-shield.conf.enc${NC}\n"
 		echo "$CF_TEXT"
 		echo ""
 		if command -v qrencode &>/dev/null; then
-			echo -e "${CYAN}${BOLD}📱 [2/2] Scan Instance 2 Cloudflare Anti-Flag Residential Split QR Code:${NC}\n"
+			echo -e "${CYAN}${BOLD}📱 [1/2] Scan Profile 1 Cloudflare Anti-Flag Stealth QR Code (Port ${SERVER_PORT:-4500}):${NC}\n"
 			echo "$CF_TEXT" | qrencode -t ansiutf8
+			echo ""
+		fi
+	fi
+
+	# 2. DISPLAY PROFILE 2 (STANDARD FULL TUNNEL) SECOND
+	if [[ -n "$STD_TEXT" && "$STD_TEXT" =~ "[Interface]" ]]; then
+		echo -e "\n${GREEN}${BOLD}📋 [2/2] Profile 2: Standard Full Tunnel (Direct VPS Egress | Port ${SERVER_PORT:-4500}):${NC}"
+		echo -e "${YELLOW}🔒 Stored Encrypted (AES-256-CBC) in: ${EASY_DIR}/${TARGET_CLIENT}-standard.conf.enc${NC}\n"
+		echo "$STD_TEXT"
+		echo ""
+		if command -v qrencode &>/dev/null; then
+			echo -e "${PURPLE}${BOLD}📱 [2/2] Scan Profile 2 Standard Full Tunnel QR Code (Port ${SERVER_PORT:-4500}):${NC}\n"
+			echo "$STD_TEXT" | qrencode -t ansiutf8
 			echo ""
 		fi
 	fi
@@ -1277,8 +1384,8 @@ function exportDecryptedClientConfig() {
 	EASY_DIR=$(getEasyWgDir "${TARGET_CLIENT}")
 
 	echo -e "\nSelect Profile to Export:"
-	echo "1) Standard Full Tunnel (${TARGET_CLIENT}-standard.conf)"
-	echo "2) Cloudflare Anti-Flag Residential Split (${TARGET_CLIENT}-cloudflare-shield.conf)"
+	echo "1) Stealth Anti-Scanner & Cloudflare Gateway (${TARGET_CLIENT}-cloudflare-shield.conf) [Recommended Stealth]"
+	echo "2) Standard Full Tunnel (${TARGET_CLIENT}-standard.conf)"
 	echo "3) Both Profiles"
 	read -rp "Option [1-3, default 3]: " EXP_PROFILE_OPT
 	EXP_PROFILE_OPT=${EXP_PROFILE_OPT:-3}
@@ -1293,19 +1400,31 @@ function exportDecryptedClientConfig() {
 	local CONF_CF_ENC="${EASY_DIR}/${TARGET_CLIENT}-cloudflare-shield.conf.enc"
 	[[ ! -f "$CONF_CF_ENC" ]] && CONF_CF_ENC="/etc/wireguard/clients/${TARGET_CLIENT}-cloudflare-shield.conf.enc"
 
-	if [[ "$EXP_PROFILE_OPT" == "1" || "$EXP_PROFILE_OPT" == "3" ]]; then
-		local std_txt
-		std_txt=$(decryptConfigToString "$CONF_STD_ENC")
-		if [[ -n "$std_txt" ]]; then
-			echo "$std_txt" > "${DEST_DIR}/${TARGET_CLIENT}-standard.conf"
-			chmod 600 "${DEST_DIR}/${TARGET_CLIENT}-standard.conf"
-			echo -e "${GREEN}[✔] Exported: ${DEST_DIR}/${TARGET_CLIENT}-standard.conf${NC}"
-		fi
+	# PASSWORD GATEWAY: Prompt user for encryption password
+	echo -e "\n${PURPLE}🔒 PASSWORD PROTECTED EXPORT${NC}"
+	echo -e "Client '${BOLD}${TARGET_CLIENT}${NC}' configuration is encrypted."
+	read -s -rp "Enter decryption password for '${TARGET_CLIENT}': " ATTEMPT_PASS
+	echo ""
+
+	local std_txt=""
+	local cf_txt=""
+	[[ -f "$CONF_STD_ENC" ]] && std_txt=$(decryptConfigToString "$CONF_STD_ENC" "$ATTEMPT_PASS")
+	[[ -f "$CONF_CF_ENC" ]] && cf_txt=$(decryptConfigToString "$CONF_CF_ENC" "$ATTEMPT_PASS")
+
+	local DECRYPT_OK=0
+	if [[ -n "$cf_txt" && "$cf_txt" =~ "[Interface]" ]] || [[ -n "$std_txt" && "$std_txt" =~ "[Interface]" ]]; then
+		DECRYPT_OK=1
 	fi
 
-	if [[ "$EXP_PROFILE_OPT" == "2" || "$EXP_PROFILE_OPT" == "3" ]]; then
-		local cf_txt
-		cf_txt=$(decryptConfigToString "$CONF_CF_ENC")
+	if [[ $DECRYPT_OK -eq 0 ]]; then
+		echo -e "${RED}[ERROR] Incorrect decryption password! Export aborted.${NC}\n"
+		read -n1 -r -p "Press Enter to return..."
+		return
+	fi
+
+	echo -e "${GREEN}[✔] Password verified! Exporting decrypted files...${NC}"
+
+	if [[ "$EXP_PROFILE_OPT" == "1" || "$EXP_PROFILE_OPT" == "3" ]]; then
 		if [[ -n "$cf_txt" ]]; then
 			echo "$cf_txt" > "${DEST_DIR}/${TARGET_CLIENT}-cloudflare-shield.conf"
 			chmod 600 "${DEST_DIR}/${TARGET_CLIENT}-cloudflare-shield.conf"
@@ -1313,7 +1432,15 @@ function exportDecryptedClientConfig() {
 		fi
 	fi
 
-	echo -e "${YELLOW}⚠️ Notice: Decrypted files are in ${DEST_DIR}. Delete them when you have transferred them to your client device.${NC}\n"
+	if [[ "$EXP_PROFILE_OPT" == "2" || "$EXP_PROFILE_OPT" == "3" ]]; then
+		if [[ -n "$std_txt" ]]; then
+			echo "$std_txt" > "${DEST_DIR}/${TARGET_CLIENT}-standard.conf"
+			chmod 600 "${DEST_DIR}/${TARGET_CLIENT}-standard.conf"
+			echo -e "${GREEN}[✔] Exported: ${DEST_DIR}/${TARGET_CLIENT}-standard.conf${NC}"
+		fi
+	fi
+
+	echo -e "${YELLOW}⚠️ Notice: Decrypted files are in ${DEST_DIR}. Delete them when transferred to your client device.${NC}\n"
 	read -n1 -r -p "Press Enter to return..."
 }
 
@@ -1874,38 +2001,31 @@ RESOLV_CLEAN_EOF
 		systemctl restart systemd-resolved >/dev/null 2>&1 || true
 	fi
 
-	# 4. Safely reset and restore WireGuard interfaces (wg0 and wg1)
-	echo -e "${CYAN}[4/5] Restoring WireGuard interfaces (${SERVER_WG_NIC:-wg0} & wg1)...${NC}"
+	# 4. Safely reset and restore WireGuard interface (wg0)
+	echo -e "${CYAN}[4/5] Restoring Unified WireGuard interface (${SERVER_WG_NIC:-wg0})...${NC}"
 	if command -v wg-quick &>/dev/null; then
 		wg-quick down "${SERVER_WG_NIC:-wg0}" >/dev/null 2>&1 || true
 		ip link delete dev "${SERVER_WG_NIC:-wg0}" >/dev/null 2>&1 || true
-		if [[ -f "/etc/wireguard/wg1.conf" ]]; then
-			wg-quick down wg1 >/dev/null 2>&1 || true
-			ip link delete dev wg1 >/dev/null 2>&1 || true
-		fi
+		wg-quick down wg1 >/dev/null 2>&1 || true
+		ip link delete dev wg1 >/dev/null 2>&1 || true
+		rm -f "/etc/wireguard/wg1.conf"
+
 		systemctl daemon-reload >/dev/null 2>&1 || true
 		systemctl restart "wg-quick@${SERVER_WG_NIC:-wg0}" 2>/dev/null || wg-quick up "${SERVER_WG_NIC:-wg0}" 2>/dev/null || true
-		if [[ -f "/etc/wireguard/wg1.conf" ]]; then
-			systemctl restart "wg-quick@wg1" 2>/dev/null || wg-quick up wg1 2>/dev/null || true
-		fi
 	fi
 
-	# 5. Re-apply essential firewall NAT, MSS clamping and Forwarding rules for both instances
-	echo -e "${CYAN}[5/5] Re-applying stealth camouflage, FORWARD & NAT firewall rules for wg0 & wg1...${NC}"
-	local PORT_WG0="${SERVER_PORT:-4500}"
-	local PORT_WG1="${SERVER_PORT_CF:-$((PORT_WG0 + 1))}"
+	# 5. Re-apply essential firewall NAT, MSS clamping and Forwarding rules (Single Selected Port)
+	echo -e "${CYAN}[5/5] Re-applying stealth camouflage, FORWARD & NAT firewall rules on port ${SERVER_PORT:-4500}...${NC}"
+	local PORT_WG="${SERVER_PORT:-4500}"
 
-	# Ensure both UDP ports are allowed
-	iptables -I INPUT 1 -p udp --dport "${PORT_WG0}" -j ACCEPT 2>/dev/null || true
-	iptables -I INPUT 2 -p udp --dport "${PORT_WG1}" -j ACCEPT 2>/dev/null || true
+	# Ensure UDP port is allowed
+	iptables -I INPUT 1 -p udp --dport "${PORT_WG}" -j ACCEPT 2>/dev/null || true
 
-	# Unblock FORWARD chain unconditionally for both wg0 and wg1 (prevents dropped return packets)
+	# Unblock FORWARD chain unconditionally for both subnets (prevents dropped return packets)
 	iptables -I FORWARD 1 -i "${SERVER_WG_NIC:-wg0}" -j ACCEPT 2>/dev/null || true
 	iptables -I FORWARD 2 -o "${SERVER_WG_NIC:-wg0}" -j ACCEPT 2>/dev/null || true
-	iptables -I FORWARD 3 -i wg1 -j ACCEPT 2>/dev/null || true
-	iptables -I FORWARD 4 -o wg1 -j ACCEPT 2>/dev/null || true
-	iptables -I FORWARD 5 -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
-	iptables -I FORWARD 6 -s 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
+	iptables -I FORWARD 3 -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
+	iptables -I FORWARD 4 -s 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
 
 	# Ensure outgoing NAT (interface-agnostic masquerade)
 	iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 -j MASQUERADE 2>/dev/null || true
@@ -1921,20 +2041,21 @@ RESOLV_CLEAN_EOF
 	iptables -t mangle -I FORWARD 1 -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 	iptables -t mangle -I FORWARD 2 -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 
-	# Instance 2: Stealth Gateway (wg1) - Anti-Scanner MSS Clamping & Windows 11 TTL=128 Disguise
+	# Profile 1: Stealth Gateway (10.19.0.0/24) - Anti-Scanner MSS Clamping & Windows 11 TTL=128 Disguise
 	local TARGET_TTL=128
+	# Delete any legacy 1240 rules that fragment TLS ClientHello
+	iptables -t mangle -D FORWARD -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
+	iptables -t mangle -D FORWARD -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
 	iptables -t mangle -I FORWARD 3 -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 	iptables -t mangle -I FORWARD 4 -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-	iptables -t mangle -I FORWARD 5 -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
-	iptables -t mangle -I FORWARD 6 -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
 	iptables -t mangle -I POSTROUTING 1 -s 10.19.0.0/24 -j TTL --ttl-set ${TARGET_TTL} 2>/dev/null || true
 
 	applyDomainSplitRulesLive >/dev/null 2>&1 || true
 
 	if curl -sSf --max-time 4 https://www.cloudflare.com/cdn-cgi/trace >/dev/null 2>&1; then
-		echo -e "${GREEN}[✔] Health Auto-Repair COMPLETE: Host DNS, WireGuard forwarding (wg0 & wg1) verified!${NC}\n"
+		echo -e "${GREEN}[✔] Health Auto-Repair COMPLETE: Host DNS, WireGuard forwarding (Unified wg0:${PORT_WG}) verified!${NC}\n"
 	else
-		echo -e "${GREEN}[✔] Auto-Repair routines executed. Both WireGuard daemons active & traffic forwarding enabled.${NC}\n"
+		echo -e "${GREEN}[✔] Auto-Repair routines executed. Unified WireGuard daemon active & traffic forwarding enabled.${NC}\n"
 	fi
 }
 
@@ -2145,25 +2266,22 @@ function uninstallWg() {
 function manageMenu() {
 	while true; do
 		local WG0_STATUS="${RED}STOPPED${NC}"
-		local WG1_STATUS="${RED}STOPPED${NC}"
 		if systemctl is-active --quiet wg-quick@wg0 2>/dev/null || wg show wg0 &>/dev/null; then
 			WG0_STATUS="${GREEN}ACTIVE${NC}"
-		fi
-		if systemctl is-active --quiet wg-quick@wg1 2>/dev/null || wg show wg1 &>/dev/null; then
-			WG1_STATUS="${GREEN}ACTIVE${NC}"
 		fi
 
 		echo -e "\n${PURPLE}=================================================================${NC}"
 		echo -e "              ${GREEN}${BOLD}🍪  Cookie's Easy WireGuard Manager${NC}"
 		echo -e "${PURPLE}=================================================================${NC}"
-		echo -e "  ${BOLD}Instance 1 (Standard):${NC}  wg0 | Port ${SERVER_PORT:-4500}/udp | 10.18.0.0/24 [${WG0_STATUS}]"
-		echo -e "  ${BOLD}Instance 2 (Stealth Gateway):${NC} wg1 | Port ${SERVER_PORT_CF:-4501}/udp | 10.19.0.0/24 [${WG1_STATUS}]"
+		echo -e "  ${BOLD}Server Daemon (Unified):${NC}    wg0 | Port ${SERVER_PORT:-4500}/udp [${WG0_STATUS}]"
+		echo -e "  ${BOLD}Profile 1 (Stealth Gateway):${NC}10.19.0.0/24 (AmneziaWG Obfuscation, MTU 1360, Port ${SERVER_PORT:-4500})"
+		echo -e "  ${BOLD}Profile 2 (Standard):${NC}       10.18.0.0/24 (Direct VPS Egress, MTU 1420, Port ${SERVER_PORT:-4500})"
 		echo -e "${PURPLE}┌──────────────────────────────────────────────────────────────┐${NC}"
 		echo -e "${PURPLE}│${NC}                      ${CYAN}${BOLD}Main Menu Actions${NC}                       ${PURPLE}│${NC}"
 		echo -e "${PURPLE}├──────────────────────────────────────────────────────────────┤${NC}"
-		echo -e "${PURPLE}│${NC} ${BOLD}[1]${NC} Setup WireGuard servers (Instances 1 & 2)                ${PURPLE}│${NC}"
-		echo -e "${PURPLE}│${NC} ${BOLD}[2]${NC} Add new client (peer to both instances)                  ${PURPLE}│${NC}"
-		echo -e "${PURPLE}│${NC} ${BOLD}[3]${NC} Configure clients (Check/Edit/Remove)                   ${PURPLE}│${NC}"
+		echo -e "${PURPLE}│${NC} ${BOLD}[1]${NC} Setup WireGuard server (Unified Port for Both Profiles)   ${PURPLE}│${NC}"
+		echo -e "${PURPLE}│${NC} ${BOLD}[2]${NC} Add new client (Generates Standard & Stealth Profiles)    ${PURPLE}│${NC}"
+		echo -e "${PURPLE}│${NC} ${BOLD}[3]${NC} Configure clients (Check/Edit/Export/Remove)             ${PURPLE}│${NC}"
 		echo -e "${PURPLE}│${NC} ${BOLD}[4]${NC} Backup & Restore Manager                                 ${PURPLE}│${NC}"
 		echo -e "${PURPLE}│${NC} ${BOLD}[5]${NC} Domain-Based Split Tunneling                             ${PURPLE}│${NC}"
 		echo -e "${PURPLE}│${NC} ${BOLD}[6]${NC} Real-Time Logging (Errors)                               ${PURPLE}│${NC}"
@@ -2171,7 +2289,7 @@ function manageMenu() {
 		echo -e "${PURPLE}│${NC} ${BOLD}[8]${NC} Provision Web Management Console                         ${PURPLE}│${NC}"
 		echo -e "${PURPLE}│${NC} ${BOLD}[9]${NC} Stealth Anti-Scanner & Smart Egress Gateway Engine        ${PURPLE}│${NC}"
 		echo -e "${PURPLE}│${NC} ${BOLD}[10]${NC} Safe Network, DNS & WireGuard Health Auto-Repair       ${PURPLE}│${NC}"
-		echo -e "${PURPLE}│${NC} ${BOLD}[s]${NC} Settings (MTU, DNS, AllowedIPs, Network)                 ${PURPLE}│${NC}"
+		echo -e "${PURPLE}│${NC} ${BOLD}[s]${NC} Settings (Port, MTU, DNS, AllowedIPs)                    ${PURPLE}│${NC}"
 		echo -e "${PURPLE}│${NC} ${RED}${BOLD}[r] Remove WireGuard server from this system${NC}                 ${PURPLE}│${NC}"
 		echo -e "${PURPLE}│${NC} ${BOLD}[q]${NC} Exit                                                     ${PURPLE}│${NC}"
 		echo -e "${PURPLE}└──────────────────────────────────────────────────────────────┘${NC}"
@@ -2243,25 +2361,27 @@ function manageMenu() {
 # ------------------------------------------------------------------------------
 # 10. Script Entrypoint Execution
 # ------------------------------------------------------------------------------
-initialCheck
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+	initialCheck
 
-if [[ -e /etc/wireguard/params ]]; then
-	source /etc/wireguard/params
-fi
+	if [[ -e /etc/wireguard/params ]]; then
+		source /etc/wireguard/params
+	fi
 
-# Emergency command-line auto-repair flag
-if [[ "${1:-}" == "--repair" || "${1:-}" == "-r" || "${1:-}" == "repair" ]]; then
-	autoRepairNetwork
-	exit 0
-fi
+	# Emergency command-line auto-repair flag
+	if [[ "${1:-}" == "--repair" || "${1:-}" == "-r" || "${1:-}" == "repair" ]]; then
+		autoRepairNetwork
+		exit 0
+	fi
 
-# Emergency command-line clean/encrypt flag
-if [[ "${1:-}" == "--clean" || "${1:-}" == "--encrypt" || "${1:-}" == "-c" ]]; then
+	# Emergency command-line clean/encrypt flag
+	if [[ "${1:-}" == "--clean" || "${1:-}" == "--encrypt" || "${1:-}" == "-c" ]]; then
+		cleanupAndSecureRootFolder
+		exit 0
+	fi
+
+	# Clean loose .conf files from root directory and secure into easy_wireguard/
 	cleanupAndSecureRootFolder
-	exit 0
+
+	manageMenu
 fi
-
-# Clean loose .conf files from root directory and secure into easy_wireguard/
-cleanupAndSecureRootFolder
-
-manageMenu

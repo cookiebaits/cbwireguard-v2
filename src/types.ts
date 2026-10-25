@@ -94,6 +94,8 @@ export interface Peer {
   publicKey: string;
   privateKey: string;
   presharedKey: string;
+  cfPublicKey?: string;
+  cfPrivateKey?: string;
   allowedIps: string;
   dns: string;
   mtu: number;

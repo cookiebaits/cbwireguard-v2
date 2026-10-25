@@ -20,12 +20,12 @@ export const AddPeerModal: React.FC<AddPeerModalProps> = ({
   defaultAllowedIps,
 }) => {
   const [name, setName] = useState('');
-  const [instance, setInstance] = useState<'wg0' | 'wg1'>('wg0');
+  const [instance, setInstance] = useState<'wg0' | 'wg1'>('wg1');
   const [allowedIpsPreset, setAllowedIpsPreset] = useState<'full' | 'cloudflare' | 'stealth' | 'custom'>('full');
   const [customAllowedIps, setCustomAllowedIps] = useState('0.0.0.0/1, 128.0.0.0/1');
   const [dnsPreset, setDnsPreset] = useState<'cloudflare' | 'adguard' | 'quad9' | 'custom'>('cloudflare');
   const [customDns, setCustomDns] = useState(defaultDns);
-  const [mtu, setMtu] = useState(defaultMtu);
+  const [mtu, setMtu] = useState(1360);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -135,26 +135,9 @@ export const AddPeerModal: React.FC<AddPeerModalProps> = ({
 
           <div>
             <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
-              Target Server Instance
+              Target Server Profile
             </label>
             <div className="grid grid-cols-2 gap-2">
-              <button
-                type="button"
-                onClick={() => handleInstanceChange('wg0')}
-                className={`p-3 rounded-xl border text-left transition ${
-                  instance === 'wg0'
-                    ? 'bg-emerald-950/40 border-emerald-500 text-emerald-300 shadow-sm'
-                    : 'bg-[#070b14] border-slate-800 text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                <div className="font-bold text-xs flex items-center gap-1.5">
-                  <Server className="w-3.5 h-3.5 text-emerald-400" />
-                  Instance 1 (wg0)
-                </div>
-                <div className="text-[11px] font-medium text-emerald-400/90 mt-0.5">Standard WireGuard</div>
-                <div className="text-[10px] text-slate-500 mt-0.5 font-mono">Port 4500 • 10.18.0.x</div>
-              </button>
-
               <button
                 type="button"
                 onClick={() => handleInstanceChange('wg1')}
@@ -166,10 +149,27 @@ export const AddPeerModal: React.FC<AddPeerModalProps> = ({
               >
                 <div className="font-bold text-xs flex items-center gap-1.5">
                   <Cloud className="w-3.5 h-3.5 text-amber-400" />
-                  Instance 2 (wg1)
+                  Profile 1 (wg1/wg0)
                 </div>
                 <div className="text-[11px] font-medium text-amber-400/90 mt-0.5">Stealth Anti-Scanner</div>
-                <div className="text-[10px] text-slate-500 mt-0.5 font-mono">Port 4501 • 10.19.0.x</div>
+                <div className="text-[10px] text-slate-500 mt-0.5 font-mono">Unified Port • 10.19.0.x</div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handleInstanceChange('wg0')}
+                className={`p-3 rounded-xl border text-left transition ${
+                  instance === 'wg0'
+                    ? 'bg-emerald-950/40 border-emerald-500 text-emerald-300 shadow-sm'
+                    : 'bg-[#070b14] border-slate-800 text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <div className="font-bold text-xs flex items-center gap-1.5">
+                  <Server className="w-3.5 h-3.5 text-emerald-400" />
+                  Profile 2 (wg0)
+                </div>
+                <div className="text-[11px] font-medium text-emerald-400/90 mt-0.5">Standard WireGuard</div>
+                <div className="text-[10px] text-slate-500 mt-0.5 font-mono">Same Port • 10.18.0.x</div>
               </button>
             </div>
           </div>

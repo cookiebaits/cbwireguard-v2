@@ -8,8 +8,8 @@ interface QrModalProps {
   initialAntiFlag?: boolean;
 }
 
-export const QrModal: React.FC<QrModalProps> = ({ peer, onClose, initialAntiFlag = false }) => {
-  const [profileType, setProfileType] = useState<'standard' | 'antiFlag'>(initialAntiFlag ? 'antiFlag' : 'standard');
+export const QrModal: React.FC<QrModalProps> = ({ peer, onClose, initialAntiFlag = true }) => {
+  const [profileType, setProfileType] = useState<'antiFlag' | 'standard'>(initialAntiFlag ? 'antiFlag' : 'standard');
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
   const [rawConfig, setRawConfig] = useState<string>('');
   const [filename, setFilename] = useState<string>('');
@@ -60,17 +60,17 @@ export const QrModal: React.FC<QrModalProps> = ({ peer, onClose, initialAntiFlag
         {/* Header */}
         <div className="flex items-center justify-between border-b border-slate-800/80 pb-4 mb-4">
           <div className="flex items-center gap-3">
-            <div className="p-2.5 rounded-2xl bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+            <div className="p-2.5 rounded-2xl bg-amber-500/10 text-amber-400 border border-amber-500/20">
               <QrCode className="w-5 h-5" />
             </div>
             <div>
               <h2 className="text-base sm:text-lg font-bold text-slate-100 flex items-center gap-2 flex-wrap">
                 WireGuard Client Profile
-                <span className="text-xs px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 font-semibold">
+                <span className="text-xs px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-400 border border-amber-500/30 font-semibold">
                   {peer.name}
                 </span>
               </h2>
-              <p className="text-xs text-slate-400">Assigned Internal IP: <span className="font-mono text-emerald-300 font-semibold">{peer.ip}</span></p>
+              <p className="text-xs text-slate-400">Assigned Internal IP: <span className="font-mono text-amber-300 font-semibold">{peer.ip}</span></p>
             </div>
           </div>
           <button
@@ -81,27 +81,8 @@ export const QrModal: React.FC<QrModalProps> = ({ peer, onClose, initialAntiFlag
           </button>
         </div>
 
-        {/* Profile Mode Selector Tabs */}
-        {/* Profile Mode Selector Tabs */}
+        {/* Profile Mode Selector Tabs: Profile 1 Stealth First, Profile 2 Standard Second */}
         <div className="grid grid-cols-2 gap-2 mb-4 p-1 bg-[#070b14] rounded-2xl border border-slate-800">
-          <button
-            type="button"
-            onClick={() => setProfileType('standard')}
-            className={`flex flex-col items-center justify-center py-2 px-3 rounded-xl transition text-left text-xs ${
-              profileType === 'standard'
-                ? 'bg-gradient-to-r from-emerald-600 to-teal-600 text-white font-bold shadow-md shadow-emerald-950'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
-            }`}
-          >
-            <div className="flex items-center gap-1.5 font-bold">
-              <Shield className="w-3.5 h-3.5" />
-              <span>Instance 1: Standard Full Tunnel (wg0)</span>
-            </div>
-            <span className={`text-[10px] mt-0.5 ${profileType === 'standard' ? 'text-emerald-100' : 'text-slate-500'}`}>
-              Port 4500 • 0.0.0.0/0 • Direct VPS Egress
-            </span>
-          </button>
-
           <button
             type="button"
             onClick={() => setProfileType('antiFlag')}
@@ -113,10 +94,28 @@ export const QrModal: React.FC<QrModalProps> = ({ peer, onClose, initialAntiFlag
           >
             <div className="flex items-center gap-1.5 font-bold">
               <Cloud className="w-3.5 h-3.5" />
-              <span>Instance 2: Stealth Anti-Scanner Gateway (wg1)</span>
+              <span>Profile 1: Stealth Anti-Scanner</span>
             </div>
             <span className={`text-[10px] mt-0.5 ${profileType === 'antiFlag' ? 'text-amber-100' : 'text-slate-500'}`}>
-              Port 4501 • 0.0.0.0/0 • AmneziaWG Obfuscated & Scanner Protected
+              Unified Port • 10.19.0.x • AmneziaWG (MTU 1360)
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setProfileType('standard')}
+            className={`flex flex-col items-center justify-center py-2 px-3 rounded-xl transition text-left text-xs ${
+              profileType === 'standard'
+                ? 'bg-gradient-to-r from-emerald-600 to-teal-600 text-white font-bold shadow-md shadow-emerald-950'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+            }`}
+          >
+            <div className="flex items-center gap-1.5 font-bold">
+              <Shield className="w-3.5 h-3.5" />
+              <span>Profile 2: Standard WireGuard</span>
+            </div>
+            <span className={`text-[10px] mt-0.5 ${profileType === 'standard' ? 'text-emerald-100' : 'text-slate-500'}`}>
+              Same Port • 10.18.0.x • Direct VPS Egress (MTU 1420)
             </span>
           </button>
         </div>
@@ -126,14 +125,14 @@ export const QrModal: React.FC<QrModalProps> = ({ peer, onClose, initialAntiFlag
           <div className="flex items-start gap-2 p-2.5 mb-4 rounded-xl bg-amber-500/10 border border-amber-500/25 text-amber-200 text-xs">
             <CheckCircle2 className="w-4 h-4 shrink-0 text-amber-400 mt-0.5" />
             <div className="leading-relaxed">
-              <strong className="text-white">Instance 2 (Stealth Anti-Scanner Gateway wg1 | Port 4501):</strong> Clean AllowedIPs = 0.0.0.0/0 profile with AmneziaWG obfuscation, MTU 1360, Windows 11 TTL=128 disguise, active UDP scanner rate-limiting drop, Security DNS (94.140.14.14, 1.1.1.2), and server-side smart egress gateway!
+              <strong className="text-white">Profile 1 (Stealth Anti-Scanner & Cloudflare Gateway):</strong> Uses your selected port on subnet 10.19.0.0/24 with distinct cryptographic keys, AmneziaWG obfuscation, MTU 1360, Windows 11 TTL=128 disguise, active UDP scanner drop rate-limiting, and Security DNS (94.140.14.14, 1.1.1.2) to unblock LinkedIn and bypass Turnstile captcha loops.
             </div>
           </div>
         ) : (
           <div className="flex items-start gap-2 p-2.5 mb-4 rounded-xl bg-slate-800/60 border border-slate-700/60 text-slate-300 text-xs">
             <Shield className="w-4 h-4 shrink-0 text-slate-400 mt-0.5" />
             <div className="leading-relaxed">
-              <strong className="text-white">Instance 1 (Standard WireGuard wg0 | Port 4500):</strong> Pure canonical standard WireGuard full tunnel (AllowedIPs = 0.0.0.0/0, MTU 1420). 100% compatibility with Amazon, online checkout, banking, and general web browsing.
+              <strong className="text-white">Profile 2 (Standard WireGuard Full Tunnel):</strong> Uses the exact same selected port on subnet 10.18.0.0/24 with canonical WireGuard (MTU 1420, DNS 1.1.1.1). Direct VPS egress with zero packet mangling for 100% compatibility with Amazon, checkout, retail, and banking sites.
             </div>
           </div>
         )}

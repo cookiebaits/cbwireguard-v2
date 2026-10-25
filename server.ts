@@ -61,6 +61,8 @@ interface Peer {
   publicKey: string;
   privateKey: string;
   presharedKey: string;
+  cfPublicKey?: string;
+  cfPrivateKey?: string;
   allowedIps: string;
   dns: string;
   mtu: number;
@@ -319,7 +321,7 @@ let serverState = {
   interfaceName: 'wg0',
   publicIp: initialDetectedIp,
   listenPort: initialDetectedPort,
-  secondaryPort: initialDetectedPort === 4500 ? 4501 : (initialDetectedPort + 1),
+  secondaryPort: initialDetectedPort,
   webPort: initialDetectedWebPort,
   internalSubnet: '10.18.0.1/24',
   secondarySubnet: '10.19.0.1/24',
@@ -686,7 +688,20 @@ let splitServices: SplitService[] = [
     domain: 'linkedin.com',
     enabled: true,
     category: 'custom',
-    subdomains: ['linkedin.com', 'www.linkedin.com', 'licdn.com', 'media.licdn.com', 'static.licdn.com', 'lnkd.in'],
+    subdomains: [
+      'linkedin.com',
+      'www.linkedin.com',
+      'licdn.com',
+      'media.licdn.com',
+      'static.licdn.com',
+      'lnkd.in',
+      'platform.linkedin.com',
+      'dms.licdn.com',
+      'voyager.linkedin.com',
+      'media-exp1.licdn.com',
+      'snap.licdn.com',
+      'px.ads.linkedin.com',
+    ],
   },
   {
     id: 'cloudflare',
@@ -840,110 +855,82 @@ function maskKey(key: string): string {
   return key.slice(0, 4) + '••••••••••••••••••••••••••••••••••••' + key.slice(-4);
 }
 
-// Helper to construct WireGuard server config for wg0 (Standard) or wg1 (Stealth Anti-Scanner Gateway)
-function generateServerConfigText(iface: 'wg0' | 'wg1' = 'wg0'): string {
-  if (iface === 'wg1') {
-    const port = serverState.secondaryPort || (serverState.listenPort + 1);
-    let conf = `[Interface]
-Address = ${serverState.secondarySubnet || '10.19.0.1/24'}
-ListenPort = ${port}
-PrivateKey = ${serverState.serverPrivateKey}
-MTU = 1360
-SaveConfig = false
-
-# --- INSTANCE 2: STEALTH ANTI-SCANNER & SMART EGRESS GATEWAY ---
-# 1. Forwarding & NAT Masquerade
-PostUp = sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true
-PostUp = iptables -I INPUT 1 -p udp --dport ${port} -j ACCEPT 2>/dev/null || true
-PostUp = iptables -I INPUT 2 -p udp --dport ${port} -m recent --set --name WG1_SCANNER 2>/dev/null || true
-PostUp = iptables -I INPUT 3 -p udp --dport ${port} -m recent --update --seconds 10 --hitcount 25 --name WG1_SCANNER -j DROP 2>/dev/null || true
-PostUp = iptables -I FORWARD 1 -i wg1 -j ACCEPT 2>/dev/null || true
-PostUp = iptables -I FORWARD 2 -o wg1 -j ACCEPT 2>/dev/null || true
-PostUp = iptables -I FORWARD 3 -s 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
-PostUp = iptables -t nat -I POSTROUTING 1 -s 10.19.0.0/24 -j MASQUERADE 2>/dev/null || true
-
-# 2. Anti-Fragmentation TCP MSS Clamping (PMTU clamp + MSS 1240 cap to prevent packet drops on LinkedIn, Amazon, Cloudflare TLS)
-PostUp = iptables -t mangle -I FORWARD 1 -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-PostUp = iptables -t mangle -I FORWARD 2 -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-PostUp = iptables -t mangle -I FORWARD 3 -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
-PostUp = iptables -t mangle -I FORWARD 4 -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
-
-# 3. TTL=128 Windows 11 OS Emulation Disguise & Active UDP Scanner Rate-Limiting Drop
-PostUp = iptables -t mangle -I POSTROUTING 1 -s 10.19.0.0/24 -j TTL --ttl-set 128 2>/dev/null || true
-
-# Teardown Rules
-PostDown = iptables -D INPUT -p udp --dport ${port} -j ACCEPT 2>/dev/null || true
-PostDown = iptables -D INPUT -p udp --dport ${port} -m recent --update --seconds 10 --hitcount 25 --name WG1_SCANNER -j DROP 2>/dev/null || true
-PostDown = iptables -D INPUT -p udp --dport ${port} -m recent --set --name WG1_SCANNER 2>/dev/null || true
-PostDown = iptables -D FORWARD -i wg1 -j ACCEPT 2>/dev/null || true
-PostDown = iptables -D FORWARD -o wg1 -j ACCEPT 2>/dev/null || true
-PostDown = iptables -D FORWARD -s 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
-PostDown = iptables -t nat -D POSTROUTING -s 10.19.0.0/24 -j MASQUERADE 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
-PostDown = iptables -t mangle -D POSTROUTING -s 10.19.0.0/24 -j TTL --ttl-set 128 2>/dev/null || true
-
-# --- Instance 2 Configured Peers (10.19.0.x) ---
-`;
-    peers
-      .filter(p => p.enabled && (p.instance === 'wg1' || p.ip.startsWith('10.19.')))
-      .forEach(p => {
-        const clientIp = p.ip.startsWith('10.19.') ? p.ip : p.ip.replace('10.18.', '10.19.');
-        conf += `
-# Peer: ${p.name}
-[Peer]
-PublicKey = ${p.publicKey}
-PresharedKey = ${p.presharedKey}
-AllowedIPs = ${clientIp}/32
-`;
-      });
-    return conf;
-  }
-
-  // Otherwise Instance 1: Standard wg0
+// Helper to construct WireGuard server config for wg0 (Unified Standard + Stealth Gateway)
+function generateServerConfigText(_iface: 'wg0' | 'wg1' = 'wg0'): string {
+  const port = serverState.listenPort;
   let conf = `[Interface]
-Address = ${serverState.internalSubnet}
-ListenPort = ${serverState.listenPort}
+Address = ${serverState.internalSubnet}, ${serverState.secondarySubnet}
+ListenPort = ${port}
 PrivateKey = ${serverState.serverPrivateKey}
 MTU = 1420
 SaveConfig = false
 
-# --- INSTANCE 1: STANDARD WIREGUARD RULES (Canonical Direct VPS Egress) ---
-# 1. Forwarding & NAT Masquerade
+# ==============================================================================
+# 🍪 COOKIE'S UNIFIED WIREGUARD SERVER (Single Port: ${port}/udp)
+# Serves BOTH Standard Direct VPS Egress & Cloudflare Anti-Flag Profiles
+# ==============================================================================
+
+# --- 1. CORE NETWORKING & FIREWALL ---
 PostUp = sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true
-PostUp = iptables -I INPUT 1 -p udp --dport ${serverState.listenPort} -j ACCEPT 2>/dev/null || true
+PostUp = iptables -I INPUT 1 -p udp --dport ${port} -j ACCEPT 2>/dev/null || true
+PostUp = iptables -I INPUT 2 -p udp --dport ${port} -m recent --set --name WG_SCANNER 2>/dev/null || true
+PostUp = iptables -I INPUT 3 -p udp --dport ${port} -m recent --update --seconds 10 --hitcount 35 --name WG_SCANNER -j DROP 2>/dev/null || true
 PostUp = iptables -I FORWARD 1 -i wg0 -j ACCEPT 2>/dev/null || true
 PostUp = iptables -I FORWARD 2 -o wg0 -j ACCEPT 2>/dev/null || true
-PostUp = iptables -I FORWARD 3 -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
-PostUp = iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 -j MASQUERADE 2>/dev/null || true
+PostUp = iptables -I FORWARD 3 -s 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
+PostUp = iptables -I FORWARD 4 -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
+PostUp = iptables -t nat -I POSTROUTING 1 -s 10.19.0.0/24 -j MASQUERADE 2>/dev/null || true
+PostUp = iptables -t nat -I POSTROUTING 2 -s 10.18.0.0/24 -j MASQUERADE 2>/dev/null || true
 
-# 2. Canonical PMTU Clamping (Standard WireGuard specification)
-PostUp = iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+# --- 2. PROFILE 1: CLOUDFLARE ANTI-FLAG & STEALTH PROFILE (10.19.0.0/24) ---
+# Active UDP scanner drop, PMTU MSS Clamping (prevents TLS ClientHello fragmentation on LinkedIn / Akamai), Windows 11 TTL=128 disguise
+PostUp = iptables -t mangle -I FORWARD 1 -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+PostUp = iptables -t mangle -I FORWARD 2 -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+PostUp = iptables -t mangle -I POSTROUTING 1 -s 10.19.0.0/24 -j TTL --ttl-set 128 2>/dev/null || true
+
+# --- 3. PROFILE 2: STANDARD DIRECT VPS EGRESS (10.18.0.0/24) ---
+# Direct VPS egress, PMTU clamp only. 100% Amazon/shopping/banking compatibility.
+PostUp = iptables -t mangle -I FORWARD 3 -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+PostUp = iptables -t mangle -I FORWARD 4 -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 
 # Teardown Rules
-PostDown = iptables -D INPUT -p udp --dport ${serverState.listenPort} -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D INPUT -p udp --dport ${port} -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D INPUT -p udp --dport ${port} -m recent --update --seconds 10 --hitcount 35 --name WG_SCANNER -j DROP 2>/dev/null || true
+PostDown = iptables -D INPUT -p udp --dport ${port} -m recent --set --name WG_SCANNER 2>/dev/null || true
 PostDown = iptables -D FORWARD -i wg0 -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -o wg0 -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D FORWARD -s 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
+PostDown = iptables -t nat -D POSTROUTING -s 10.19.0.0/24 -j MASQUERADE 2>/dev/null || true
 PostDown = iptables -t nat -D POSTROUTING -s 10.18.0.0/24 -j MASQUERADE 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+PostDown = iptables -t mangle -D POSTROUTING -s 10.19.0.0/24 -j TTL --ttl-set 128 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 
-# --- Instance 1 Configured Peers (10.18.0.x) ---
+# --- Configured Peers ---
 `;
-  peers
-    .filter(p => p.enabled && (p.instance !== 'wg1' && !p.ip.startsWith('10.19.')))
-    .forEach(p => {
-      const clientIp = p.ip.startsWith('10.18.') ? p.ip : p.ip.replace('10.19.', '10.18.');
-      conf += `
-# Peer: ${p.name}
+
+  peers.filter(p => p.enabled).forEach(p => {
+    const stdIp = p.ip.startsWith('10.18.') ? p.ip : p.ip.replace('10.19.', '10.18.');
+    const cfIp = p.ip.startsWith('10.19.') ? p.ip : p.ip.replace('10.18.', '10.19.');
+    const cfKey = p.cfPublicKey || p.publicKey;
+
+    conf += `
+# Peer: ${p.name} [Profile 1: Cloudflare Anti-Flag & Stealth Gateway]
+[Peer]
+PublicKey = ${cfKey}
+PresharedKey = ${p.presharedKey}
+AllowedIPs = ${cfIp}/32
+
+# Peer: ${p.name} [Profile 2: Standard Profile - Direct Egress]
 [Peer]
 PublicKey = ${p.publicKey}
 PresharedKey = ${p.presharedKey}
-AllowedIPs = ${clientIp}/32
+AllowedIPs = ${stdIp}/32
 `;
-    });
+  });
 
   return conf;
 }
@@ -951,33 +938,48 @@ AllowedIPs = ${clientIp}/32
 // Mathematically exact complement string for compatibility
 export const CLOUDFLARE_BYPASS_ALLOWED_IPS = '0.0.0.0/0, ::/0';
 
-// Helper to construct Client WireGuard Config (Standard wg0 or Server-Side Stealth Gateway wg1)
+// Helper to construct Client WireGuard Config (Unified Port for both Profile 1 Stealth & Profile 2 Standard)
 function generateClientConfigText(peer: Peer, antiFlag: boolean = false): string {
-  const isInstance2 = antiFlag || peer.instance === 'wg1';
-  const targetPort = isInstance2 ? (serverState.secondaryPort || (serverState.listenPort + 1)) : serverState.listenPort;
-  const targetIp = isInstance2
+  const isAntiFlag = antiFlag || peer.instance === 'wg1';
+  // BOTH configurations strictly use the SAME port selected!
+  const targetPort = serverState.listenPort;
+  const targetIp = isAntiFlag
     ? (peer.ip.startsWith('10.19.') ? peer.ip : peer.ip.replace('10.18.', '10.19.'))
     : (peer.ip.startsWith('10.18.') ? peer.ip : peer.ip.replace('10.19.', '10.18.'));
+  const privateKey = isAntiFlag ? (peer.cfPrivateKey || peer.privateKey) : peer.privateKey;
 
-  if (isInstance2) {
+  if (isAntiFlag) {
     return `# ==============================================================================
-# ☁️ Instance 2: Stealth Anti-Scanner & Smart Egress Gateway Profile
-# Interface: wg1 | Port: ${targetPort} | Subnet: 10.19.0.0/24
+# ☁️ PROFILE 1: CLOUDFLARE ANTI-FLAG & STEALTH GATEWAY
+# ==============================================================================
+# • Protocol Mode: Stealth WireGuard / AmneziaWG Obfuscation Ready
+# • Port: ${targetPort} (Unified Port - Shared with Standard Profile)
+# • Subnet / Assigned IP: ${targetIp}/32 (Subnet: 10.19.0.0/24)
+# • MTU: 1360 (Anti-Fragmentation Cloudflare-Tuned MTU)
+# • DNS: 94.140.14.14, 1.1.1.2 (Encrypted Security DNS + ECS-Stripping)
+# • Target Use Case: Cloudflare Turnstile captcha bypass, LinkedIn 403 unblocking,
+#                    evading active ISP port scanners & anti-VPN deep inspection.
+# • Server Protections: Windows 11 Desktop TTL=128 Disguise, TCP MSS PMTU Clamping,
+#                       Active UDP Scanner Drop Rate-Limiting, Smart Egress Relay.
 #
-# AmneziaWG Obfuscation Ready:
-# Jc = 4 | Jmin = 40 | Jmax = 70 | S1 = 15 | S2 = 20 | H1 = 1 | H2 = 2 | H3 = 3 | H4 = 4
-#
-# Features:
-# 1. Active UDP Scanner Drop Rate-Limiting
-# 2. Windows 11 Desktop TTL=128 Disguise (Anti-p0f Scanner Defense)
-# 3. Encrypted Security DNS: 94.140.14.14, 1.1.1.2
-# 4. Clean AllowedIPs = 0.0.0.0/0 (Zero client add-ons!)
+# • AmneziaWG Obfuscation Parameters (for AmneziaWG / AWG clients):
+#   Jc = 4 | Jmin = 40 | Jmax = 70 | S1 = 15 | S2 = 20 | H1 = 1 | H2 = 2 | H3 = 3 | H4 = 4
 # ==============================================================================
 [Interface]
-PrivateKey = ${peer.privateKey}
+PrivateKey = ${privateKey}
 Address = ${targetIp}/32
 DNS = 94.140.14.14, 1.1.1.2
 MTU = 1360
+# AmneziaWG Obfuscation (Active when imported into AmneziaWG client):
+# Jc = 4
+# Jmin = 40
+# Jmax = 70
+# S1 = 15
+# S2 = 20
+# H1 = 1
+# H2 = 2
+# H3 = 3
+# H4 = 4
 
 [Peer]
 PublicKey = ${serverState.serverPublicKey}
@@ -989,11 +991,15 @@ PersistentKeepalive = 25
   }
 
   return `# ==============================================================================
-# 🛡️ Instance 1: Standard WireGuard Profile
-# Interface: wg0 | Port: ${targetPort} | Subnet: 10.18.0.0/24
-#
-# Canonical standard WireGuard full tunnel with MTU 1420.
-# Direct VPS egress for 100% compatibility with Amazon, banking, shopping, and web apps.
+# 🛡️ PROFILE 2: STANDARD WIREGUARD FULL-TUNNEL
+# ==============================================================================
+# • Protocol Mode: Canonical WireGuard (Direct VPS Egress)
+# • Port: ${targetPort} (Unified Port - Shared with Stealth Profile)
+# • Subnet / Assigned IP: ${targetIp}/32 (Subnet: 10.18.0.0/24)
+# • MTU: 1420 (Canonical WireGuard Standard MTU)
+# • DNS: ${peer.dns || '1.1.1.1, 1.0.0.1'} (High-Speed Standard Anycast)
+# • Target Use Case: Amazon checkout, online retail, banking, daily web browsing
+# • Zero packet mangling, zero DPI injection. 100% web compatible.
 # ==============================================================================
 [Interface]
 PrivateKey = ${peer.privateKey}
@@ -1114,8 +1120,21 @@ app.get('/api/server', requireVpnOrAuth, (_req: Request, res: Response) => {
 
   const instances: ServerInstanceInfo[] = [
     {
+      interfaceName: 'wg1',
+      name: 'Profile 1: Stealth Anti-Scanner Gateway',
+      mode: 'cloudflare_anti_flag',
+      listenPort: serverState.listenPort,
+      internalSubnet: '10.19.0.0/24',
+      status: serverState.status,
+      activePeersCount: wg1Peers.filter(p => p.enabled).length,
+      onlinePeersCount: wg1Peers.filter(p => p.enabled && p.isOnline).length,
+      totalRx: wg1Peers.reduce((sum, p) => sum + p.transferRx, 0),
+      totalTx: wg1Peers.reduce((sum, p) => sum + p.transferTx, 0),
+      description: 'AmneziaWG obfuscation parameters, MTU 1360, Windows 11 TTL=128 disguise, active UDP scanner drop rate-limiting, and Security DNS (Unified Port).',
+    },
+    {
       interfaceName: 'wg0',
-      name: 'Instance 1: Standard WireGuard',
+      name: 'Profile 2: Standard WireGuard Full Tunnel',
       mode: 'standard',
       listenPort: serverState.listenPort,
       internalSubnet: '10.18.0.0/24',
@@ -1124,20 +1143,7 @@ app.get('/api/server', requireVpnOrAuth, (_req: Request, res: Response) => {
       onlinePeersCount: wg0Peers.filter(p => p.enabled && p.isOnline).length,
       totalRx: wg0Peers.reduce((sum, p) => sum + p.transferRx, 0),
       totalTx: wg0Peers.reduce((sum, p) => sum + p.transferTx, 0),
-      description: 'Standard full-tunnel direct VPS egress. Clean routing on port 4500.',
-    },
-    {
-      interfaceName: 'wg1',
-      name: 'Instance 2: Stealth Anti-Scanner Gateway',
-      mode: 'cloudflare_anti_flag',
-      listenPort: serverState.secondaryPort || (serverState.listenPort + 1),
-      internalSubnet: '10.19.0.0/24',
-      status: serverState.status,
-      activePeersCount: wg1Peers.filter(p => p.enabled).length,
-      onlinePeersCount: wg1Peers.filter(p => p.enabled && p.isOnline).length,
-      totalRx: wg1Peers.reduce((sum, p) => sum + p.transferRx, 0),
-      totalTx: wg1Peers.reduce((sum, p) => sum + p.transferTx, 0),
-      description: 'AmneziaWG obfuscation parameters, MTU 1360, Windows 11 TTL=128 disguise, active UDP scanner drop rate-limiting, and Security DNS on port 4501.',
+      description: 'Standard full-tunnel direct VPS egress. Clean routing on unified port.',
     },
   ];
 
@@ -1228,6 +1234,7 @@ app.get('/api/clients', requireVpnOrAuth, (_req: Request, res: Response) => {
     ...p,
     privateKey: maskKey(p.privateKey),
     presharedKey: maskKey(p.presharedKey),
+    cfPrivateKey: p.cfPrivateKey ? maskKey(p.cfPrivateKey) : undefined,
   }));
 
   res.json({
@@ -1262,6 +1269,8 @@ app.post('/api/clients', requireVpnOrAuth, async (req: Request, res: Response) =
       publicKey: generateWgKey(),
       privateKey: generateWgKey(),
       presharedKey: generateWgKey(),
+      cfPublicKey: generateWgKey(),
+      cfPrivateKey: generateWgKey(),
       allowedIps: allowedIps || (isAntiFlag ? CLOUDFLARE_BYPASS_ALLOWED_IPS : serverState.defaultAllowedIps),
       dns: dns || serverState.defaultDns,
       mtu: mtu ? parseInt(mtu, 10) : (isAntiFlag ? 1360 : serverState.defaultMtu),
