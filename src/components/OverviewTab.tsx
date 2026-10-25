@@ -115,7 +115,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
           <div className="flex items-center justify-between pb-3 border-b border-slate-800">
             <div className="flex items-center gap-2">
               <span className="w-2.5 h-2.5 rounded-full bg-amber-400 shadow-md shadow-amber-400/50 animate-ping" />
-              <span className="text-xs font-bold text-slate-200 uppercase tracking-wider">Instance 2: Cloudflare Anti-Flag</span>
+              <span className="text-xs font-bold text-slate-200 uppercase tracking-wider">Instance 2: Server-Side Anti-Flag Gateway</span>
             </div>
             <span className="text-xs px-2.5 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/30 font-semibold font-mono">
               wg1 • Port {server?.secondaryPort || (server?.listenPort ? server.listenPort + 1 : 4501)}
@@ -125,10 +125,10 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
           <div className="mt-3.5 space-y-2">
             <div className="flex items-baseline justify-between">
               <span className="text-2xl font-black text-white font-mono">10.19.0.0/24</span>
-              <span className="text-xs text-amber-400 font-semibold">Turnstile & WAF Bypass</span>
+              <span className="text-xs text-amber-400 font-semibold">Zero Client Add-ons</span>
             </div>
             <p className="text-xs text-slate-400 leading-relaxed">
-              Eliminates Turnstile loops and 403 Ray ID blocks via 170-CIDR residential ISP complement and MSS 1360 clamping.
+              100% standard WireGuard profile (0.0.0.0/0). Server-side outbound WARP gateway, TCP MSS 1240 clamping & TTL=64 normalization unblock Amazon, LinkedIn, and Cloudflare transparently on the VPS.
             </p>
           </div>
 

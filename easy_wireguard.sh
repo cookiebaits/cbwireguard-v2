@@ -529,10 +529,10 @@ RESOLV_INIT
 	modprobe ipt_TTL >/dev/null 2>&1 || true
 	modprobe tcp_bbr >/dev/null 2>&1 || true
 
-	# Detect whether host genuinely supports IPv6 in kernel and networking stack
+	# Detect whether host genuinely supports IPv6 with active internet egress
 	local HAS_IPV6=0
 	if [[ -f /proc/net/if_inet6 ]] && [[ $(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || echo 1) -eq 0 ]]; then
-		if ip -6 addr show dev lo 2>/dev/null | grep -q inet6; then
+		if ip -6 route show default 2>/dev/null | grep -q "default"; then
 			HAS_IPV6=1
 		fi
 	fi
@@ -659,10 +659,10 @@ ENV_EOF
 Address = ${WG_SERVER_ADDRESS}
 ListenPort = ${SERVER_PORT}
 PrivateKey = ${SERVER_PRIV_KEY}
-MTU = 1420
+MTU = 1280
 SaveConfig = false
 
-# --- INSTANCE 1: STANDARD WIREGUARD RULES (Direct VPS Egress) ---
+# --- INSTANCE 1: STANDARD WIREGUARD RULES (Direct VPS Egress)
 PostUp = sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true
 PostUp = iptables -I INPUT 1 -p udp --dport ${SERVER_PORT} -j ACCEPT 2>/dev/null || true
 PostUp = iptables -I FORWARD 1 -i wg0 -j ACCEPT 2>/dev/null || true
@@ -671,8 +671,8 @@ PostUp = iptables -I FORWARD 3 -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
 PostUp = iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 -j MASQUERADE 2>/dev/null || true
 PostUp = iptables -t mangle -I FORWARD 1 -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 PostUp = iptables -t mangle -I FORWARD 2 -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-PostUp = iptables -t mangle -I FORWARD 3 -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1360 2>/dev/null || true
-PostUp = iptables -t mangle -I FORWARD 4 -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1360 2>/dev/null || true
+PostUp = iptables -t mangle -I FORWARD 3 -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
+PostUp = iptables -t mangle -I FORWARD 4 -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
 PostUp = iptables -t mangle -I POSTROUTING 1 -s 10.18.0.0/24 -j TTL --ttl-set 64 2>/dev/null || true
 PostDown = iptables -D INPUT -p udp --dport ${SERVER_PORT} -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -i wg0 -j ACCEPT 2>/dev/null || true
@@ -681,8 +681,8 @@ PostDown = iptables -D FORWARD -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
 PostDown = iptables -t nat -D POSTROUTING -s 10.18.0.0/24 -j MASQUERADE 2>/dev/null || true
 PostDown = iptables -t mangle -D FORWARD -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 PostDown = iptables -t mangle -D FORWARD -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1360 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1360 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
 PostDown = iptables -t mangle -D POSTROUTING -s 10.18.0.0/24 -j TTL --ttl-set 64 2>/dev/null || true
 WG_SERVER_EOF
 
@@ -710,8 +710,8 @@ PostUp = iptables -t nat -I POSTROUTING 1 -s 10.19.0.0/24 -j MASQUERADE 2>/dev/n
 # Anti-Fragmentation TCP MSS Clamping (PMTU clamp + MSS 1280 cap to prevent packet drops on Cloudflare TLS)
 PostUp = iptables -t mangle -I FORWARD 1 -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 PostUp = iptables -t mangle -I FORWARD 2 -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-PostUp = iptables -t mangle -I FORWARD 3 -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1280 2>/dev/null || true
-PostUp = iptables -t mangle -I FORWARD 4 -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1280 2>/dev/null || true
+PostUp = iptables -t mangle -I FORWARD 3 -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
+PostUp = iptables -t mangle -I FORWARD 4 -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
 
 # TTL=64 Normalization (Conceals VPS hop from passive OS fingerprinting / p0f)
 PostUp = iptables -t mangle -I POSTROUTING 1 -s 10.19.0.0/24 -j TTL --ttl-set 64 2>/dev/null || true
@@ -724,8 +724,8 @@ PostDown = iptables -D FORWARD -s 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
 PostDown = iptables -t nat -D POSTROUTING -s 10.19.0.0/24 -j MASQUERADE 2>/dev/null || true
 PostDown = iptables -t mangle -D FORWARD -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 PostDown = iptables -t mangle -D FORWARD -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1280 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1280 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
 PostDown = iptables -t mangle -D POSTROUTING -s 10.19.0.0/24 -j TTL --ttl-set 64 2>/dev/null || true
 WG_CF_EOF
 
@@ -764,7 +764,7 @@ WG_CF_EOF
 		echo "BYPASS" > /etc/wireguard/split_mode.txt
 
 		cat << 'CF_INIT_DOMAINS' > /etc/wireguard/split_domains.txt
-# Cloudflare Anti-Bot, WAF & Turnstile Shield Domains (Auto-Configured)
+# Cloudflare Anti-Bot, WAF & Turnstile Shield Domains
 challenges.cloudflare.com
 cloudflare.com
 turnstile.com
@@ -773,6 +773,27 @@ cloudflareinsights.com
 cf-assets.com
 pages.dev
 workers.dev
+
+# Amazon Search, Product Catalog & E-Commerce Autocomplete (Unblocks Amazon Search & Shopping)
+amazon.com
+www.amazon.com
+completion.amazon.com
+images-amazon.com
+media-amazon.com
+ssl-images-amazon.com
+aax.amazon-adsystem.com
+fls-na.amazon.com
+amazon.co.uk
+amazon.ca
+amazon.de
+
+# LinkedIn Professional Network & Media CDN (Unblocks LinkedIn HTTP 999 Datacenter Blocks)
+linkedin.com
+www.linkedin.com
+licdn.com
+media.licdn.com
+static.licdn.com
+lnkd.in
 CF_INIT_DOMAINS
 
 		applyDomainSplitRulesLive
@@ -947,7 +968,7 @@ function newClientInternal() {
 	local CF_SHIELD_CONF="/etc/wireguard/clients/${CLIENT_NAME}-cloudflare-shield.conf"
 
 	local HAS_SERVER_IPV6=0
-	if grep -q "fd42:42:42::" "/etc/wireguard/wg0.conf" 2>/dev/null; then
+	if grep -q "fd42:42:42::" "/etc/wireguard/wg0.conf" 2>/dev/null && ip -6 route show default 2>/dev/null | grep -q "default"; then
 		HAS_SERVER_IPV6=1
 	fi
 
@@ -971,7 +992,7 @@ function newClientInternal() {
 		STD_ALLOWED_IPS="0.0.0.0/0, ::/0"
 	fi
 
-	local CF_ALLOWED_IPS_LINE="0.0.0.0/2, 64.0.0.0/3, 96.0.0.0/6, 100.0.0.0/7, 102.0.0.0/8, 103.0.0.0/12, 103.16.0.0/14, 103.20.0.0/16, 103.21.0.0/17, 103.21.128.0/18, 103.21.192.0/19, 103.21.224.0/20, 103.21.240.0/22, 103.21.248.0/21, 103.22.0.0/17, 103.22.128.0/18, 103.22.192.0/21, 103.22.204.0/22, 103.22.208.0/20, 103.22.224.0/19, 103.23.0.0/16, 103.24.0.0/14, 103.28.0.0/15, 103.30.0.0/16, 103.31.0.0/22, 103.31.8.0/21, 103.31.16.0/20, 103.31.32.0/19, 103.31.64.0/18, 103.31.128.0/17, 103.32.0.0/11, 103.64.0.0/10, 103.128.0.0/9, 104.0.0.0/12, 104.28.0.0/14, 104.32.0.0/11, 104.64.0.0/10, 104.128.0.0/9, 105.0.0.0/8, 106.0.0.0/7, 108.0.0.0/9, 108.128.0.0/11, 108.160.0.0/15, 108.162.0.0/17, 108.162.128.0/18, 108.163.0.0/16, 108.164.0.0/14, 108.168.0.0/13, 108.176.0.0/12, 108.192.0.0/10, 109.0.0.0/8, 110.0.0.0/7, 112.0.0.0/4, 128.0.0.0/7, 130.0.0.0/8, 131.0.0.0/18, 131.0.64.0/21, 131.0.76.0/22, 131.0.80.0/20, 131.0.96.0/19, 131.0.128.0/17, 131.1.0.0/16, 131.2.0.0/15, 131.4.0.0/14, 131.8.0.0/13, 131.16.0.0/12, 131.32.0.0/11, 131.64.0.0/10, 131.128.0.0/9, 132.0.0.0/6, 136.0.0.0/6, 140.0.0.0/8, 141.0.0.0/10, 141.64.0.0/11, 141.96.0.0/14, 141.100.0.0/16, 141.101.0.0/18, 141.101.128.0/17, 141.102.0.0/15, 141.104.0.0/13, 141.112.0.0/12, 141.128.0.0/9, 142.0.0.0/7, 144.0.0.0/4, 160.0.0.0/7, 162.0.0.0/9, 162.128.0.0/12, 162.144.0.0/13, 162.152.0.0/14, 162.156.0.0/15, 162.160.0.0/11, 162.192.0.0/10, 163.0.0.0/8, 164.0.0.0/6, 168.0.0.0/6, 172.0.0.0/10, 172.72.0.0/13, 172.80.0.0/12, 172.96.0.0/11, 172.128.0.0/9, 173.0.0.0/9, 173.128.0.0/10, 173.192.0.0/11, 173.224.0.0/12, 173.240.0.0/14, 173.244.0.0/16, 173.245.0.0/19, 173.245.32.0/20, 173.245.64.0/18, 173.245.128.0/17, 173.246.0.0/15, 173.248.0.0/13, 174.0.0.0/7, 176.0.0.0/5, 184.0.0.0/6, 188.0.0.0/10, 188.64.0.0/11, 188.96.0.0/12, 188.112.0.0/15, 188.114.0.0/18, 188.114.64.0/19, 188.114.112.0/20, 188.114.128.0/17, 188.115.0.0/16, 188.116.0.0/14, 188.120.0.0/13, 188.128.0.0/9, 189.0.0.0/8, 190.0.0.0/10, 190.64.0.0/12, 190.80.0.0/13, 190.88.0.0/14, 190.92.0.0/16, 190.93.0.0/17, 190.93.128.0/18, 190.93.192.0/19, 190.93.224.0/20, 190.94.0.0/15, 190.96.0.0/11, 190.128.0.0/9, 191.0.0.0/8, 192.0.0.0/6, 196.0.0.0/8, 197.0.0.0/9, 197.128.0.0/10, 197.192.0.0/11, 197.224.0.0/13, 197.232.0.0/15, 197.234.0.0/17, 197.234.128.0/18, 197.234.192.0/19, 197.234.224.0/20, 197.234.244.0/22, 197.234.248.0/21, 197.235.0.0/16, 197.236.0.0/14, 197.240.0.0/12, 198.0.0.0/11, 198.32.0.0/13, 198.40.0.0/16, 198.41.0.0/17, 198.42.0.0/15, 198.44.0.0/14, 198.48.0.0/12, 198.64.0.0/10, 198.128.0.0/9, 199.0.0.0/8, 200.0.0.0/5, 208.0.0.0/4, 224.0.0.0/3"
+	local CF_ALLOWED_IPS_LINE="${STD_ALLOWED_IPS}"
 
 	# --------------------------------------------------------------------------
 	# 1. Build Instance 1 Standard Config Content (wg0 | Port 4500 | 10.18.0.x)
@@ -981,13 +1002,13 @@ function newClientInternal() {
 # ==============================================================================
 # 🛡️ Instance 1: Standard WireGuard Profile
 # Interface: wg0 | Port: ${SERVER_PORT} | Subnet: 10.18.0.0/24
-# Clean, direct VPS egress without Cloudflare split-routing.
+# Direct VPS egress full tunnel. Universal MTU 1280 & MSS 1240.
 # ==============================================================================
 [Interface]
 PrivateKey = ${CLIENT_PRIV_KEY}
 Address = ${CLIENT_ADDRESS}
 DNS = ${CLIENT_DNS_LINE}
-MTU = 1420
+MTU = 1280
 
 [Peer]
 PublicKey = ${SERVER_PUB_KEY}
@@ -999,24 +1020,26 @@ CLIENT_EOF
 )
 
 	# --------------------------------------------------------------------------
-	# 2. Build Instance 2 Cloudflare Anti-Flag Config Content (wg1 | Port 4501 | 10.19.0.x)
+	# 2. Build Instance 2 Server-Side Anti-Flag Config Content (wg1 | Port 4501 | 10.19.0.x)
 	# --------------------------------------------------------------------------
 	local CF_CONF_CONTENT
 	CF_CONF_CONTENT=$(cat << CF_CLIENT_EOF
 # ==============================================================================
-# ☁️ Instance 2: Dedicated Cloudflare Anti-Flag WireGuard Profile
+# ☁️ Instance 2: Server-Side Anti-Flag & Stealth WireGuard Profile
 # Interface: wg1 | Port: ${SERVER_PORT_CF} | Subnet: 10.19.0.0/24
 #
-# Solves Cloudflare WAF, Turnstile challenges, and Datacenter ASN blocks.
-# Routes all standard internet traffic securely through WireGuard VPS.
-# Routes all 15 Cloudflare edge CDN & Turnstile subnets directly via your home ISP,
-# preventing session IP mismatches and eliminating infinite verification loops.
+# Unblocks LinkedIn, Amazon Search/Retail & Cloudflare WAF & Turnstile.
+# 100% Standard WireGuard Profile (AllowedIPs = 0.0.0.0/0). Zero client add-ons!
+# Unblocking is handled transparently on the VPS via:
+# 1. Server-Side Outbound WARP Edge Relay Gateway
+# 2. Anti-Fragmentation TCP MSS 1240 Clamping
+# 3. TTL=64 Normalization & EDNS Client-Subnet (ECS) Stripping
 # ==============================================================================
 [Interface]
 PrivateKey = ${CLIENT_PRIV_KEY}
 Address = ${CLIENT_WG_CF_IPV4}/32
 DNS = ${CLIENT_DNS_LINE}
-MTU = 1360
+MTU = 1280
 
 [Peer]
 PublicKey = ${SERVER_PUB_KEY}
@@ -1882,10 +1905,16 @@ RESOLV_CLEAN_EOF
 	[[ -f /etc/wireguard/emulate_windows_ttl ]] && TARGET_TTL=128
 	iptables -t mangle -I FORWARD 1 -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 	iptables -t mangle -I FORWARD 2 -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-	iptables -t mangle -I FORWARD 3 -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-	iptables -t mangle -I FORWARD 4 -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+	iptables -t mangle -I FORWARD 3 -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
+	iptables -t mangle -I FORWARD 4 -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
+	iptables -t mangle -I FORWARD 5 -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+	iptables -t mangle -I FORWARD 6 -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+	iptables -t mangle -I FORWARD 7 -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
+	iptables -t mangle -I FORWARD 8 -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
 	iptables -t mangle -I POSTROUTING 1 -s 10.18.0.0/24 -j TTL --ttl-set ${TARGET_TTL} 2>/dev/null || true
 	iptables -t mangle -I POSTROUTING 2 -s 10.19.0.0/24 -j TTL --ttl-set ${TARGET_TTL} 2>/dev/null || true
+
+	applyDomainSplitRulesLive >/dev/null 2>&1 || true
 
 	if curl -sSf --max-time 4 https://www.cloudflare.com/cdn-cgi/trace >/dev/null 2>&1; then
 		echo -e "${GREEN}[✔] Health Auto-Repair COMPLETE: Host DNS, WireGuard forwarding (wg0 & wg1) verified!${NC}\n"

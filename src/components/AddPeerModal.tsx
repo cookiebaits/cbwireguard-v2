@@ -33,13 +33,8 @@ export const AddPeerModal: React.FC<AddPeerModalProps> = ({
 
   const handleInstanceChange = (selected: 'wg0' | 'wg1') => {
     setInstance(selected);
-    if (selected === 'wg1') {
-      setAllowedIpsPreset('cloudflare');
-      setMtu(1360);
-    } else {
-      setAllowedIpsPreset('full');
-      setMtu(1420);
-    }
+    setAllowedIpsPreset('full');
+    setMtu(1280);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -52,9 +47,8 @@ export const AddPeerModal: React.FC<AddPeerModalProps> = ({
     setSubmitting(true);
     setError(null);
 
-    let finalAllowedIps = defaultAllowedIps;
-    if (allowedIpsPreset === 'full') finalAllowedIps = '0.0.0.0/0, ::/0';
-    else if (allowedIpsPreset === 'cloudflare') finalAllowedIps = CLOUDFLARE_BYPASS_ALLOWED_IPS_STRING;
+    let finalAllowedIps = '0.0.0.0/0';
+    if (allowedIpsPreset === 'full' || allowedIpsPreset === 'cloudflare') finalAllowedIps = '0.0.0.0/0';
     else if (allowedIpsPreset === 'stealth') finalAllowedIps = '0.0.0.0/1, 128.0.0.0/1';
     else finalAllowedIps = customAllowedIps;
 
