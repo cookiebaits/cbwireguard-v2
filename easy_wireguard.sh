@@ -672,12 +672,22 @@ PostUp = iptables -I FORWARD 2 -o wg0 -m conntrack --ctstate RELATED,ESTABLISHED
 PostUp = iptables -I FORWARD 3 -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
 PostUp = iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 ! -o wg0 -j MASQUERADE 2>/dev/null || true
 PostUp = iptables -t nat -I POSTROUTING 2 -o ${SERVER_PUB_NIC} -j MASQUERADE 2>/dev/null || true
+PostUp = iptables -t mangle -I FORWARD 1 -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+PostUp = iptables -t mangle -I FORWARD 2 -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+PostUp = iptables -t mangle -I FORWARD 3 -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1360 2>/dev/null || true
+PostUp = iptables -t mangle -I FORWARD 4 -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1360 2>/dev/null || true
+PostUp = iptables -t mangle -I POSTROUTING 1 -s 10.18.0.0/24 -j TTL --ttl-set 64 2>/dev/null || true
 PostDown = iptables -D INPUT -p udp --dport ${SERVER_PORT} -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -i wg0 -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -o wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
 PostDown = iptables -t nat -D POSTROUTING -s 10.18.0.0/24 ! -o wg0 -j MASQUERADE 2>/dev/null || true
 PostDown = iptables -t nat -D POSTROUTING -o ${SERVER_PUB_NIC} -j MASQUERADE 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1360 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1360 2>/dev/null || true
+PostDown = iptables -t mangle -D POSTROUTING -s 10.18.0.0/24 -j TTL --ttl-set 64 2>/dev/null || true
 WG_SERVER_EOF
 
 	# --------------------------------------------------------------------------

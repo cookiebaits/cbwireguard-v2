@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Split, Plus, Trash2, CheckCircle2, Tv, Bot, Landmark, Globe, Shield, Cloud } from 'lucide-react';
+import { Split, Plus, Trash2, CheckCircle2, Tv, Bot, Landmark, Globe, Shield, Cloud, ShoppingBag } from 'lucide-react';
 import { SplitService } from '../types';
 
 export const SplitTunnelingTab: React.FC = () => {
@@ -70,6 +70,7 @@ export const SplitTunnelingTab: React.FC = () => {
   const getCategoryIcon = (cat: string, id?: string) => {
     if (id === 'cloudflare') return <Cloud className="w-4 h-4 text-amber-400" />;
     switch (cat) {
+      case 'shopping': return <ShoppingBag className="w-4 h-4 text-orange-400" />;
       case 'streaming': return <Tv className="w-4 h-4 text-emerald-400" />;
       case 'ai': return <Bot className="w-4 h-4 text-purple-400" />;
       case 'banking': return <Landmark className="w-4 h-4 text-amber-400" />;

@@ -639,7 +639,7 @@ interface SplitService {
   name: string;
   domain: string;
   enabled: boolean;
-  category: 'streaming' | 'ai' | 'banking' | 'custom';
+  category: 'shopping' | 'streaming' | 'ai' | 'banking' | 'custom';
   subdomains: string[];
 }
 
@@ -673,12 +673,44 @@ const CLOUDFLARE_IPV6_CIDRS = [
 
 let splitServices: SplitService[] = [
   {
+    id: 'amazon',
+    name: 'Amazon Retail, Search & Autocomplete',
+    domain: 'amazon.com',
+    enabled: true,
+    category: 'shopping',
+    subdomains: ['amazon.com', 'completion.amazon.com', 'images-amazon.com', 'media-amazon.com', 'ssl-images-amazon.com', 'amazon.co.uk', 'amazon.ca', 'amazon.de', 'amazon.fr', 'amazon.it', 'amazon.es', 'amazon.co.jp', 'aax.amazon-adsystem.com', 'fls-na.amazon.com', 'cloudfront.net'],
+  },
+  {
     id: 'cloudflare',
     name: 'Cloudflare WAF, Turnstile & Edge CDN Shield',
     domain: 'challenges.cloudflare.com',
     enabled: true,
     category: 'custom',
     subdomains: ['challenges.cloudflare.com', 'cloudflare.com', 'turnstile.com', 'cdnjs.cloudflare.com', 'cloudflareinsights.com', 'cf-assets.com', 'pages.dev', 'workers.dev'],
+  },
+  {
+    id: 'ecommerce',
+    name: 'E-Commerce & Major Retail Outlets (eBay, Target, Walmart)',
+    domain: 'ebay.com',
+    enabled: true,
+    category: 'shopping',
+    subdomains: ['ebay.com', 'walmart.com', 'target.com', 'bestbuy.com', 'etsy.com', 'homedepot.com'],
+  },
+  {
+    id: 'search_engines',
+    name: 'Search Engines & Anti-Bot Verification (Google, Bing, ReCAPTCHA)',
+    domain: 'google.com',
+    enabled: true,
+    category: 'custom',
+    subdomains: ['google.com', 'gstatic.com', 'recaptcha.net', 'bing.com', 'duckduckgo.com'],
+  },
+  {
+    id: 'primevideo',
+    name: 'Amazon Prime Video',
+    domain: 'primevideo.com',
+    enabled: true,
+    category: 'streaming',
+    subdomains: ['primevideo.com', 'amazonvideo.com', 'aiv-cdn.net', 'media-amazon.com'],
   },
   {
     id: 'disney',
@@ -695,14 +727,6 @@ let splitServices: SplitService[] = [
     enabled: true,
     category: 'streaming',
     subdomains: ['netflix.com', 'netflix.net', 'nflximg.net', 'nflxext.com', 'nflxvideo.net'],
-  },
-  {
-    id: 'primevideo',
-    name: 'Amazon Prime Video',
-    domain: 'primevideo.com',
-    enabled: false,
-    category: 'streaming',
-    subdomains: ['primevideo.com', 'amazonvideo.com', 'aiv-cdn.net', 'media-amazon.com'],
   },
   {
     id: 'max',
@@ -732,7 +756,7 @@ let splitServices: SplitService[] = [
     id: 'bofa',
     name: 'Bank of America',
     domain: 'bankofamerica.com',
-    enabled: false,
+    enabled: true,
     category: 'banking',
     subdomains: ['bankofamerica.com', 'bofa.com', 'bankofamerica.com.akadns.net'],
   },
@@ -890,6 +914,15 @@ PostUp = iptables -I FORWARD 3 -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
 PostUp = iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 ! -o wg0 -j MASQUERADE 2>/dev/null || true
 PostUp = iptables -t nat -I POSTROUTING 2 -o eth0 -j MASQUERADE 2>/dev/null || true
 
+# 2. Anti-Fragmentation TCP MSS Clamping (PMTU clamp + MSS 1360 cap to prevent packet drops on Amazon, Google & E-Commerce SSL handshakes)
+PostUp = iptables -t mangle -I FORWARD 1 -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+PostUp = iptables -t mangle -I FORWARD 2 -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+PostUp = iptables -t mangle -I FORWARD 3 -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1360 2>/dev/null || true
+PostUp = iptables -t mangle -I FORWARD 4 -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1360 2>/dev/null || true
+
+# 3. TTL=64 Normalization (Conceals VPS hop)
+PostUp = iptables -t mangle -I POSTROUTING 1 -s 10.18.0.0/24 -j TTL --ttl-set 64 2>/dev/null || true
+
 # Teardown Rules
 PostDown = iptables -D INPUT -p udp --dport ${serverState.listenPort} -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -i wg0 -j ACCEPT 2>/dev/null || true
@@ -897,6 +930,11 @@ PostDown = iptables -D FORWARD -o wg0 -m conntrack --ctstate RELATED,ESTABLISHED
 PostDown = iptables -D FORWARD -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
 PostDown = iptables -t nat -D POSTROUTING -s 10.18.0.0/24 ! -o wg0 -j MASQUERADE 2>/dev/null || true
 PostDown = iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1360 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1360 2>/dev/null || true
+PostDown = iptables -t mangle -D POSTROUTING -s 10.18.0.0/24 -j TTL --ttl-set 64 2>/dev/null || true
 
 # --- Instance 1 Configured Peers (10.18.0.x) ---
 `;

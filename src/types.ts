@@ -138,7 +138,7 @@ export interface SplitService {
   name: string;
   domain: string;
   enabled: boolean;
-  category: 'streaming' | 'ai' | 'banking' | 'custom';
+  category: 'shopping' | 'streaming' | 'ai' | 'banking' | 'custom';
   subdomains: string[];
 }
 
