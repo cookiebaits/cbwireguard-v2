@@ -34,7 +34,7 @@ export const AddPeerModal: React.FC<AddPeerModalProps> = ({
   const handleInstanceChange = (selected: 'wg0' | 'wg1') => {
     setInstance(selected);
     setAllowedIpsPreset('full');
-    setMtu(1280);
+    setMtu(selected === 'wg0' ? 1420 : 1360);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -168,7 +168,7 @@ export const AddPeerModal: React.FC<AddPeerModalProps> = ({
                   <Cloud className="w-3.5 h-3.5 text-amber-400" />
                   Instance 2 (wg1)
                 </div>
-                <div className="text-[11px] font-medium text-amber-400/90 mt-0.5">Cloudflare Anti-Flag</div>
+                <div className="text-[11px] font-medium text-amber-400/90 mt-0.5">Stealth Anti-Scanner</div>
                 <div className="text-[10px] text-slate-500 mt-0.5 font-mono">Port 4501 • 10.19.0.x</div>
               </button>
             </div>
@@ -264,7 +264,7 @@ export const AddPeerModal: React.FC<AddPeerModalProps> = ({
                 min={1200}
                 max={1500}
               />
-              <span className="text-[10px] text-emerald-400 font-medium">1420 = Optimized for anti-detection</span>
+              <span className="text-[10px] text-emerald-400 font-medium">1420 (Standard wg0) / 1360 (Stealth wg1)</span>
             </div>
           </div>
 

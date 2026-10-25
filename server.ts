@@ -329,8 +329,8 @@ let serverState = {
   bbrEnabled: true,
   mssClamping: true,
   dokployBridge: false,
-  defaultMtu: 1280,
-  defaultDns: '94.140.14.49, 9.9.9.9, 94.140.14.59',
+  defaultMtu: 1420,
+  defaultDns: '1.1.1.1, 1.0.0.1',
   defaultAllowedIps: '0.0.0.0/0',
   uptimeStartedAt: Date.now(),
   isRealSystemData: false,
@@ -840,7 +840,7 @@ function maskKey(key: string): string {
   return key.slice(0, 4) + '••••••••••••••••••••••••••••••••••••' + key.slice(-4);
 }
 
-// Helper to construct WireGuard server config for wg0 (Standard) or wg1 (Cloudflare Anti-Flag)
+// Helper to construct WireGuard server config for wg0 (Standard) or wg1 (Stealth Anti-Scanner Gateway)
 function generateServerConfigText(iface: 'wg0' | 'wg1' = 'wg0'): string {
   if (iface === 'wg1') {
     const port = serverState.secondaryPort || (serverState.listenPort + 1);
@@ -848,29 +848,33 @@ function generateServerConfigText(iface: 'wg0' | 'wg1' = 'wg0'): string {
 Address = ${serverState.secondarySubnet || '10.19.0.1/24'}
 ListenPort = ${port}
 PrivateKey = ${serverState.serverPrivateKey}
-MTU = 1280
+MTU = 1360
 SaveConfig = false
 
-# --- INSTANCE 2: DEDICATED CLOUDFLARE ANTI-FLAG & RESIDENTIAL BYPASS RULES ---
+# --- INSTANCE 2: STEALTH ANTI-SCANNER & SMART EGRESS GATEWAY ---
 # 1. Forwarding & NAT Masquerade
 PostUp = sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true
 PostUp = iptables -I INPUT 1 -p udp --dport ${port} -j ACCEPT 2>/dev/null || true
+PostUp = iptables -I INPUT 2 -p udp --dport ${port} -m recent --set --name WG1_SCANNER 2>/dev/null || true
+PostUp = iptables -I INPUT 3 -p udp --dport ${port} -m recent --update --seconds 10 --hitcount 25 --name WG1_SCANNER -j DROP 2>/dev/null || true
 PostUp = iptables -I FORWARD 1 -i wg1 -j ACCEPT 2>/dev/null || true
 PostUp = iptables -I FORWARD 2 -o wg1 -j ACCEPT 2>/dev/null || true
 PostUp = iptables -I FORWARD 3 -s 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
 PostUp = iptables -t nat -I POSTROUTING 1 -s 10.19.0.0/24 -j MASQUERADE 2>/dev/null || true
 
-# 2. Anti-Fragmentation TCP MSS Clamping (PMTU clamp + MSS 1240 cap to prevent packet drops on Cloudflare, Amazon, LinkedIn TLS)
+# 2. Anti-Fragmentation TCP MSS Clamping (PMTU clamp + MSS 1240 cap to prevent packet drops on LinkedIn, Amazon, Cloudflare TLS)
 PostUp = iptables -t mangle -I FORWARD 1 -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 PostUp = iptables -t mangle -I FORWARD 2 -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 PostUp = iptables -t mangle -I FORWARD 3 -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
 PostUp = iptables -t mangle -I FORWARD 4 -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
 
-# 3. TTL=64 Normalization (Conceals VPS hop from passive OS fingerprinting / p0f)
-PostUp = iptables -t mangle -I POSTROUTING 1 -s 10.19.0.0/24 -j TTL --ttl-set 64 2>/dev/null || true
+# 3. TTL=128 Windows 11 OS Emulation Disguise & Active UDP Scanner Rate-Limiting Drop
+PostUp = iptables -t mangle -I POSTROUTING 1 -s 10.19.0.0/24 -j TTL --ttl-set 128 2>/dev/null || true
 
 # Teardown Rules
 PostDown = iptables -D INPUT -p udp --dport ${port} -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D INPUT -p udp --dport ${port} -m recent --update --seconds 10 --hitcount 25 --name WG1_SCANNER -j DROP 2>/dev/null || true
+PostDown = iptables -D INPUT -p udp --dport ${port} -m recent --set --name WG1_SCANNER 2>/dev/null || true
 PostDown = iptables -D FORWARD -i wg1 -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -o wg1 -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -s 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
@@ -879,7 +883,7 @@ PostDown = iptables -t mangle -D FORWARD -s 10.19.0.0/24 -p tcp --tcp-flags SYN,
 PostDown = iptables -t mangle -D FORWARD -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 PostDown = iptables -t mangle -D FORWARD -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
 PostDown = iptables -t mangle -D FORWARD -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
-PostDown = iptables -t mangle -D POSTROUTING -s 10.19.0.0/24 -j TTL --ttl-set 64 2>/dev/null || true
+PostDown = iptables -t mangle -D POSTROUTING -s 10.19.0.0/24 -j TTL --ttl-set 128 2>/dev/null || true
 
 # --- Instance 2 Configured Peers (10.19.0.x) ---
 `;
@@ -903,10 +907,10 @@ AllowedIPs = ${clientIp}/32
 Address = ${serverState.internalSubnet}
 ListenPort = ${serverState.listenPort}
 PrivateKey = ${serverState.serverPrivateKey}
-MTU = 1280
+MTU = 1420
 SaveConfig = false
 
-# --- INSTANCE 1: STANDARD WIREGUARD RULES (Direct VPS Egress) ---
+# --- INSTANCE 1: STANDARD WIREGUARD RULES (Canonical Direct VPS Egress) ---
 # 1. Forwarding & NAT Masquerade
 PostUp = sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true
 PostUp = iptables -I INPUT 1 -p udp --dport ${serverState.listenPort} -j ACCEPT 2>/dev/null || true
@@ -915,14 +919,8 @@ PostUp = iptables -I FORWARD 2 -o wg0 -j ACCEPT 2>/dev/null || true
 PostUp = iptables -I FORWARD 3 -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
 PostUp = iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 -j MASQUERADE 2>/dev/null || true
 
-# 2. Anti-Fragmentation TCP MSS Clamping (PMTU clamp + MSS 1240 cap to prevent packet drops on Amazon, Google & E-Commerce SSL handshakes)
-PostUp = iptables -t mangle -I FORWARD 1 -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-PostUp = iptables -t mangle -I FORWARD 2 -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-PostUp = iptables -t mangle -I FORWARD 3 -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
-PostUp = iptables -t mangle -I FORWARD 4 -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
-
-# 3. TTL=64 Normalization (Conceals VPS hop)
-PostUp = iptables -t mangle -I POSTROUTING 1 -s 10.18.0.0/24 -j TTL --ttl-set 64 2>/dev/null || true
+# 2. Canonical PMTU Clamping (Standard WireGuard specification)
+PostUp = iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 
 # Teardown Rules
 PostDown = iptables -D INPUT -p udp --dport ${serverState.listenPort} -j ACCEPT 2>/dev/null || true
@@ -930,11 +928,7 @@ PostDown = iptables -D FORWARD -i wg0 -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -o wg0 -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
 PostDown = iptables -t nat -D POSTROUTING -s 10.18.0.0/24 -j MASQUERADE 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
-PostDown = iptables -t mangle -D POSTROUTING -s 10.18.0.0/24 -j TTL --ttl-set 64 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 
 # --- Instance 1 Configured Peers (10.18.0.x) ---
 `;
@@ -957,7 +951,7 @@ AllowedIPs = ${clientIp}/32
 // Mathematically exact complement string for compatibility
 export const CLOUDFLARE_BYPASS_ALLOWED_IPS = '0.0.0.0/0, ::/0';
 
-// Helper to construct Client WireGuard Config (Standard wg0 or Server-Side Anti-Flag Gateway wg1)
+// Helper to construct Client WireGuard Config (Standard wg0 or Server-Side Stealth Gateway wg1)
 function generateClientConfigText(peer: Peer, antiFlag: boolean = false): string {
   const isInstance2 = antiFlag || peer.instance === 'wg1';
   const targetPort = isInstance2 ? (serverState.secondaryPort || (serverState.listenPort + 1)) : serverState.listenPort;
@@ -967,21 +961,23 @@ function generateClientConfigText(peer: Peer, antiFlag: boolean = false): string
 
   if (isInstance2) {
     return `# ==============================================================================
-# ☁️ Instance 2: Server-Side Anti-Flag & Stealth WireGuard Profile
+# ☁️ Instance 2: Stealth Anti-Scanner & Smart Egress Gateway Profile
 # Interface: wg1 | Port: ${targetPort} | Subnet: 10.19.0.0/24
 #
-# Unblocks LinkedIn, Amazon Search/Retail, and Cloudflare WAF & Turnstile.
-# 100% Standard WireGuard Profile (AllowedIPs = 0.0.0.0/0). Zero client add-ons!
-# Unblocking is handled transparently on the VPS via:
-# 1. Server-Side Outbound WARP Edge Relay / Gateway
-# 2. Server-Side Anti-Fragmentation TCP MSS 1240 Clamping
-# 3. TTL=64 Normalization & EDNS Client-Subnet (ECS) Stripping
+# AmneziaWG Obfuscation Ready:
+# Jc = 4 | Jmin = 40 | Jmax = 70 | S1 = 15 | S2 = 20 | H1 = 1 | H2 = 2 | H3 = 3 | H4 = 4
+#
+# Features:
+# 1. Active UDP Scanner Drop Rate-Limiting
+# 2. Windows 11 Desktop TTL=128 Disguise (Anti-p0f Scanner Defense)
+# 3. Encrypted Security DNS: 94.140.14.14, 1.1.1.2
+# 4. Clean AllowedIPs = 0.0.0.0/0 (Zero client add-ons!)
 # ==============================================================================
 [Interface]
 PrivateKey = ${peer.privateKey}
 Address = ${targetIp}/32
-DNS = ${peer.dns || '1.1.1.1, 1.0.0.1'}
-MTU = 1280
+DNS = 94.140.14.14, 1.1.1.2
+MTU = 1360
 
 [Peer]
 PublicKey = ${serverState.serverPublicKey}
@@ -996,15 +992,14 @@ PersistentKeepalive = 25
 # 🛡️ Instance 1: Standard WireGuard Profile
 # Interface: wg0 | Port: ${targetPort} | Subnet: 10.18.0.0/24
 #
-# Clean, direct VPS egress full tunnel.
-# 100% of all internet traffic routes through the WireGuard VPS tunnel.
-# Universal MTU 1280 & MSS 1240 eliminates TLS ClientHello packet drops.
+# Canonical standard WireGuard full tunnel with MTU 1420.
+# Direct VPS egress for 100% compatibility with Amazon, banking, shopping, and web apps.
 # ==============================================================================
 [Interface]
 PrivateKey = ${peer.privateKey}
 Address = ${targetIp}/32
 DNS = ${peer.dns || '1.1.1.1, 1.0.0.1'}
-MTU = 1280
+MTU = 1420
 
 [Peer]
 PublicKey = ${serverState.serverPublicKey}
@@ -1133,7 +1128,7 @@ app.get('/api/server', requireVpnOrAuth, (_req: Request, res: Response) => {
     },
     {
       interfaceName: 'wg1',
-      name: 'Instance 2: Dedicated Cloudflare Anti-Flag',
+      name: 'Instance 2: Stealth Anti-Scanner Gateway',
       mode: 'cloudflare_anti_flag',
       listenPort: serverState.secondaryPort || (serverState.listenPort + 1),
       internalSubnet: '10.19.0.0/24',
@@ -1142,7 +1137,7 @@ app.get('/api/server', requireVpnOrAuth, (_req: Request, res: Response) => {
       onlinePeersCount: wg1Peers.filter(p => p.enabled && p.isOnline).length,
       totalRx: wg1Peers.reduce((sum, p) => sum + p.transferRx, 0),
       totalTx: wg1Peers.reduce((sum, p) => sum + p.transferTx, 0),
-      description: 'Zero-Challenge residential bypass (170-CIDR complement), MSS 1360 clamping, and TTL normalization on port 4501.',
+      description: 'AmneziaWG obfuscation parameters, MTU 1360, Windows 11 TTL=128 disguise, active UDP scanner drop rate-limiting, and Security DNS on port 4501.',
     },
   ];
 
@@ -1882,25 +1877,120 @@ app.delete('/api/geo-shield/rule', requireVpnOrAuth, (req: Request, res: Respons
   res.json({ success: true, customAllowList: geoShield.customAllowList, customBlockList: geoShield.customBlockList });
 });
 
+// Domain Bundle Map: Auto-expands apex domains to all associated CDN / media subdomains
+const DOMAIN_BUNDLE_MAP: Record<string, string[]> = {
+  'linkedin.com': [
+    'linkedin.com',
+    'www.linkedin.com',
+    'licdn.com',
+    'media.licdn.com',
+    'static.licdn.com',
+    'lnkd.in',
+    'media-exp1.licdn.com',
+    'media-exp2.licdn.com',
+    'platform.linkedin.com',
+  ],
+  'amazon.com': [
+    'amazon.com',
+    'www.amazon.com',
+    'completion.amazon.com',
+    'images-amazon.com',
+    'media-amazon.com',
+    'ssl-images-amazon.com',
+    'images-na.ssl-images-amazon.com',
+    'aax-us-east.amazon-adsystem.com',
+    'fls-na.amazon.com',
+    'amazon.co.uk',
+    'amazon.ca',
+    'amazon.de',
+  ],
+  'cloudflare.com': [
+    'challenges.cloudflare.com',
+    'cloudflare.com',
+    'turnstile.com',
+    'cdnjs.cloudflare.com',
+    'cloudflareinsights.com',
+    'cf-assets.com',
+    'pages.dev',
+    'workers.dev',
+  ],
+  'google.com': [
+    'google.com',
+    'www.google.com',
+    'gstatic.com',
+    'recaptcha.net',
+    'google-analytics.com',
+    'googletagmanager.com',
+  ],
+};
+
+function expandDomainBundles(domains: string[]): string[] {
+  const expanded = new Set<string>();
+  for (const raw of domains) {
+    const clean = raw.trim().toLowerCase();
+    if (!clean) continue;
+    expanded.add(clean);
+    for (const [key, bundle] of Object.entries(DOMAIN_BUNDLE_MAP)) {
+      if (clean === key || clean.endsWith('.' + key)) {
+        bundle.forEach(sub => expanded.add(sub));
+      }
+    }
+  }
+  return Array.from(expanded);
+}
+
+function syncSplitDomainsToHostFile() {
+  try {
+    const activeServiceDomains = splitServices
+      .filter(s => s.enabled)
+      .flatMap(s => s.subdomains);
+    const allDomains = expandDomainBundles([...activeServiceDomains, ...customBypassDomains]);
+    
+    if (fs.existsSync('/etc/wireguard')) {
+      fs.writeFileSync('/etc/wireguard/split_domains.txt', allDomains.join('\n') + '\n');
+      if (process.platform === 'linux') {
+        execSync('bash /root/easy_wireguard/easy_wireguard.sh --apply-split 2>/dev/null || bash easy_wireguard.sh --apply-split 2>/dev/null || true', { timeout: 5000 });
+      }
+    }
+  } catch (e) {}
+}
+
+// Alias routes for Stealth Gateway
+app.get('/api/stealth-gateway', requireVpnOrAuth, (req: Request, res: Response) => {
+  res.redirect('/api/cloudflare-shield');
+});
+app.post('/api/stealth-gateway/toggle', requireVpnOrAuth, (req: Request, res: Response) => {
+  req.url = '/api/cloudflare-shield/toggle';
+  app._router.handle(req, res, () => {});
+});
+
 // 5. Domain Split Tunneling API
 app.get('/api/split-tunneling', requireVpnOrAuth, (_req: Request, res: Response) => {
   res.json({
     services: splitServices,
     customDomains: customBypassDomains,
+    expandedDomainsCount: expandDomainBundles(customBypassDomains).length,
   });
 });
 
 app.post('/api/split-tunneling/toggle-service', requireVpnOrAuth, (req: Request, res: Response) => {
   const { id, enabled } = req.body;
   const svc = splitServices.find(s => s.id === id);
-  if (svc) svc.enabled = enabled;
+  if (svc) {
+    svc.enabled = enabled;
+    syncSplitDomainsToHostFile();
+  }
   res.json({ success: true, services: splitServices });
 });
 
 app.post('/api/split-tunneling/custom-domain', requireVpnOrAuth, (req: Request, res: Response) => {
   const { domain } = req.body;
-  if (domain && !customBypassDomains.includes(domain)) {
-    customBypassDomains.push(domain.trim().toLowerCase());
+  if (domain) {
+    const clean = domain.trim().toLowerCase();
+    if (!customBypassDomains.includes(clean)) {
+      customBypassDomains.push(clean);
+      syncSplitDomainsToHostFile();
+    }
   }
   res.json({ success: true, customDomains: customBypassDomains });
 });
@@ -1908,6 +1998,7 @@ app.post('/api/split-tunneling/custom-domain', requireVpnOrAuth, (req: Request, 
 app.delete('/api/split-tunneling/custom-domain', requireVpnOrAuth, (req: Request, res: Response) => {
   const { domain } = req.body;
   customBypassDomains = customBypassDomains.filter(d => d !== domain);
+  syncSplitDomainsToHostFile();
   res.json({ success: true, customDomains: customBypassDomains });
 });
 

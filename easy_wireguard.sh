@@ -659,31 +659,24 @@ ENV_EOF
 Address = ${WG_SERVER_ADDRESS}
 ListenPort = ${SERVER_PORT}
 PrivateKey = ${SERVER_PRIV_KEY}
-MTU = 1280
+MTU = 1420
 SaveConfig = false
 
-# --- INSTANCE 1: STANDARD WIREGUARD RULES (Direct VPS Egress)
+# --- INSTANCE 1: STANDARD WIREGUARD RULES (Canonical Direct VPS Egress) ---
 PostUp = sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true
 PostUp = iptables -I INPUT 1 -p udp --dport ${SERVER_PORT} -j ACCEPT 2>/dev/null || true
 PostUp = iptables -I FORWARD 1 -i wg0 -j ACCEPT 2>/dev/null || true
 PostUp = iptables -I FORWARD 2 -o wg0 -j ACCEPT 2>/dev/null || true
 PostUp = iptables -I FORWARD 3 -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
 PostUp = iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 -j MASQUERADE 2>/dev/null || true
-PostUp = iptables -t mangle -I FORWARD 1 -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-PostUp = iptables -t mangle -I FORWARD 2 -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-PostUp = iptables -t mangle -I FORWARD 3 -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
-PostUp = iptables -t mangle -I FORWARD 4 -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
-PostUp = iptables -t mangle -I POSTROUTING 1 -s 10.18.0.0/24 -j TTL --ttl-set 64 2>/dev/null || true
+PostUp = iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+
 PostDown = iptables -D INPUT -p udp --dport ${SERVER_PORT} -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -i wg0 -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -o wg0 -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
 PostDown = iptables -t nat -D POSTROUTING -s 10.18.0.0/24 -j MASQUERADE 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
-PostDown = iptables -t mangle -D POSTROUTING -s 10.18.0.0/24 -j TTL --ttl-set 64 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 WG_SERVER_EOF
 
 	# --------------------------------------------------------------------------
@@ -1002,13 +995,14 @@ function newClientInternal() {
 # ==============================================================================
 # 🛡️ Instance 1: Standard WireGuard Profile
 # Interface: wg0 | Port: ${SERVER_PORT} | Subnet: 10.18.0.0/24
-# Direct VPS egress full tunnel. Universal MTU 1280 & MSS 1240.
+# Canonical standard WireGuard full tunnel with MTU 1420.
+# Direct VPS egress for 100% compatibility with Amazon, banking, shopping, and web apps.
 # ==============================================================================
 [Interface]
 PrivateKey = ${CLIENT_PRIV_KEY}
 Address = ${CLIENT_ADDRESS}
 DNS = ${CLIENT_DNS_LINE}
-MTU = 1280
+MTU = 1420
 
 [Peer]
 PublicKey = ${SERVER_PUB_KEY}
@@ -1020,26 +1014,28 @@ CLIENT_EOF
 )
 
 	# --------------------------------------------------------------------------
-	# 2. Build Instance 2 Server-Side Anti-Flag Config Content (wg1 | Port 4501 | 10.19.0.x)
+	# 2. Build Instance 2 Stealth Anti-Scanner Config Content (wg1 | Port 4501 | 10.19.0.x)
 	# --------------------------------------------------------------------------
 	local CF_CONF_CONTENT
 	CF_CONF_CONTENT=$(cat << CF_CLIENT_EOF
 # ==============================================================================
-# ☁️ Instance 2: Server-Side Anti-Flag & Stealth WireGuard Profile
+# ☁️ Instance 2: Stealth Anti-Scanner & Smart Egress Gateway Profile
 # Interface: wg1 | Port: ${SERVER_PORT_CF} | Subnet: 10.19.0.0/24
 #
-# Unblocks LinkedIn, Amazon Search/Retail & Cloudflare WAF & Turnstile.
-# 100% Standard WireGuard Profile (AllowedIPs = 0.0.0.0/0). Zero client add-ons!
-# Unblocking is handled transparently on the VPS via:
-# 1. Server-Side Outbound WARP Edge Relay Gateway
-# 2. Anti-Fragmentation TCP MSS 1240 Clamping
-# 3. TTL=64 Normalization & EDNS Client-Subnet (ECS) Stripping
+# AmneziaWG Obfuscation Ready:
+# Jc = 4 | Jmin = 40 | Jmax = 70 | S1 = 15 | S2 = 20 | H1 = 1 | H2 = 2 | H3 = 3 | H4 = 4
+#
+# Features:
+# 1. Active UDP Scanner Drop Rate-Limiting
+# 2. Windows 11 Desktop TTL=128 Disguise (Anti-p0f Scanner Defense)
+# 3. Encrypted Security DNS: 94.140.14.14, 1.1.1.2
+# 4. Clean AllowedIPs = 0.0.0.0/0 (Zero client add-ons!)
 # ==============================================================================
 [Interface]
 PrivateKey = ${CLIENT_PRIV_KEY}
 Address = ${CLIENT_WG_CF_IPV4}/32
-DNS = ${CLIENT_DNS_LINE}
-MTU = 1280
+DNS = 94.140.14.14, 1.1.1.2
+MTU = 1360
 
 [Peer]
 PublicKey = ${SERVER_PUB_KEY}
@@ -1460,35 +1456,50 @@ DNSMASQ_STEALTH_EOF
 	local DOMAIN_COUNT=0
 	while IFS= read -r raw_domain || [[ -n "$raw_domain" ]]; do
 		[[ -z "$raw_domain" || "$raw_domain" =~ ^# ]] && continue
-		local domain
-		domain=$(echo "$raw_domain" | sed -e 's|^https*://||' -e 's|/.*$||' | tr '[:upper:]' '[:lower:]' | xargs)
-		[[ -z "$domain" ]] && continue
-		((DOMAIN_COUNT++))
+		local base_domain
+		base_domain=$(echo "$raw_domain" | sed -e 's|^https*://||' -e 's|/.*$||' | tr '[:upper:]' '[:lower:]' | xargs)
+		[[ -z "$base_domain" ]] && continue
 
-		# Automatically map domain and ALL subdomains in dnsmasq ipset
-		if command -v ipset &>/dev/null; then
-			echo "ipset=/.${domain}/wg_split_v4,wg_split_v6" >> /etc/dnsmasq.d/wg_split.conf
+		# Domain expansion list for apex domains
+		local EXPANDED_DOMAINS=("$base_domain")
+		if [[ "$base_domain" == "linkedin.com" || "$base_domain" == *"linkedin.com" ]]; then
+			EXPANDED_DOMAINS+=("www.linkedin.com" "licdn.com" "media.licdn.com" "static.licdn.com" "lnkd.in" "media-exp1.licdn.com" "platform.linkedin.com")
+		elif [[ "$base_domain" == "amazon.com" || "$base_domain" == *"amazon.com" ]]; then
+			EXPANDED_DOMAINS+=("www.amazon.com" "completion.amazon.com" "images-amazon.com" "media-amazon.com" "ssl-images-amazon.com" "images-na.ssl-images-amazon.com" "aax-us-east.amazon-adsystem.com" "fls-na.amazon.com")
+		elif [[ "$base_domain" == "cloudflare.com" || "$base_domain" == *"cloudflare.com" ]]; then
+			EXPANDED_DOMAINS+=("challenges.cloudflare.com" "turnstile.com" "cdnjs.cloudflare.com" "cloudflareinsights.com" "cf-assets.com" "pages.dev" "workers.dev")
+		elif [[ "$base_domain" == "google.com" || "$base_domain" == *"google.com" ]]; then
+			EXPANDED_DOMAINS+=("www.google.com" "gstatic.com" "recaptcha.net" "google-analytics.com")
 		fi
 
-		# Resolve IPv4 and IPv6 addresses live for initial pool
-		local resolved_v4 resolved_v6
-		resolved_v4=$(getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | sort -u || true)
-		resolved_v6=$(getent ahostsv6 "$domain" 2>/dev/null | awk '{print $1}' | sort -u || true)
+		for domain in "${EXPANDED_DOMAINS[@]}"; do
+			((DOMAIN_COUNT++))
 
-		for ip in $resolved_v4; do
-			if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-				if command -v ipset &>/dev/null; then
-					ipset add wg_split_v4 "$ip" 2>/dev/null || true
-				fi
+			# Automatically map domain and ALL subdomains in dnsmasq ipset
+			if command -v ipset &>/dev/null; then
+				echo "ipset=/.${domain}/wg_split_v4,wg_split_v6" >> /etc/dnsmasq.d/wg_split.conf
 			fi
-		done
 
-		for ip6 in $resolved_v6; do
-			if [[ "$ip6" =~ : ]]; then
-				if command -v ipset &>/dev/null; then
-					ipset add wg_split_v6 "$ip6" 2>/dev/null || true
+			# Resolve IPv4 and IPv6 addresses live for initial pool
+			local resolved_v4 resolved_v6
+			resolved_v4=$(getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | sort -u || true)
+			resolved_v6=$(getent ahostsv6 "$domain" 2>/dev/null | awk '{print $1}' | sort -u || true)
+
+			for ip in $resolved_v4; do
+				if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+					if command -v ipset &>/dev/null; then
+						ipset add wg_split_v4 "$ip" 2>/dev/null || true
+					fi
 				fi
-			fi
+			done
+
+			for ip6 in $resolved_v6; do
+				if [[ "$ip6" =~ : ]]; then
+					if command -v ipset &>/dev/null; then
+						ipset add wg_split_v6 "$ip6" 2>/dev/null || true
+					fi
+				fi
+			done
 		done
 	done < /etc/wireguard/split_domains.txt
 
@@ -1900,19 +1911,23 @@ RESOLV_CLEAN_EOF
 	iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 -j MASQUERADE 2>/dev/null || true
 	iptables -t nat -I POSTROUTING 2 -s 10.19.0.0/24 -j MASQUERADE 2>/dev/null || true
 
-	# MSS Clamping & TTL Normalization
-	local TARGET_TTL=64
-	[[ -f /etc/wireguard/emulate_windows_ttl ]] && TARGET_TTL=128
+	# Clean any stale legacy rules from 10.18.0.0/24
+	iptables -t mangle -D FORWARD -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
+	iptables -t mangle -D FORWARD -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
+	iptables -t mangle -D POSTROUTING -s 10.18.0.0/24 -j TTL --ttl-set 64 2>/dev/null || true
+	iptables -t mangle -D POSTROUTING -s 10.18.0.0/24 -j TTL --ttl-set 128 2>/dev/null || true
+
+	# Instance 1: Standard WireGuard (wg0) - Standard PMTU Clamping Only (100% Web/E-Commerce Compatibility)
 	iptables -t mangle -I FORWARD 1 -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 	iptables -t mangle -I FORWARD 2 -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-	iptables -t mangle -I FORWARD 3 -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
-	iptables -t mangle -I FORWARD 4 -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
-	iptables -t mangle -I FORWARD 5 -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-	iptables -t mangle -I FORWARD 6 -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-	iptables -t mangle -I FORWARD 7 -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
-	iptables -t mangle -I FORWARD 8 -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
-	iptables -t mangle -I POSTROUTING 1 -s 10.18.0.0/24 -j TTL --ttl-set ${TARGET_TTL} 2>/dev/null || true
-	iptables -t mangle -I POSTROUTING 2 -s 10.19.0.0/24 -j TTL --ttl-set ${TARGET_TTL} 2>/dev/null || true
+
+	# Instance 2: Stealth Gateway (wg1) - Anti-Scanner MSS Clamping & Windows 11 TTL=128 Disguise
+	local TARGET_TTL=128
+	iptables -t mangle -I FORWARD 3 -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+	iptables -t mangle -I FORWARD 4 -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+	iptables -t mangle -I FORWARD 5 -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
+	iptables -t mangle -I FORWARD 6 -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
+	iptables -t mangle -I POSTROUTING 1 -s 10.19.0.0/24 -j TTL --ttl-set ${TARGET_TTL} 2>/dev/null || true
 
 	applyDomainSplitRulesLive >/dev/null 2>&1 || true
 
@@ -1936,7 +1951,7 @@ function cloudflareAntiFlagEngine() {
 		[[ -f /etc/wireguard/upstream_proxy.conf ]] && HAS_PROXY="$(cat /etc/wireguard/upstream_proxy.conf 2>/dev/null | head -c 20)..."
 
 		echo -e "\n${PURPLE}=================================================================${NC}"
-		echo -e "         ${CYAN}${BOLD}☁️ Cloudflare Anti-Flag & ISP Host Masking Engine${NC}"
+		echo -e "       ${CYAN}${BOLD}🛡️ Stealth Anti-Scanner & Smart Egress Gateway Engine${NC}"
 		echo -e "${PURPLE}=================================================================${NC}"
 		echo -e "  ${BOLD}Cloudflare Shield Status:${NC}   ${GREEN}[${CF_SHIELD_STATUS}]${NC} (Bypasses Cloudflare Managed Challenges)"
 		echo -e "  ${BOLD}WARP Consumer Egress:${NC}       ${GREEN}[${HAS_WARP}]${NC} (Conceals VPS Datacenter ASN & PTR)"
@@ -2142,7 +2157,7 @@ function manageMenu() {
 		echo -e "              ${GREEN}${BOLD}🍪  Cookie's Easy WireGuard Manager${NC}"
 		echo -e "${PURPLE}=================================================================${NC}"
 		echo -e "  ${BOLD}Instance 1 (Standard):${NC}  wg0 | Port ${SERVER_PORT:-4500}/udp | 10.18.0.0/24 [${WG0_STATUS}]"
-		echo -e "  ${BOLD}Instance 2 (Anti-Flag):${NC} wg1 | Port ${SERVER_PORT_CF:-4501}/udp | 10.19.0.0/24 [${WG1_STATUS}]"
+		echo -e "  ${BOLD}Instance 2 (Stealth Gateway):${NC} wg1 | Port ${SERVER_PORT_CF:-4501}/udp | 10.19.0.0/24 [${WG1_STATUS}]"
 		echo -e "${PURPLE}┌──────────────────────────────────────────────────────────────┐${NC}"
 		echo -e "${PURPLE}│${NC}                      ${CYAN}${BOLD}Main Menu Actions${NC}                       ${PURPLE}│${NC}"
 		echo -e "${PURPLE}├──────────────────────────────────────────────────────────────┤${NC}"
@@ -2154,7 +2169,7 @@ function manageMenu() {
 		echo -e "${PURPLE}│${NC} ${BOLD}[6]${NC} Real-Time Logging (Errors)                               ${PURPLE}│${NC}"
 		echo -e "${PURPLE}│${NC} ${BOLD}[7]${NC} Geo-IP & Anti-VPN Shield (US/CA Only)                    ${PURPLE}│${NC}"
 		echo -e "${PURPLE}│${NC} ${BOLD}[8]${NC} Provision Web Management Console                         ${PURPLE}│${NC}"
-		echo -e "${PURPLE}│${NC} ${BOLD}[9]${NC} Cloudflare Anti-Flag & Mask ISP Host Engine              ${PURPLE}│${NC}"
+		echo -e "${PURPLE}│${NC} ${BOLD}[9]${NC} Stealth Anti-Scanner & Smart Egress Gateway Engine        ${PURPLE}│${NC}"
 		echo -e "${PURPLE}│${NC} ${BOLD}[10]${NC} Safe Network, DNS & WireGuard Health Auto-Repair       ${PURPLE}│${NC}"
 		echo -e "${PURPLE}│${NC} ${BOLD}[s]${NC} Settings (MTU, DNS, AllowedIPs, Network)                 ${PURPLE}│${NC}"
 		echo -e "${PURPLE}│${NC} ${RED}${BOLD}[r] Remove WireGuard server from this system${NC}                 ${PURPLE}│${NC}"

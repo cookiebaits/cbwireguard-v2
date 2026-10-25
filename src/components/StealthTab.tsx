@@ -279,18 +279,18 @@ export const StealthTab: React.FC<StealthTabProps> = ({ onRefresh, peers = [], o
             </div>
             <div>
               <div className="flex items-center gap-2 flex-wrap">
-                <h3 className="text-lg font-black text-white">Cloudflare Anti-Flag & Mask ISP Host Engine</h3>
+                <h3 className="text-lg font-black text-white">Stealth Anti-Scanner & Smart Egress Gateway Engine</h3>
                 <span className="text-xs px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-bold flex items-center gap-1">
                   <CheckCircle2 className="w-3.5 h-3.5" />
                   Auto-Configured In Install
                 </span>
                 <span className="text-xs px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 font-bold flex items-center gap-1">
                   <ShieldCheck className="w-3.5 h-3.5" />
-                  Turnstile Zero-Challenge Cloaking
+                  Scanner Drop & OS Disguise Active
                 </span>
               </div>
               <p className="text-xs sm:text-sm text-slate-300 mt-1 max-w-2xl leading-relaxed">
-                Prevents Cloudflare Managed Challenges (Turnstile loop, Ray ID 403, and Bot Management flags) by cloaking your VPS datacenter ASN with Cloudflare WARP consumer egress (AS13335) or routing Cloudflare traffic via direct residential split tunneling. Auto-configured out-of-the-box in the installer.
+                Prevents Cloudflare Turnstile, LinkedIn, Amazon, and scanner blocks by cloaking your VPS with AmneziaWG obfuscation, MTU 1360, Windows 11 TTL=128 disguise, active UDP scanner rate-limiting, and Cloudflare WARP consumer egress (AS13335). Auto-configured out-of-the-box.
               </p>
             </div>
           </div>

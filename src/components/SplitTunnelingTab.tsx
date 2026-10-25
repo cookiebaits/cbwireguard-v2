@@ -95,7 +95,7 @@ export const SplitTunnelingTab: React.FC = () => {
                 </span>
               </div>
               <p className="text-xs sm:text-sm text-slate-300 mt-1 max-w-2xl leading-relaxed">
-                Exclude popular streaming services and sensitive banking sites from the VPN tunnel. Traffic to these domains routes through the client's direct ISP, completely avoiding "VPN Detected" or "Forbidden Country" lockouts while securing all other web traffic.
+                Exclude streaming services, LinkedIn, Amazon, and banking sites from the VPN tunnel. Adding apex domains like <code className="text-purple-300 font-mono text-[11px]">linkedin.com</code> or <code className="text-purple-300 font-mono text-[11px]">amazon.com</code> automatically expands to all required CDN/media subdomains (<code className="text-purple-300 font-mono text-[11px]">licdn.com</code>, <code className="text-purple-300 font-mono text-[11px]">ssl-images-amazon.com</code>, etc.) and resolves active IPs into server-side forwarding rules.
               </p>
             </div>
           </div>
