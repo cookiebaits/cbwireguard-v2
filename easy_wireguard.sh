@@ -422,16 +422,10 @@ function installQuestions() {
 	echo -e "\n${CYAN}${BOLD}☁️ Cloudflare Anti-Flag & ISP Host Masking Engine Integration:${NC}"
 	echo -e "   • Auto-deploys TCP MSS Clamping & TTL Normalization (Anti-p0f OS signature disguise)"
 	echo -e "   • Auto-configures Cloudflare WAF, Turnstile & Edge CDN split-routing"
-	echo -e "   • Generates both Full Tunnel and Zero-Challenge Residential Bypass client profiles"
+	echo -e "   • Generates both Normal Full Tunnel and Zero-Challenge Residential Bypass client profiles"
 	echo -e "   • Strips EDNS Client-Subnet (ECS) to prevent VPS datacenter IP leaks"
-	read -rp "Auto-configure Cloudflare Anti-Flag & ISP Masking into install? [Y/n, default Y]: " CF_AUTO_ENABLE
-	if [[ "$CF_AUTO_ENABLE" =~ ^[Nn] ]]; then
-		CF_AUTO_ENABLE="n"
-		rm -f /etc/wireguard/cloudflare_shield_enabled /etc/wireguard/cloudflare_split_enabled /etc/wireguard/warp_egress_enabled 2>/dev/null || true
-		echo -e "${YELLOW}[!] Cloudflare Anti-Flag & ISP Masking bypassed. Standard full tunnel profile will be generated.${NC}"
-	else
-		CF_AUTO_ENABLE="y"
-	fi
+	echo -e "   ${GREEN}[✔] Auto-enabled: Generates BOTH Normal (Standard) and Anti-Flag (.conf) settings for instant copy & paste.${NC}"
+	CF_AUTO_ENABLE="y"
 
 	WEB_PORT=${WEB_PORT:-51821}
 
@@ -571,9 +565,11 @@ SYSCTL_V6_EOF
 	sysctl --system -q >/dev/null 2>&1 || sysctl -p "$SYSCTL_CONF" >/dev/null 2>&1 || true
 
 	# Ensure UFW / Firewalld unblock WireGuard UDP traffic & enable forwarding
+	local PORT_WG1="${SERVER_PORT_CF:-$((SERVER_PORT + 1))}"
 	if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
-		echo -e "${CYAN}[*] UFW firewall active. Allowing WireGuard port ${SERVER_PORT}/udp and enabling forwarding...${NC}"
+		echo -e "${CYAN}[*] UFW firewall active. Allowing WireGuard ports ${SERVER_PORT}/udp and ${PORT_WG1}/udp and enabling forwarding...${NC}"
 		ufw allow "${SERVER_PORT}/udp" >/dev/null 2>&1 || true
+		ufw allow "${PORT_WG1}/udp" >/dev/null 2>&1 || true
 		ufw allow "${WEB_PORT:-51821}/tcp" >/dev/null 2>&1 || true
 		if [ -f /etc/default/ufw ]; then
 			sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw 2>/dev/null || true
@@ -582,8 +578,9 @@ SYSCTL_V6_EOF
 	fi
 
 	if command -v firewall-cmd &>/dev/null && systemctl is-active --quiet firewalld 2>/dev/null; then
-		echo -e "${CYAN}[*] Firewalld active. Opening WireGuard UDP port ${SERVER_PORT}...${NC}"
+		echo -e "${CYAN}[*] Firewalld active. Opening WireGuard UDP ports ${SERVER_PORT} and ${PORT_WG1}...${NC}"
 		firewall-cmd --add-port="${SERVER_PORT}/udp" --permanent >/dev/null 2>&1 || true
+		firewall-cmd --add-port="${PORT_WG1}/udp" --permanent >/dev/null 2>&1 || true
 		firewall-cmd --add-port="${WEB_PORT:-51821}/tcp" --permanent >/dev/null 2>&1 || true
 		firewall-cmd --add-masquerade --permanent >/dev/null 2>&1 || true
 		firewall-cmd --reload >/dev/null 2>&1 || true
@@ -666,12 +663,12 @@ MTU = 1420
 SaveConfig = false
 
 # --- INSTANCE 1: STANDARD WIREGUARD RULES (Direct VPS Egress) ---
+PostUp = sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true
 PostUp = iptables -I INPUT 1 -p udp --dport ${SERVER_PORT} -j ACCEPT 2>/dev/null || true
 PostUp = iptables -I FORWARD 1 -i wg0 -j ACCEPT 2>/dev/null || true
-PostUp = iptables -I FORWARD 2 -o wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+PostUp = iptables -I FORWARD 2 -o wg0 -j ACCEPT 2>/dev/null || true
 PostUp = iptables -I FORWARD 3 -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
-PostUp = iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 ! -o wg0 -j MASQUERADE 2>/dev/null || true
-PostUp = iptables -t nat -I POSTROUTING 2 -o ${SERVER_PUB_NIC} -j MASQUERADE 2>/dev/null || true
+PostUp = iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 -j MASQUERADE 2>/dev/null || true
 PostUp = iptables -t mangle -I FORWARD 1 -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 PostUp = iptables -t mangle -I FORWARD 2 -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 PostUp = iptables -t mangle -I FORWARD 3 -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1360 2>/dev/null || true
@@ -679,10 +676,9 @@ PostUp = iptables -t mangle -I FORWARD 4 -d 10.18.0.0/24 -p tcp --tcp-flags SYN,
 PostUp = iptables -t mangle -I POSTROUTING 1 -s 10.18.0.0/24 -j TTL --ttl-set 64 2>/dev/null || true
 PostDown = iptables -D INPUT -p udp --dport ${SERVER_PORT} -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -i wg0 -j ACCEPT 2>/dev/null || true
-PostDown = iptables -D FORWARD -o wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D FORWARD -o wg0 -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
-PostDown = iptables -t nat -D POSTROUTING -s 10.18.0.0/24 ! -o wg0 -j MASQUERADE 2>/dev/null || true
-PostDown = iptables -t nat -D POSTROUTING -o ${SERVER_PUB_NIC} -j MASQUERADE 2>/dev/null || true
+PostDown = iptables -t nat -D POSTROUTING -s 10.18.0.0/24 -j MASQUERADE 2>/dev/null || true
 PostDown = iptables -t mangle -D FORWARD -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 PostDown = iptables -t mangle -D FORWARD -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 PostDown = iptables -t mangle -D FORWARD -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1360 2>/dev/null || true
@@ -704,35 +700,28 @@ MTU = 1360
 SaveConfig = false
 
 # --- INSTANCE 2: DEDICATED CLOUDFLARE ANTI-FLAG & RESIDENTIAL BYPASS RULES ---
+PostUp = sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true
 PostUp = iptables -I INPUT 1 -p udp --dport ${SERVER_PORT_CF} -j ACCEPT 2>/dev/null || true
 PostUp = iptables -I FORWARD 1 -i wg1 -j ACCEPT 2>/dev/null || true
-PostUp = iptables -I FORWARD 2 -o wg1 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+PostUp = iptables -I FORWARD 2 -o wg1 -j ACCEPT 2>/dev/null || true
 PostUp = iptables -I FORWARD 3 -s 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
-PostUp = iptables -t nat -I POSTROUTING 1 -s 10.19.0.0/24 ! -o wg1 -j MASQUERADE 2>/dev/null || true
-PostUp = iptables -t nat -I POSTROUTING 2 -o ${SERVER_PUB_NIC} -j MASQUERADE 2>/dev/null || true
+PostUp = iptables -t nat -I POSTROUTING 1 -s 10.19.0.0/24 -j MASQUERADE 2>/dev/null || true
 
-# 2. Transparent DNS Failover to 1.1.1.1:53 (UDP + TCP DNS guarantees zero DNS stall / blackhole)
-PostUp = iptables -t nat -I PREROUTING 1 -s 10.19.0.0/24 -p udp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
-PostUp = iptables -t nat -I PREROUTING 2 -s 10.19.0.0/24 -p tcp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
-
-# 3. Anti-Fragmentation TCP MSS Clamping (PMTU clamp + MSS 1280 cap to prevent packet drops on Cloudflare TLS)
+# Anti-Fragmentation TCP MSS Clamping (PMTU clamp + MSS 1280 cap to prevent packet drops on Cloudflare TLS)
 PostUp = iptables -t mangle -I FORWARD 1 -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 PostUp = iptables -t mangle -I FORWARD 2 -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 PostUp = iptables -t mangle -I FORWARD 3 -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1280 2>/dev/null || true
 PostUp = iptables -t mangle -I FORWARD 4 -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1280 2>/dev/null || true
 
-# 4. TTL=64 Normalization (Conceals VPS hop from passive OS fingerprinting / p0f)
+# TTL=64 Normalization (Conceals VPS hop from passive OS fingerprinting / p0f)
 PostUp = iptables -t mangle -I POSTROUTING 1 -s 10.19.0.0/24 -j TTL --ttl-set 64 2>/dev/null || true
 
 # Teardown Rules
 PostDown = iptables -D INPUT -p udp --dport ${SERVER_PORT_CF} -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -i wg1 -j ACCEPT 2>/dev/null || true
-PostDown = iptables -D FORWARD -o wg1 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D FORWARD -o wg1 -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -s 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
-PostDown = iptables -t nat -D POSTROUTING -s 10.19.0.0/24 ! -o wg1 -j MASQUERADE 2>/dev/null || true
-PostDown = iptables -t nat -D POSTROUTING -o ${SERVER_PUB_NIC} -j MASQUERADE 2>/dev/null || true
-PostDown = iptables -t nat -D PREROUTING -s 10.19.0.0/24 -p udp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
-PostDown = iptables -t nat -D PREROUTING -s 10.19.0.0/24 -p tcp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
+PostDown = iptables -t nat -D POSTROUTING -s 10.19.0.0/24 -j MASQUERADE 2>/dev/null || true
 PostDown = iptables -t mangle -D FORWARD -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 PostDown = iptables -t mangle -D FORWARD -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 PostDown = iptables -t mangle -D FORWARD -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1280 2>/dev/null || true
@@ -977,6 +966,13 @@ function newClientInternal() {
 	local EASY_DIR
 	EASY_DIR=$(getEasyWgDir "${CLIENT_NAME}")
 
+	local STD_ALLOWED_IPS="0.0.0.0/0"
+	if [[ "${HAS_SERVER_IPV6}" -eq 1 ]]; then
+		STD_ALLOWED_IPS="0.0.0.0/0, ::/0"
+	fi
+
+	local CF_ALLOWED_IPS_LINE="0.0.0.0/2, 64.0.0.0/3, 96.0.0.0/6, 100.0.0.0/7, 102.0.0.0/8, 103.0.0.0/12, 103.16.0.0/14, 103.20.0.0/16, 103.21.0.0/17, 103.21.128.0/18, 103.21.192.0/19, 103.21.224.0/20, 103.21.240.0/22, 103.21.248.0/21, 103.22.0.0/17, 103.22.128.0/18, 103.22.192.0/21, 103.22.204.0/22, 103.22.208.0/20, 103.22.224.0/19, 103.23.0.0/16, 103.24.0.0/14, 103.28.0.0/15, 103.30.0.0/16, 103.31.0.0/22, 103.31.8.0/21, 103.31.16.0/20, 103.31.32.0/19, 103.31.64.0/18, 103.31.128.0/17, 103.32.0.0/11, 103.64.0.0/10, 103.128.0.0/9, 104.0.0.0/12, 104.28.0.0/14, 104.32.0.0/11, 104.64.0.0/10, 104.128.0.0/9, 105.0.0.0/8, 106.0.0.0/7, 108.0.0.0/9, 108.128.0.0/11, 108.160.0.0/15, 108.162.0.0/17, 108.162.128.0/18, 108.163.0.0/16, 108.164.0.0/14, 108.168.0.0/13, 108.176.0.0/12, 108.192.0.0/10, 109.0.0.0/8, 110.0.0.0/7, 112.0.0.0/4, 128.0.0.0/7, 130.0.0.0/8, 131.0.0.0/18, 131.0.64.0/21, 131.0.76.0/22, 131.0.80.0/20, 131.0.96.0/19, 131.0.128.0/17, 131.1.0.0/16, 131.2.0.0/15, 131.4.0.0/14, 131.8.0.0/13, 131.16.0.0/12, 131.32.0.0/11, 131.64.0.0/10, 131.128.0.0/9, 132.0.0.0/6, 136.0.0.0/6, 140.0.0.0/8, 141.0.0.0/10, 141.64.0.0/11, 141.96.0.0/14, 141.100.0.0/16, 141.101.0.0/18, 141.101.128.0/17, 141.102.0.0/15, 141.104.0.0/13, 141.112.0.0/12, 141.128.0.0/9, 142.0.0.0/7, 144.0.0.0/4, 160.0.0.0/7, 162.0.0.0/9, 162.128.0.0/12, 162.144.0.0/13, 162.152.0.0/14, 162.156.0.0/15, 162.160.0.0/11, 162.192.0.0/10, 163.0.0.0/8, 164.0.0.0/6, 168.0.0.0/6, 172.0.0.0/10, 172.72.0.0/13, 172.80.0.0/12, 172.96.0.0/11, 172.128.0.0/9, 173.0.0.0/9, 173.128.0.0/10, 173.192.0.0/11, 173.224.0.0/12, 173.240.0.0/14, 173.244.0.0/16, 173.245.0.0/19, 173.245.32.0/20, 173.245.64.0/18, 173.245.128.0/17, 173.246.0.0/15, 173.248.0.0/13, 174.0.0.0/7, 176.0.0.0/5, 184.0.0.0/6, 188.0.0.0/10, 188.64.0.0/11, 188.96.0.0/12, 188.112.0.0/15, 188.114.0.0/18, 188.114.64.0/19, 188.114.112.0/20, 188.114.128.0/17, 188.115.0.0/16, 188.116.0.0/14, 188.120.0.0/13, 188.128.0.0/9, 189.0.0.0/8, 190.0.0.0/10, 190.64.0.0/12, 190.80.0.0/13, 190.88.0.0/14, 190.92.0.0/16, 190.93.0.0/17, 190.93.128.0/18, 190.93.192.0/19, 190.93.224.0/20, 190.94.0.0/15, 190.96.0.0/11, 190.128.0.0/9, 191.0.0.0/8, 192.0.0.0/6, 196.0.0.0/8, 197.0.0.0/9, 197.128.0.0/10, 197.192.0.0/11, 197.224.0.0/13, 197.232.0.0/15, 197.234.0.0/17, 197.234.128.0/18, 197.234.192.0/19, 197.234.224.0/20, 197.234.244.0/22, 197.234.248.0/21, 197.235.0.0/16, 197.236.0.0/14, 197.240.0.0/12, 198.0.0.0/11, 198.32.0.0/13, 198.40.0.0/16, 198.41.0.0/17, 198.42.0.0/15, 198.44.0.0/14, 198.48.0.0/12, 198.64.0.0/10, 198.128.0.0/9, 199.0.0.0/8, 200.0.0.0/5, 208.0.0.0/4, 224.0.0.0/3"
+
 	# --------------------------------------------------------------------------
 	# 1. Build Instance 1 Standard Config Content (wg0 | Port 4500 | 10.18.0.x)
 	# --------------------------------------------------------------------------
@@ -997,7 +993,7 @@ MTU = 1420
 PublicKey = ${SERVER_PUB_KEY}
 PresharedKey = ${CLIENT_PRE_SHARED_KEY}
 Endpoint = ${ENDPOINT_WG0}
-AllowedIPs = ${ALLOWED_IPS:-0.0.0.0/0, ::/0}
+AllowedIPs = ${STD_ALLOWED_IPS}
 PersistentKeepalive = 25
 CLIENT_EOF
 )
@@ -1026,19 +1022,7 @@ MTU = 1360
 PublicKey = ${SERVER_PUB_KEY}
 PresharedKey = ${CLIENT_PRE_SHARED_KEY}
 Endpoint = ${ENDPOINT_WG1}
-AllowedIPs = 0.0.0.0/2, 64.0.0.0/3, 96.0.0.0/6, 100.0.0.0/7, 102.0.0.0/8, 103.0.0.0/12, 103.16.0.0/14, 103.20.0.0/16, 103.21.0.0/17, 103.21.128.0/18, 103.21.192.0/19, 103.21.224.0/20, 103.21.240.0/22, 103.21.248.0/21
-AllowedIPs = 103.22.0.0/17, 103.22.128.0/18, 103.22.192.0/21, 103.22.204.0/22, 103.22.208.0/20, 103.22.224.0/19, 103.23.0.0/16, 103.24.0.0/14, 103.28.0.0/15, 103.30.0.0/16, 103.31.0.0/22, 103.31.8.0/21, 103.31.16.0/20, 103.31.32.0/19
-AllowedIPs = 103.31.64.0/18, 103.31.128.0/17, 103.32.0.0/11, 103.64.0.0/10, 103.128.0.0/9, 104.0.0.0/12, 104.28.0.0/14, 104.32.0.0/11, 104.64.0.0/10, 104.128.0.0/9, 105.0.0.0/8, 106.0.0.0/7, 108.0.0.0/9, 108.128.0.0/11
-AllowedIPs = 108.160.0.0/15, 108.162.0.0/17, 108.162.128.0/18, 108.163.0.0/16, 108.164.0.0/14, 108.168.0.0/13, 108.176.0.0/12, 108.192.0.0/10, 109.0.0.0/8, 110.0.0.0/7, 112.0.0.0/4, 128.0.0.0/7, 130.0.0.0/8, 131.0.0.0/18
-AllowedIPs = 131.0.64.0/21, 131.0.76.0/22, 131.0.80.0/20, 131.0.96.0/19, 131.0.128.0/17, 131.1.0.0/16, 131.2.0.0/15, 131.4.0.0/14, 131.8.0.0/13, 131.16.0.0/12, 131.32.0.0/11, 131.64.0.0/10, 131.128.0.0/9, 132.0.0.0/6
-AllowedIPs = 136.0.0.0/6, 140.0.0.0/8, 141.0.0.0/10, 141.64.0.0/11, 141.96.0.0/14, 141.100.0.0/16, 141.101.0.0/18, 141.101.128.0/17, 141.102.0.0/15, 141.104.0.0/13, 141.112.0.0/12, 141.128.0.0/9, 142.0.0.0/7, 144.0.0.0/4
-AllowedIPs = 160.0.0.0/7, 162.0.0.0/9, 162.128.0.0/12, 162.144.0.0/13, 162.152.0.0/14, 162.156.0.0/15, 162.160.0.0/11, 162.192.0.0/10, 163.0.0.0/8, 164.0.0.0/6, 168.0.0.0/6, 172.0.0.0/10, 172.72.0.0/13, 172.80.0.0/12
-AllowedIPs = 172.96.0.0/11, 172.128.0.0/9, 173.0.0.0/9, 173.128.0.0/10, 173.192.0.0/11, 173.224.0.0/12, 173.240.0.0/14, 173.244.0.0/16, 173.245.0.0/19, 173.245.32.0/20, 173.245.64.0/18, 173.245.128.0/17, 173.246.0.0/15, 173.248.0.0/13
-AllowedIPs = 174.0.0.0/7, 176.0.0.0/5, 184.0.0.0/6, 188.0.0.0/10, 188.64.0.0/11, 188.96.0.0/12, 188.112.0.0/15, 188.114.0.0/18, 188.114.64.0/19, 188.114.112.0/20, 188.114.128.0/17, 188.115.0.0/16, 188.116.0.0/14, 188.120.0.0/13
-AllowedIPs = 188.128.0.0/9, 189.0.0.0/8, 190.0.0.0/10, 190.64.0.0/12, 190.80.0.0/13, 190.88.0.0/14, 190.92.0.0/16, 190.93.0.0/17, 190.93.128.0/18, 190.93.192.0/19, 190.93.224.0/20, 190.94.0.0/15, 190.96.0.0/11, 190.128.0.0/9
-AllowedIPs = 191.0.0.0/8, 192.0.0.0/6, 196.0.0.0/8, 197.0.0.0/9, 197.128.0.0/10, 197.192.0.0/11, 197.224.0.0/13, 197.232.0.0/15, 197.234.0.0/17, 197.234.128.0/18, 197.234.192.0/19, 197.234.224.0/20, 197.234.244.0/22, 197.234.248.0/21
-AllowedIPs = 197.235.0.0/16, 197.236.0.0/14, 197.240.0.0/12, 198.0.0.0/11, 198.32.0.0/13, 198.40.0.0/16, 198.41.0.0/17, 198.42.0.0/15, 198.44.0.0/14, 198.48.0.0/12, 198.64.0.0/10, 198.128.0.0/9, 199.0.0.0/8, 200.0.0.0/5
-AllowedIPs = 208.0.0.0/4, 224.0.0.0/3
+AllowedIPs = ${CF_ALLOWED_IPS_LINE}
 PersistentKeepalive = 25
 CF_CLIENT_EOF
 )
@@ -1096,9 +1080,14 @@ CF_PEER_EOF
 	echo -e "  ${BOLD}Encrypted Anti-Flag Profile:${NC} ${YELLOW}${EASY_DIR}/${CLIENT_NAME}-cloudflare-shield.conf.enc${NC}"
 	echo -e "  ${BOLD}Access Control:${NC}              ${PURPLE}AES-256 PBKDF2 Encrypted. Can ONLY be read via ./easy_wireguard.sh or Web Console${NC}\n"
 
-	echo -e "${CYAN}${BOLD}📋 Decrypted Client Configuration Preview (${CLIENT_NAME}-standard.conf):${NC}"
+	echo -e "${GREEN}${BOLD}📋 [1/2] COPY & PASTE CONFIGURATION: NORMAL / STANDARD FULL TUNNEL (${CLIENT_NAME}-standard.conf):${NC}"
 	echo -e "${YELLOW}-----------------------------------------------------------------${NC}"
 	echo "$STD_CONF_CONTENT"
+	echo -e "${YELLOW}-----------------------------------------------------------------${NC}\n"
+
+	echo -e "${CYAN}${BOLD}📋 [2/2] COPY & PASTE CONFIGURATION: CLOUDFLARE ANTI-FLAG & ISP MASKING (${CLIENT_NAME}-cloudflare-shield.conf):${NC}"
+	echo -e "${YELLOW}-----------------------------------------------------------------${NC}"
+	echo "$CF_CONF_CONTENT"
 	echo -e "${YELLOW}-----------------------------------------------------------------${NC}\n"
 
 	if command -v qrencode &>/dev/null; then
@@ -1851,53 +1840,57 @@ RESOLV_CLEAN_EOF
 		systemctl restart systemd-resolved >/dev/null 2>&1 || true
 	fi
 
-	# 4. Safely reset and restore WireGuard interface
-	echo -e "${CYAN}[4/5] Restoring WireGuard interface (${SERVER_WG_NIC:-wg0})...${NC}"
+	# 4. Safely reset and restore WireGuard interfaces (wg0 and wg1)
+	echo -e "${CYAN}[4/5] Restoring WireGuard interfaces (${SERVER_WG_NIC:-wg0} & wg1)...${NC}"
 	if command -v wg-quick &>/dev/null; then
 		wg-quick down "${SERVER_WG_NIC:-wg0}" >/dev/null 2>&1 || true
 		ip link delete dev "${SERVER_WG_NIC:-wg0}" >/dev/null 2>&1 || true
+		if [[ -f "/etc/wireguard/wg1.conf" ]]; then
+			wg-quick down wg1 >/dev/null 2>&1 || true
+			ip link delete dev wg1 >/dev/null 2>&1 || true
+		fi
 		systemctl daemon-reload >/dev/null 2>&1 || true
 		systemctl restart "wg-quick@${SERVER_WG_NIC:-wg0}" 2>/dev/null || wg-quick up "${SERVER_WG_NIC:-wg0}" 2>/dev/null || true
+		if [[ -f "/etc/wireguard/wg1.conf" ]]; then
+			systemctl restart "wg-quick@wg1" 2>/dev/null || wg-quick up wg1 2>/dev/null || true
+		fi
 	fi
 
-	# 5. Re-apply essential firewall NAT, MSS clamping and Forwarding rules
-	echo -e "${CYAN}[5/5] Re-applying stealth camouflage, FORWARD & NAT firewall rules...${NC}"
-	local DEF_NIC="${SERVER_PUB_NIC}"
-	if [[ -z "$DEF_NIC" ]]; then
-		DEF_NIC=$(ip -4 route show default 2>/dev/null | awk '/dev/ {for (i=1; i<=NF; i++) if ($i == "dev") print $(i+1)}' | head -n1 || echo "eth0")
-	fi
-	# Unblock FORWARD chain for WireGuard clients
+	# 5. Re-apply essential firewall NAT, MSS clamping and Forwarding rules for both instances
+	echo -e "${CYAN}[5/5] Re-applying stealth camouflage, FORWARD & NAT firewall rules for wg0 & wg1...${NC}"
+	local PORT_WG0="${SERVER_PORT:-4500}"
+	local PORT_WG1="${SERVER_PORT_CF:-$((PORT_WG0 + 1))}"
+
+	# Ensure both UDP ports are allowed
+	iptables -I INPUT 1 -p udp --dport "${PORT_WG0}" -j ACCEPT 2>/dev/null || true
+	iptables -I INPUT 2 -p udp --dport "${PORT_WG1}" -j ACCEPT 2>/dev/null || true
+
+	# Unblock FORWARD chain unconditionally for both wg0 and wg1 (prevents dropped return packets)
 	iptables -I FORWARD 1 -i "${SERVER_WG_NIC:-wg0}" -j ACCEPT 2>/dev/null || true
-	iptables -I FORWARD 2 -o "${SERVER_WG_NIC:-wg0}" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
-	iptables -I FORWARD 3 -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
-	iptables -I FORWARD 4 -d 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
-	# Ensure outgoing NAT (interface-agnostic + default NIC)
-	iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 ! -o "${SERVER_WG_NIC:-wg0}" -j MASQUERADE 2>/dev/null || true
-	if [[ -n "$DEF_NIC" ]]; then
-		iptables -t nat -I POSTROUTING 2 -s 10.18.0.0/24 -o "${DEF_NIC}" -j MASQUERADE 2>/dev/null || true
-	fi
-	# Transparent DNS DNAT failover: if client requests 10.18.0.1:53, guarantee resolution via 1.1.1.1
-	iptables -I INPUT 1 -i "${SERVER_WG_NIC:-wg0}" -p udp --dport 53 -j ACCEPT 2>/dev/null || true
-	iptables -I INPUT 2 -i "${SERVER_WG_NIC:-wg0}" -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
-	iptables -t nat -D PREROUTING -i "${SERVER_WG_NIC:-wg0}" -d 10.18.0.1 -p udp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
-	iptables -t nat -D PREROUTING -i "${SERVER_WG_NIC:-wg0}" -d 10.18.0.1 -p tcp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
-	iptables -t nat -A PREROUTING -i "${SERVER_WG_NIC:-wg0}" -d 10.18.0.1 -p udp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
-	iptables -t nat -A PREROUTING -i "${SERVER_WG_NIC:-wg0}" -d 10.18.0.1 -p tcp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
+	iptables -I FORWARD 2 -o "${SERVER_WG_NIC:-wg0}" -j ACCEPT 2>/dev/null || true
+	iptables -I FORWARD 3 -i wg1 -j ACCEPT 2>/dev/null || true
+	iptables -I FORWARD 4 -o wg1 -j ACCEPT 2>/dev/null || true
+	iptables -I FORWARD 5 -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
+	iptables -I FORWARD 6 -s 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
+
+	# Ensure outgoing NAT (interface-agnostic masquerade)
+	iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 -j MASQUERADE 2>/dev/null || true
+	iptables -t nat -I POSTROUTING 2 -s 10.19.0.0/24 -j MASQUERADE 2>/dev/null || true
+
 	# MSS Clamping & TTL Normalization
 	local TARGET_TTL=64
 	[[ -f /etc/wireguard/emulate_windows_ttl ]] && TARGET_TTL=128
-	iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-	iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-	iptables -t mangle -D POSTROUTING -p tcp --tcp-flags SYN,RST SYN ! -o "${SERVER_WG_NIC:-wg0}" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-	iptables -t mangle -I POSTROUTING 1 -p tcp --tcp-flags SYN,RST SYN ! -o "${SERVER_WG_NIC:-wg0}" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-	iptables -t mangle -D POSTROUTING ! -o "${SERVER_WG_NIC:-wg0}" -j TTL --ttl-set 64 2>/dev/null || true
-	iptables -t mangle -D POSTROUTING ! -o "${SERVER_WG_NIC:-wg0}" -j TTL --ttl-set 128 2>/dev/null || true
-	iptables -t mangle -A POSTROUTING ! -o "${SERVER_WG_NIC:-wg0}" -j TTL --ttl-set ${TARGET_TTL} 2>/dev/null || true
+	iptables -t mangle -I FORWARD 1 -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+	iptables -t mangle -I FORWARD 2 -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+	iptables -t mangle -I FORWARD 3 -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+	iptables -t mangle -I FORWARD 4 -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+	iptables -t mangle -I POSTROUTING 1 -s 10.18.0.0/24 -j TTL --ttl-set ${TARGET_TTL} 2>/dev/null || true
+	iptables -t mangle -I POSTROUTING 2 -s 10.19.0.0/24 -j TTL --ttl-set ${TARGET_TTL} 2>/dev/null || true
 
 	if curl -sSf --max-time 4 https://www.cloudflare.com/cdn-cgi/trace >/dev/null 2>&1; then
-		echo -e "${GREEN}[✔] Health Auto-Repair COMPLETE: Host DNS, WireGuard forwarding and connectivity verified!${NC}\n"
+		echo -e "${GREEN}[✔] Health Auto-Repair COMPLETE: Host DNS, WireGuard forwarding (wg0 & wg1) verified!${NC}\n"
 	else
-		echo -e "${GREEN}[✔] Auto-Repair routines executed. WireGuard daemon active & traffic forwarding enabled.${NC}\n"
+		echo -e "${GREEN}[✔] Auto-Repair routines executed. Both WireGuard daemons active & traffic forwarding enabled.${NC}\n"
 	fi
 }
 

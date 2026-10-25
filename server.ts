@@ -331,7 +331,7 @@ let serverState = {
   dokployBridge: false,
   defaultMtu: 1420,
   defaultDns: '94.140.14.49, 9.9.9.9, 94.140.14.59',
-  defaultAllowedIps: '0.0.0.0/1, 128.0.0.0/1, ::/1, 8000::/1',
+  defaultAllowedIps: '0.0.0.0/0',
   uptimeStartedAt: Date.now(),
   isRealSystemData: false,
 };
@@ -845,35 +845,28 @@ SaveConfig = false
 
 # --- INSTANCE 2: DEDICATED CLOUDFLARE ANTI-FLAG & RESIDENTIAL BYPASS RULES ---
 # 1. Forwarding & NAT Masquerade
+PostUp = sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true
 PostUp = iptables -I INPUT 1 -p udp --dport ${port} -j ACCEPT 2>/dev/null || true
 PostUp = iptables -I FORWARD 1 -i wg1 -j ACCEPT 2>/dev/null || true
-PostUp = iptables -I FORWARD 2 -o wg1 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+PostUp = iptables -I FORWARD 2 -o wg1 -j ACCEPT 2>/dev/null || true
 PostUp = iptables -I FORWARD 3 -s 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
-PostUp = iptables -t nat -I POSTROUTING 1 -s 10.19.0.0/24 ! -o wg1 -j MASQUERADE 2>/dev/null || true
-PostUp = iptables -t nat -I POSTROUTING 2 -o eth0 -j MASQUERADE 2>/dev/null || true
+PostUp = iptables -t nat -I POSTROUTING 1 -s 10.19.0.0/24 -j MASQUERADE 2>/dev/null || true
 
-# 2. Transparent DNS Failover to 1.1.1.1:53 (UDP + TCP DNS guarantees zero DNS stall / blackhole)
-PostUp = iptables -t nat -I PREROUTING 1 -s 10.19.0.0/24 -p udp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
-PostUp = iptables -t nat -I PREROUTING 2 -s 10.19.0.0/24 -p tcp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
-
-# 3. Anti-Fragmentation TCP MSS Clamping (PMTU clamp + MSS 1280 cap to prevent packet drops on Cloudflare TLS)
+# 2. Anti-Fragmentation TCP MSS Clamping (PMTU clamp + MSS 1280 cap to prevent packet drops on Cloudflare TLS)
 PostUp = iptables -t mangle -I FORWARD 1 -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 PostUp = iptables -t mangle -I FORWARD 2 -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 PostUp = iptables -t mangle -I FORWARD 3 -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1280 2>/dev/null || true
 PostUp = iptables -t mangle -I FORWARD 4 -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1280 2>/dev/null || true
 
-# 4. TTL=64 Normalization (Conceals VPS hop from passive OS fingerprinting / p0f)
+# 3. TTL=64 Normalization (Conceals VPS hop from passive OS fingerprinting / p0f)
 PostUp = iptables -t mangle -I POSTROUTING 1 -s 10.19.0.0/24 -j TTL --ttl-set 64 2>/dev/null || true
 
 # Teardown Rules
 PostDown = iptables -D INPUT -p udp --dport ${port} -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -i wg1 -j ACCEPT 2>/dev/null || true
-PostDown = iptables -D FORWARD -o wg1 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D FORWARD -o wg1 -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -s 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
-PostDown = iptables -t nat -D POSTROUTING -s 10.19.0.0/24 ! -o wg1 -j MASQUERADE 2>/dev/null || true
-PostDown = iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE 2>/dev/null || true
-PostDown = iptables -t nat -D PREROUTING -s 10.19.0.0/24 -p udp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
-PostDown = iptables -t nat -D PREROUTING -s 10.19.0.0/24 -p tcp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
+PostDown = iptables -t nat -D POSTROUTING -s 10.19.0.0/24 -j MASQUERADE 2>/dev/null || true
 PostDown = iptables -t mangle -D FORWARD -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 PostDown = iptables -t mangle -D FORWARD -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 PostDown = iptables -t mangle -D FORWARD -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1280 2>/dev/null || true
@@ -907,12 +900,12 @@ SaveConfig = false
 
 # --- INSTANCE 1: STANDARD WIREGUARD RULES (Direct VPS Egress) ---
 # 1. Forwarding & NAT Masquerade
+PostUp = sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true
 PostUp = iptables -I INPUT 1 -p udp --dport ${serverState.listenPort} -j ACCEPT 2>/dev/null || true
 PostUp = iptables -I FORWARD 1 -i wg0 -j ACCEPT 2>/dev/null || true
-PostUp = iptables -I FORWARD 2 -o wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+PostUp = iptables -I FORWARD 2 -o wg0 -j ACCEPT 2>/dev/null || true
 PostUp = iptables -I FORWARD 3 -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
-PostUp = iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 ! -o wg0 -j MASQUERADE 2>/dev/null || true
-PostUp = iptables -t nat -I POSTROUTING 2 -o eth0 -j MASQUERADE 2>/dev/null || true
+PostUp = iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 -j MASQUERADE 2>/dev/null || true
 
 # 2. Anti-Fragmentation TCP MSS Clamping (PMTU clamp + MSS 1360 cap to prevent packet drops on Amazon, Google & E-Commerce SSL handshakes)
 PostUp = iptables -t mangle -I FORWARD 1 -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
@@ -926,10 +919,9 @@ PostUp = iptables -t mangle -I POSTROUTING 1 -s 10.18.0.0/24 -j TTL --ttl-set 64
 # Teardown Rules
 PostDown = iptables -D INPUT -p udp --dport ${serverState.listenPort} -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -i wg0 -j ACCEPT 2>/dev/null || true
-PostDown = iptables -D FORWARD -o wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D FORWARD -o wg0 -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
-PostDown = iptables -t nat -D POSTROUTING -s 10.18.0.0/24 ! -o wg0 -j MASQUERADE 2>/dev/null || true
-PostDown = iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE 2>/dev/null || true
+PostDown = iptables -t nat -D POSTROUTING -s 10.18.0.0/24 -j MASQUERADE 2>/dev/null || true
 PostDown = iptables -t mangle -D FORWARD -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 PostDown = iptables -t mangle -D FORWARD -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 PostDown = iptables -t mangle -D FORWARD -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1360 2>/dev/null || true
@@ -966,7 +958,7 @@ function generateClientConfigText(peer: Peer, antiFlag: boolean = false): string
     : (peer.ip.startsWith('10.18.') ? peer.ip : peer.ip.replace('10.19.', '10.18.'));
 
   if (isInstance2) {
-    const formattedAllowedIps = formatWireguardAllowedIps(CLOUDFLARE_BYPASS_CIDRS, 14);
+    const formattedAllowedIps = formatWireguardAllowedIps(CLOUDFLARE_BYPASS_CIDRS);
     return `# ==============================================================================
 # ☁️ Instance 2: Cloudflare Anti-Flag Dedicated WireGuard Profile
 # Interface: wg1 | Port: ${targetPort} | Subnet: 10.19.0.0/24
@@ -1008,7 +1000,7 @@ MTU = ${peer.mtu || 1420}
 PublicKey = ${serverState.serverPublicKey}
 PresharedKey = ${peer.presharedKey}
 Endpoint = ${serverState.publicIp}:${targetPort}
-AllowedIPs = ${peer.allowedIps || '0.0.0.0/0, ::/0'}
+AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25
 `;
 }
@@ -1563,6 +1555,8 @@ app.post('/api/cloudflare-shield/repair', requireVpnOrAuth, (_req: Request, res:
   try {
     // If running on a live Linux server with bash available
     if (process.platform === 'linux' && fs.existsSync('/etc/wireguard')) {
+      const portWg0 = serverState.listenPort || 4500;
+      const portWg1 = serverState.secondaryPort || (portWg0 + 1);
       execSync(`
         sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true
         sysctl -w net.ipv4.conf.all.forwarding=1 2>/dev/null || true
@@ -1575,26 +1569,26 @@ nameserver 8.8.8.8
 EOF_RESOLV
         cp /tmp/clean_resolv.conf /etc/resolv.conf 2>/dev/null || true
         rm -f /tmp/clean_resolv.conf
-        DEF_IF=$(ip -4 route show default 2>/dev/null | awk '/dev/ {for (i=1; i<=NF; i++) if ($i == "dev") print $(i+1)}' | head -n1 || echo eth0)
+        iptables -I INPUT 1 -p udp --dport ${portWg0} -j ACCEPT 2>/dev/null || true
+        iptables -I INPUT 2 -p udp --dport ${portWg1} -j ACCEPT 2>/dev/null || true
         iptables -I FORWARD 1 -i wg0 -j ACCEPT 2>/dev/null || true
-        iptables -I FORWARD 2 -o wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
-        iptables -I FORWARD 3 -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
-        iptables -I FORWARD 4 -d 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
-        iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 ! -o wg0 -j MASQUERADE 2>/dev/null || true
-        iptables -t nat -I POSTROUTING 2 -s 10.18.0.0/24 -o "$DEF_IF" -j MASQUERADE 2>/dev/null || true
-        iptables -I INPUT 1 -i wg0 -p udp --dport 53 -j ACCEPT 2>/dev/null || true
-        iptables -I INPUT 2 -i wg0 -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
-        iptables -t nat -D PREROUTING -i wg0 -d 10.18.0.1 -p udp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
-        iptables -t nat -D PREROUTING -i wg0 -d 10.18.0.1 -p tcp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
-        iptables -t nat -A PREROUTING -i wg0 -d 10.18.0.1 -p udp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
-        iptables -t nat -A PREROUTING -i wg0 -d 10.18.0.1 -p tcp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
-        iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-        iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-        iptables -t mangle -D POSTROUTING -p tcp --tcp-flags SYN,RST SYN ! -o wg0 -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-        iptables -t mangle -I POSTROUTING 1 -p tcp --tcp-flags SYN,RST SYN ! -o wg0 -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-        iptables -t mangle -D POSTROUTING ! -o wg0 -j TTL --ttl-set 64 2>/dev/null || true
-        iptables -t mangle -A POSTROUTING ! -o wg0 -j TTL --ttl-set 64 2>/dev/null || true
+        iptables -I FORWARD 2 -o wg0 -j ACCEPT 2>/dev/null || true
+        iptables -I FORWARD 3 -i wg1 -j ACCEPT 2>/dev/null || true
+        iptables -I FORWARD 4 -o wg1 -j ACCEPT 2>/dev/null || true
+        iptables -I FORWARD 5 -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
+        iptables -I FORWARD 6 -s 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
+        iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 -j MASQUERADE 2>/dev/null || true
+        iptables -t nat -I POSTROUTING 2 -s 10.19.0.0/24 -j MASQUERADE 2>/dev/null || true
+        iptables -t mangle -I FORWARD 1 -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+        iptables -t mangle -I FORWARD 2 -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+        iptables -t mangle -I FORWARD 3 -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+        iptables -t mangle -I FORWARD 4 -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+        iptables -t mangle -I POSTROUTING 1 -s 10.18.0.0/24 -j TTL --ttl-set 64 2>/dev/null || true
+        iptables -t mangle -I POSTROUTING 2 -s 10.19.0.0/24 -j TTL --ttl-set 64 2>/dev/null || true
         systemctl restart wg-quick@wg0 2>/dev/null || true
+        if [ -f /etc/wireguard/wg1.conf ]; then
+          systemctl restart wg-quick@wg1 2>/dev/null || true
+        fi
       `, { timeout: 8000, shell: '/bin/bash' });
     }
   } catch (err: any) {

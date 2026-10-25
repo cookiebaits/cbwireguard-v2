@@ -183,15 +183,9 @@ export const CLOUDFLARE_BYPASS_ALLOWED_IPS_STRING = CLOUDFLARE_BYPASS_CIDRS.join
 
 /**
  * Format AllowedIPs for WireGuard client configuration.
- * By chunking into multiple 'AllowedIPs = ...' lines (~15 CIDRs per line),
- * we prevent line buffer overflows in older GUI clients (Windows, iOS, Android)
- * while remaining 100% compliant with the official WireGuard configuration specification.
+ * All WireGuard client parsers (Windows GUI, iOS, Android, macOS, Linux wg-quick)
+ * require AllowedIPs as a single comma-separated line.
  */
-export function formatWireguardAllowedIps(cidrs: string[] = CLOUDFLARE_BYPASS_CIDRS, chunkSize: number = 14): string {
-  const lines: string[] = [];
-  for (let i = 0; i < cidrs.length; i += chunkSize) {
-    const chunk = cidrs.slice(i, i + chunkSize);
-    lines.push(`AllowedIPs = ${chunk.join(', ')}`);
-  }
-  return lines.join('\n');
+export function formatWireguardAllowedIps(cidrs: string[] = CLOUDFLARE_BYPASS_CIDRS): string {
+  return `AllowedIPs = ${cidrs.join(', ')}`;
 }

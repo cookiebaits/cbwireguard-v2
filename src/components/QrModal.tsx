@@ -98,7 +98,7 @@ export const QrModal: React.FC<QrModalProps> = ({ peer, onClose, initialAntiFlag
               <span>Instance 1: Standard Full Tunnel (wg0)</span>
             </div>
             <span className={`text-[10px] mt-0.5 ${profileType === 'standard' ? 'text-emerald-100' : 'text-slate-500'}`}>
-              Port 4500 • 0.0.0.0/0, ::/0 • Direct VPS Egress
+              Port 4500 • 0.0.0.0/0 • Direct VPS Egress
             </span>
           </button>
 
@@ -133,7 +133,7 @@ export const QrModal: React.FC<QrModalProps> = ({ peer, onClose, initialAntiFlag
           <div className="flex items-start gap-2 p-2.5 mb-4 rounded-xl bg-slate-800/60 border border-slate-700/60 text-slate-300 text-xs">
             <Shield className="w-4 h-4 shrink-0 text-slate-400 mt-0.5" />
             <div className="leading-relaxed">
-              <strong className="text-white">Instance 1 (Standard WireGuard wg0 | Port 4500):</strong> Pure direct full-tunnel VPS egress (0.0.0.0/0, ::/0). All internet requests route through the VPS interface.
+              <strong className="text-white">Instance 1 (Standard WireGuard wg0 | Port 4500):</strong> Pure direct full-tunnel VPS egress (0.0.0.0/0). All internet requests route through the VPS interface.
             </div>
           </div>
         )}
