@@ -601,6 +601,12 @@ net.core.default_qdisc = fq
 net.ipv4.tcp_fastopen = 3
 net.core.rmem_max = 67108864
 net.core.wmem_max = 67108864
+net.ipv4.tcp_rmem = 4096 87380 67108864
+net.ipv4.tcp_wmem = 4096 65536 67108864
+net.core.netdev_max_backlog = 100000
+net.ipv4.tcp_max_syn_backlog = 3240000
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_notsent_lowat = 16384
 SYSCTL_EOF
 
 	if [[ "${HAS_IPV6}" -eq 1 ]]; then
@@ -715,6 +721,7 @@ SaveConfig = false
 
 # --- 1. CORE NETWORKING & FIREWALL (Port ${SERVER_PORT}/udp for Both Profiles) ---
 PostUp = sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true
+PostUp = ip link set dev wg0 txqueuelen 10000 2>/dev/null || true
 PostUp = iptables -I INPUT 1 -p udp --dport ${SERVER_PORT} -j ACCEPT 2>/dev/null || true
 PostUp = iptables -I FORWARD 1 -i wg0 -j ACCEPT 2>/dev/null || true
 PostUp = iptables -I FORWARD 2 -o wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
@@ -1055,7 +1062,7 @@ function newClientInternal() {
 # • Protocol Mode: Stealth WireGuard / AmneziaWG Obfuscation Ready
 # • Port: ${SERVER_PORT} (Unified Port - Shared with Standard Profile)
 # • Subnet / Assigned IP: ${CLIENT_WG_CF_IPV4}/32 (Subnet: 10.19.0.0/24)
-# • MTU: 1360 (Anti-Fragmentation Cloudflare-Tuned MTU)
+# • MTU: 1420 (High-Speed WireGuard MTU + Dynamic PMTU Clamping)
 # • DNS: ${CLIENT_DNS_LINE} (Primary & Backup DNS Resolvers)
 # • Target Use Case: Cloudflare Turnstile captcha bypass, LinkedIn 403 unblocking,
 #                    evading active ISP port scanners & anti-VPN deep inspection.
@@ -1069,7 +1076,7 @@ function newClientInternal() {
 PrivateKey = ${CLIENT_CF_PRIV_KEY}
 Address = ${CLIENT_WG_CF_IPV4}/32
 DNS = ${CLIENT_DNS_LINE}
-MTU = 1360
+MTU = 1420
 # AmneziaWG Obfuscation (Active when imported into AmneziaWG client):
 # Jc = 4
 # Jmin = 40
@@ -1736,6 +1743,14 @@ DNSMASQ_STEALTH_EOF
 		done
 	done < /etc/wireguard/split_domains.txt
 
+	# LinkedIn Official Autonomous System CIDRs (AS12447) - Guaranteed LinkedIn 403 bypass
+	local LINKEDIN_V4="108.174.0.0/20 144.2.0.0/19 185.63.144.0/22 199.101.160.0/22 216.52.16.0/20 216.52.20.0/22 216.52.24.0/22 65.156.227.0/24 8.247.168.0/24"
+	for c in $LINKEDIN_V4; do
+		if command -v ipset &>/dev/null; then
+			ipset add wg_split_v4 "$c" 2>/dev/null || true
+		fi
+	done
+
 	# Cloudflare Anti-Flag CIDR Injection (Official Cloudflare IPv4 & IPv6 Ranges)
 	if [[ -f /etc/wireguard/cloudflare_split_enabled ]] || grep -q -i "cloudflare" /etc/wireguard/split_domains.txt 2>/dev/null; then
 		local CF_V4="173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22"
@@ -1772,25 +1787,48 @@ DNSMASQ_STEALTH_EOF
 	fi
 	sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
 
-	# Route via Cloudflare WARP interface if active, or direct
+	# TRUE POLICY ROUTING FOR SPLIT DOMAINS (LinkedIn, Cloudflare Anti-Bot, Turnstile)
+	local WARP_NIC=""
 	if ip link show CloudflareWARP &>/dev/null; then
-		iptables -t nat -I POSTROUTING 1 -m set --match-set wg_split_v4 dst -o CloudflareWARP -j MASQUERADE 2>/dev/null || true
+		WARP_NIC="CloudflareWARP"
 	elif ip link show warp0 &>/dev/null; then
-		iptables -t nat -I POSTROUTING 1 -m set --match-set wg_split_v4 dst -o warp0 -j MASQUERADE 2>/dev/null || true
+		WARP_NIC="warp0"
+	fi
+
+	if [[ -n "$WARP_NIC" ]]; then
+		# Setup routing table 51820 with default route dev CloudflareWARP
+		ip route replace default dev "$WARP_NIC" table 51820 2>/dev/null || ip route add default dev "$WARP_NIC" table 51820 2>/dev/null || true
+		ip rule del fwmark 0x51820 table 51820 2>/dev/null || true
+		ip rule add fwmark 0x51820 table 51820 priority 1000 2>/dev/null || true
+
+		# Mark packets matching split ipset (LinkedIn / Cloudflare / split domains)
+		iptables -t mangle -D PREROUTING -i "${SERVER_WG_NIC:-wg0}" -m set --match-set wg_split_v4 dst -j MARK --set-mark 0x51820 2>/dev/null || true
+		iptables -t mangle -I PREROUTING 1 -i "${SERVER_WG_NIC:-wg0}" -m set --match-set wg_split_v4 dst -j MARK --set-mark 0x51820 2>/dev/null || true
+
+		iptables -t mangle -D PREROUTING -s 10.19.0.0/24 -m set --match-set wg_split_v4 dst -j MARK --set-mark 0x51820 2>/dev/null || true
+		iptables -t mangle -I PREROUTING 2 -s 10.19.0.0/24 -m set --match-set wg_split_v4 dst -j MARK --set-mark 0x51820 2>/dev/null || true
+
+		iptables -t nat -D POSTROUTING -o "$WARP_NIC" -j MASQUERADE 2>/dev/null || true
+		iptables -t nat -I POSTROUTING 1 -o "$WARP_NIC" -j MASQUERADE 2>/dev/null || true
 	elif command -v ipset &>/dev/null && [[ "$MODE" == "BYPASS" ]]; then
 		iptables -t nat -A POSTROUTING -m set --match-set wg_split_v4 dst ! -o "${SERVER_WG_NIC:-wg0}" -j MASQUERADE 2>/dev/null || true
 		ip6tables -t nat -A POSTROUTING -m set --match-set wg_split_v6 dst ! -o "${SERVER_WG_NIC:-wg0}" -j MASQUERADE 2>/dev/null || true
 	fi
 
-	# TRANSPARENT DNS FAILOVER & ANONYMIZATION:
-	# Ensures clients querying internal IP (10.18.0.1:53 or 10.19.0.1:53) never experience timeout
-	iptables -I INPUT 1 -i "${SERVER_WG_NIC:-wg0}" -p udp --dport 53 -j ACCEPT 2>/dev/null || true
-	iptables -I INPUT 2 -i "${SERVER_WG_NIC:-wg0}" -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
-	iptables -t nat -D PREROUTING -i "${SERVER_WG_NIC:-wg0}" -d "${SERVER_WG_IPV4:-10.18.0.1}" -p udp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
-	iptables -t nat -D PREROUTING -i "${SERVER_WG_NIC:-wg0}" -d "${SERVER_WG_IPV4:-10.18.0.1}" -p tcp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
-	iptables -t nat -D PREROUTING -i "${SERVER_WG_NIC:-wg0}" -d 10.19.0.1 -p udp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
-	iptables -t nat -D PREROUTING -i "${SERVER_WG_NIC:-wg0}" -d 10.19.0.1 -p tcp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
-	if ! systemctl is-active --quiet dnsmasq 2>/dev/null; then
+	# TRANSPARENT DNS RESOLUTION & IPSET POPULATION:
+	# Redirect WireGuard DNS queries into local dnsmasq so dynamic lookups automatically add to wg_split_v4
+	if command -v dnsmasq &>/dev/null && systemctl is-active --quiet dnsmasq 2>/dev/null; then
+		iptables -t nat -D PREROUTING -i "${SERVER_WG_NIC:-wg0}" -p udp --dport 53 -j REDIRECT --to-ports 53 2>/dev/null || true
+		iptables -t nat -D PREROUTING -i "${SERVER_WG_NIC:-wg0}" -p tcp --dport 53 -j REDIRECT --to-ports 53 2>/dev/null || true
+		iptables -t nat -I PREROUTING 1 -i "${SERVER_WG_NIC:-wg0}" -p udp --dport 53 -j REDIRECT --to-ports 53 2>/dev/null || true
+		iptables -t nat -I PREROUTING 2 -i "${SERVER_WG_NIC:-wg0}" -p tcp --dport 53 -j REDIRECT --to-ports 53 2>/dev/null || true
+	else
+		iptables -I INPUT 1 -i "${SERVER_WG_NIC:-wg0}" -p udp --dport 53 -j ACCEPT 2>/dev/null || true
+		iptables -I INPUT 2 -i "${SERVER_WG_NIC:-wg0}" -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
+		iptables -t nat -D PREROUTING -i "${SERVER_WG_NIC:-wg0}" -d "${SERVER_WG_IPV4:-10.18.0.1}" -p udp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
+		iptables -t nat -D PREROUTING -i "${SERVER_WG_NIC:-wg0}" -d "${SERVER_WG_IPV4:-10.18.0.1}" -p tcp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
+		iptables -t nat -D PREROUTING -i "${SERVER_WG_NIC:-wg0}" -d 10.19.0.1 -p udp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
+		iptables -t nat -D PREROUTING -i "${SERVER_WG_NIC:-wg0}" -d 10.19.0.1 -p tcp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
 		iptables -t nat -A PREROUTING -i "${SERVER_WG_NIC:-wg0}" -d "${SERVER_WG_IPV4:-10.18.0.1}" -p udp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
 		iptables -t nat -A PREROUTING -i "${SERVER_WG_NIC:-wg0}" -d "${SERVER_WG_IPV4:-10.18.0.1}" -p tcp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
 		iptables -t nat -A PREROUTING -i "${SERVER_WG_NIC:-wg0}" -d 10.19.0.1 -p udp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true

@@ -872,6 +872,7 @@ SaveConfig = false
 
 # --- 1. CORE NETWORKING & FIREWALL (Port ${port}/udp for Both Profiles) ---
 PostUp = sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true
+PostUp = ip link set dev wg0 txqueuelen 10000 2>/dev/null || true
 PostUp = iptables -I INPUT 1 -p udp --dport ${port} -j ACCEPT 2>/dev/null || true
 PostUp = iptables -I FORWARD 1 -i wg0 -j ACCEPT 2>/dev/null || true
 PostUp = iptables -I FORWARD 2 -o wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
@@ -955,7 +956,7 @@ function generateClientConfigText(peer: Peer, antiFlag: boolean = false): string
 # • Protocol Mode: Stealth WireGuard / AmneziaWG Obfuscation Ready
 # • Port: ${targetPort} (Unified Port - Shared with Standard Profile)
 # • Subnet / Assigned IP: ${targetIp}/32 (Subnet: 10.19.0.0/24)
-# • MTU: 1360 (Anti-Fragmentation Cloudflare-Tuned MTU)
+# • MTU: 1420 (High-Speed WireGuard MTU + Dynamic PMTU Clamping)
 # • DNS: ${peer.dns || serverState.defaultDns || '1.1.1.1, 1.0.0.1'} (Primary & Backup DNS Resolvers)
 # • Target Use Case: Cloudflare Turnstile captcha bypass, LinkedIn 403 unblocking,
 #                    evading active ISP port scanners & anti-VPN deep inspection.
@@ -969,7 +970,7 @@ function generateClientConfigText(peer: Peer, antiFlag: boolean = false): string
 PrivateKey = ${privateKey}
 Address = ${targetIp}/32
 DNS = ${peer.dns || serverState.defaultDns || '1.1.1.1, 1.0.0.1'}
-MTU = 1360
+MTU = 1420
 # AmneziaWG Obfuscation (Active when imported into AmneziaWG client):
 # Jc = 4
 # Jmin = 40
