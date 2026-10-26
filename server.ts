@@ -683,6 +683,44 @@ let splitServices: SplitService[] = [
     subdomains: ['amazon.com', 'www.amazon.com', 'completion.amazon.com', 'images-amazon.com', 'media-amazon.com', 'ssl-images-amazon.com', 'amazon.co.uk', 'amazon.ca', 'amazon.de', 'amazon.fr', 'amazon.it', 'amazon.es', 'amazon.co.jp', 'aax.amazon-adsystem.com', 'fls-na.amazon.com', 'cloudfront.net'],
   },
   {
+    id: 'paypal_checkout',
+    name: 'PayPal, Braintree & 3D-Secure Checkout Gateways',
+    domain: 'paypal.com',
+    enabled: true,
+    category: 'banking',
+    subdomains: [
+      'paypal.com',
+      'www.paypal.com',
+      'c.paypal.com',
+      'b.stats.paypal.com',
+      't.paypal.com',
+      's.paypal.com',
+      'm.paypal.com',
+      'api.paypal.com',
+      'api-m.paypal.com',
+      'checkout.paypal.com',
+      'identity.paypal.com',
+      'paypalobjects.com',
+      'www.paypalobjects.com',
+      'objects.paypal.com',
+      'c.paypalobjects.com',
+      'paypal.me',
+      'paypal-mktg.com',
+      'cardinalcommerce.com',
+      'songbird.cardinalcommerce.com',
+      'centinelapi.cardinalcommerce.com',
+      'geo.cardinalcommerce.com',
+      'braintreegateway.com',
+      'braintree-api.com',
+      'assets.braintreegateway.com',
+      'js.braintreegateway.com',
+      'stripe.com',
+      'api.stripe.com',
+      'js.stripe.com',
+      'checkout.stripe.com',
+    ],
+  },
+  {
     id: 'linkedin',
     name: 'LinkedIn Professional Network & Media CDN',
     domain: 'linkedin.com',
@@ -1605,20 +1643,24 @@ EOF_RESOLV
         iptables -I FORWARD 6 -s 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
         iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 -j MASQUERADE 2>/dev/null || true
         iptables -t nat -I POSTROUTING 2 -s 10.19.0.0/24 -j MASQUERADE 2>/dev/null || true
+        iptables -t mangle -D FORWARD -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
+        iptables -t mangle -D FORWARD -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
+        iptables -t mangle -D FORWARD -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
+        iptables -t mangle -D FORWARD -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
         iptables -t mangle -I FORWARD 1 -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
         iptables -t mangle -I FORWARD 2 -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-        iptables -t mangle -I FORWARD 3 -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
-        iptables -t mangle -I FORWARD 4 -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
-        iptables -t mangle -I FORWARD 5 -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-        iptables -t mangle -I FORWARD 6 -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-        iptables -t mangle -I FORWARD 7 -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
-        iptables -t mangle -I FORWARD 8 -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
+        iptables -t mangle -I FORWARD 3 -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+        iptables -t mangle -I FORWARD 4 -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
         iptables -t mangle -I POSTROUTING 1 -s 10.18.0.0/24 -j TTL --ttl-set 64 2>/dev/null || true
         iptables -t mangle -I POSTROUTING 2 -s 10.19.0.0/24 -j TTL --ttl-set 64 2>/dev/null || true
+        for pcidr in 64.4.240.0/21 66.211.168.0/21 173.0.80.0/20 173.224.160.0/19 185.177.52.0/22 192.148.20.0/23 198.54.120.0/22 216.113.160.0/19; do
+          warp-cli --accept-tos add-excluded-route "$pcidr" 2>/dev/null || warp-cli add-excluded-route "$pcidr" 2>/dev/null || true
+        done
         systemctl restart wg-quick@wg0 2>/dev/null || true
         if [ -f /etc/wireguard/wg1.conf ]; then
           systemctl restart wg-quick@wg1 2>/dev/null || true
         fi
+        bash /root/easy_wireguard/easy_wireguard.sh --apply-split 2>/dev/null || bash easy_wireguard.sh --apply-split 2>/dev/null || true
       `, { timeout: 8000, shell: '/bin/bash' });
     }
   } catch (err: any) {
@@ -1916,6 +1958,56 @@ app.delete('/api/geo-shield/rule', requireVpnOrAuth, (req: Request, res: Respons
 
 // Domain Bundle Map: Auto-expands apex domains to all associated CDN / media subdomains
 const DOMAIN_BUNDLE_MAP: Record<string, string[]> = {
+  'paypal.com': [
+    'paypal.com',
+    'www.paypal.com',
+    'c.paypal.com',
+    'b.stats.paypal.com',
+    't.paypal.com',
+    's.paypal.com',
+    'm.paypal.com',
+    'api.paypal.com',
+    'api-m.paypal.com',
+    'checkout.paypal.com',
+    'identity.paypal.com',
+    'paypalobjects.com',
+    'www.paypalobjects.com',
+    'objects.paypal.com',
+    'c.paypalobjects.com',
+    'paypal.me',
+    'paypal-mktg.com',
+    'cardinalcommerce.com',
+    'songbird.cardinalcommerce.com',
+    'centinelapi.cardinalcommerce.com',
+    'geo.cardinalcommerce.com',
+    'braintreegateway.com',
+    'braintree-api.com',
+    'assets.braintreegateway.com',
+    'js.braintreegateway.com',
+  ],
+  'cardinalcommerce.com': [
+    'cardinalcommerce.com',
+    'songbird.cardinalcommerce.com',
+    'centinelapi.cardinalcommerce.com',
+    'geo.cardinalcommerce.com',
+    '1.songbird.cardinalcommerce.com',
+    '2.songbird.cardinalcommerce.com',
+  ],
+  'braintreegateway.com': [
+    'braintreegateway.com',
+    'braintree-api.com',
+    'assets.braintreegateway.com',
+    'js.braintreegateway.com',
+    'api.braintreegateway.com',
+  ],
+  'stripe.com': [
+    'stripe.com',
+    'api.stripe.com',
+    'js.stripe.com',
+    'checkout.stripe.com',
+    'm.stripe.network',
+    'm.stripe.com',
+  ],
   'linkedin.com': [
     'linkedin.com',
     'www.linkedin.com',

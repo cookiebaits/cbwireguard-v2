@@ -836,6 +836,37 @@ voyager.linkedin.com
 media-exp1.licdn.com
 snap.licdn.com
 px.ads.linkedin.com
+
+# PayPal, Braintree & 3D-Secure Gateways (Unblocks PayPal Checkout, ThreatMetrix Fraud Scoring & Card Auth)
+paypal.com
+www.paypal.com
+c.paypal.com
+b.stats.paypal.com
+t.paypal.com
+s.paypal.com
+m.paypal.com
+api.paypal.com
+api-m.paypal.com
+checkout.paypal.com
+identity.paypal.com
+paypalobjects.com
+www.paypalobjects.com
+objects.paypal.com
+c.paypalobjects.com
+paypal.me
+paypal-mktg.com
+cardinalcommerce.com
+songbird.cardinalcommerce.com
+centinelapi.cardinalcommerce.com
+geo.cardinalcommerce.com
+braintreegateway.com
+braintree-api.com
+assets.braintreegateway.com
+js.braintreegateway.com
+stripe.com
+api.stripe.com
+js.stripe.com
+checkout.stripe.com
 CF_INIT_DOMAINS
 
 		applyDomainSplitRulesLive
@@ -1659,6 +1690,7 @@ function applyDomainSplitRulesLive() {
 	if command -v ipset &>/dev/null; then
 		ipset create wg_split_v4 hash:net family inet 2>/dev/null || true
 		ipset create wg_split_v6 hash:net family inet6 2>/dev/null || true
+		ipset create wg_direct_clean hash:net family inet 2>/dev/null || true
 	fi
 
 	# Configure dnsmasq for Location Stealth & EDNS Client Subnet (ECS) Anonymization
@@ -1685,10 +1717,12 @@ DNSMASQ_STEALTH_EOF
 	iptables -t nat -D POSTROUTING -m set --match-set wg_split_v4 dst -o "${SERVER_PUB_NIC:-eth0}" -j MASQUERADE 2>/dev/null || true
 	ip6tables -t nat -D POSTROUTING -m set --match-set wg_split_v6 dst -o "${SERVER_PUB_NIC:-eth0}" -j MASQUERADE 2>/dev/null || true
 	iptables -t mangle -D PREROUTING -m set --match-set wg_split_v4 dst -j MARK --set-mark 0x51820 2>/dev/null || true
+	iptables -t mangle -D PREROUTING -m set --match-set wg_direct_clean dst -j RETURN 2>/dev/null || true
 
 	if command -v ipset &>/dev/null; then
 		ipset flush wg_split_v4 2>/dev/null || true
 		ipset flush wg_split_v6 2>/dev/null || true
+		ipset flush wg_direct_clean 2>/dev/null || true
 	fi
 
 	echo "# Cookie WireGuard Dynamic Split Tunneling Rules" > /etc/dnsmasq.d/wg_split.conf
@@ -1702,8 +1736,16 @@ DNSMASQ_STEALTH_EOF
 
 		# Domain expansion list for apex domains
 		local EXPANDED_DOMAINS=("$base_domain")
-		if [[ "$base_domain" == "linkedin.com" || "$base_domain" == *"linkedin.com" ]]; then
-			EXPANDED_DOMAINS+=("www.linkedin.com" "licdn.com" "media.licdn.com" "static.licdn.com" "lnkd.in" "media-exp1.licdn.com" "platform.linkedin.com")
+		if [[ "$base_domain" == "paypal.com" || "$base_domain" == *"paypal.com" || "$base_domain" == *"paypalobjects.com" ]]; then
+			EXPANDED_DOMAINS+=("www.paypal.com" "c.paypal.com" "b.stats.paypal.com" "t.paypal.com" "s.paypal.com" "m.paypal.com" "api.paypal.com" "api-m.paypal.com" "checkout.paypal.com" "identity.paypal.com" "paypalobjects.com" "www.paypalobjects.com" "objects.paypal.com" "c.paypalobjects.com" "paypal.me" "paypal-mktg.com" "cardinalcommerce.com" "songbird.cardinalcommerce.com" "centinelapi.cardinalcommerce.com" "geo.cardinalcommerce.com" "braintreegateway.com" "braintree-api.com" "assets.braintreegateway.com" "js.braintreegateway.com")
+		elif [[ "$base_domain" == "cardinalcommerce.com" || "$base_domain" == *"cardinalcommerce.com" ]]; then
+			EXPANDED_DOMAINS+=("songbird.cardinalcommerce.com" "centinelapi.cardinalcommerce.com" "geo.cardinalcommerce.com" "1.songbird.cardinalcommerce.com" "2.songbird.cardinalcommerce.com")
+		elif [[ "$base_domain" == "braintreegateway.com" || "$base_domain" == *"braintreegateway.com" ]]; then
+			EXPANDED_DOMAINS+=("braintree-api.com" "assets.braintreegateway.com" "js.braintreegateway.com" "api.braintreegateway.com")
+		elif [[ "$base_domain" == "stripe.com" || "$base_domain" == *"stripe.com" ]]; then
+			EXPANDED_DOMAINS+=("api.stripe.com" "js.stripe.com" "checkout.stripe.com" "m.stripe.network" "m.stripe.com")
+		elif [[ "$base_domain" == "linkedin.com" || "$base_domain" == *"linkedin.com" ]]; then
+			EXPANDED_DOMAINS+=("www.linkedin.com" "licdn.com" "media.licdn.com" "static.licdn.com" "lnkd.in" "media-exp1.licdn.com" "platform.linkedin.com" "voyager.linkedin.com" "dms.licdn.com" "snap.licdn.com" "px.ads.linkedin.com")
 		elif [[ "$base_domain" == "amazon.com" || "$base_domain" == *"amazon.com" ]]; then
 			EXPANDED_DOMAINS+=("www.amazon.com" "completion.amazon.com" "images-amazon.com" "media-amazon.com" "ssl-images-amazon.com" "images-na.ssl-images-amazon.com" "aax-us-east.amazon-adsystem.com" "fls-na.amazon.com")
 		elif [[ "$base_domain" == "cloudflare.com" || "$base_domain" == *"cloudflare.com" ]]; then
@@ -1715,9 +1757,17 @@ DNSMASQ_STEALTH_EOF
 		for domain in "${EXPANDED_DOMAINS[@]}"; do
 			((DOMAIN_COUNT++))
 
+			local IS_PAYMENT=0
+			if [[ "$domain" =~ (paypal|cardinalcommerce|braintree|stripe|chase|bankofamerica|wellsfargo) ]]; then
+				IS_PAYMENT=1
+			fi
+
 			# Automatically map domain and ALL subdomains in dnsmasq ipset
 			if command -v ipset &>/dev/null; then
 				echo "ipset=/.${domain}/wg_split_v4,wg_split_v6" >> /etc/dnsmasq.d/wg_split.conf
+				if [[ $IS_PAYMENT -eq 1 ]]; then
+					echo "ipset=/.${domain}/wg_direct_clean" >> /etc/dnsmasq.d/wg_split.conf
+				fi
 			fi
 
 			# Resolve IPv4 and IPv6 addresses live for initial pool
@@ -1729,6 +1779,9 @@ DNSMASQ_STEALTH_EOF
 				if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
 					if command -v ipset &>/dev/null; then
 						ipset add wg_split_v4 "$ip" 2>/dev/null || true
+						if [[ $IS_PAYMENT -eq 1 ]]; then
+							ipset add wg_direct_clean "$ip" 2>/dev/null || true
+						fi
 					fi
 				fi
 			done
@@ -1742,6 +1795,15 @@ DNSMASQ_STEALTH_EOF
 			done
 		done
 	done < /etc/wireguard/split_domains.txt
+
+	# PayPal Official Autonomous System CIDRs (AS11643) - Guaranteed Checkout & ThreatMetrix Risk Consistency
+	local PAYPAL_V4="64.4.240.0/21 66.211.168.0/21 173.0.80.0/20 173.224.160.0/19 185.177.52.0/22 192.148.20.0/23 198.54.120.0/22 216.113.160.0/19"
+	for p in $PAYPAL_V4; do
+		if command -v ipset &>/dev/null; then
+			ipset add wg_direct_clean "$p" 2>/dev/null || true
+			ipset add wg_split_v4 "$p" 2>/dev/null || true
+		fi
+	done
 
 	# LinkedIn Official Autonomous System CIDRs (AS12447) - Guaranteed LinkedIn 403 bypass
 	local LINKEDIN_V4="108.174.0.0/20 144.2.0.0/19 185.63.144.0/22 199.101.160.0/22 216.52.16.0/20 216.52.20.0/22 216.52.24.0/22 65.156.227.0/24 8.247.168.0/24"
@@ -1787,6 +1849,25 @@ DNSMASQ_STEALTH_EOF
 	fi
 	sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
 
+	# CRITICAL: Payment & Banking Direct Egress Protection (PayPal, CardinalCommerce, Braintree, Banks)
+	# ThreatMetrix fraud scoring and 3D-Secure 2.0 actively flag and reject Cloudflare WARP shared consumer pools (104.28.x.x).
+	# Packets matching wg_direct_clean are RETURN-ed before fwmark 0x51820, ensuring they
+	# egress via dedicated native VPS IP ($DEF_NIC) with 100% session & IP consistency.
+	if command -v ipset &>/dev/null; then
+		iptables -t mangle -D PREROUTING -i "${SERVER_WG_NIC:-wg0}" -m set --match-set wg_direct_clean dst -j RETURN 2>/dev/null || true
+		iptables -t mangle -I PREROUTING 1 -i "${SERVER_WG_NIC:-wg0}" -m set --match-set wg_direct_clean dst -j RETURN 2>/dev/null || true
+		iptables -t mangle -D PREROUTING -s 10.18.0.0/24 -m set --match-set wg_direct_clean dst -j RETURN 2>/dev/null || true
+		iptables -t mangle -I PREROUTING 2 -s 10.18.0.0/24 -m set --match-set wg_direct_clean dst -j RETURN 2>/dev/null || true
+		iptables -t mangle -D PREROUTING -s 10.19.0.0/24 -m set --match-set wg_direct_clean dst -j RETURN 2>/dev/null || true
+		iptables -t mangle -I PREROUTING 3 -s 10.19.0.0/24 -m set --match-set wg_direct_clean dst -j RETURN 2>/dev/null || true
+
+		# Direct Clean Masquerade to physical public interface
+		if [[ -n "$DEF_NIC" ]]; then
+			iptables -t nat -D POSTROUTING -m set --match-set wg_direct_clean dst -o "$DEF_NIC" -j MASQUERADE 2>/dev/null || true
+			iptables -t nat -I POSTROUTING 1 -m set --match-set wg_direct_clean dst -o "$DEF_NIC" -j MASQUERADE 2>/dev/null || true
+		fi
+	fi
+
 	# TRUE POLICY ROUTING FOR SPLIT DOMAINS (LinkedIn, Cloudflare Anti-Bot, Turnstile)
 	local WARP_NIC=""
 	if ip link show CloudflareWARP &>/dev/null; then
@@ -1803,10 +1884,10 @@ DNSMASQ_STEALTH_EOF
 
 		# Mark packets matching split ipset (LinkedIn / Cloudflare / split domains)
 		iptables -t mangle -D PREROUTING -i "${SERVER_WG_NIC:-wg0}" -m set --match-set wg_split_v4 dst -j MARK --set-mark 0x51820 2>/dev/null || true
-		iptables -t mangle -I PREROUTING 1 -i "${SERVER_WG_NIC:-wg0}" -m set --match-set wg_split_v4 dst -j MARK --set-mark 0x51820 2>/dev/null || true
+		iptables -t mangle -I PREROUTING 4 -i "${SERVER_WG_NIC:-wg0}" -m set --match-set wg_split_v4 dst -j MARK --set-mark 0x51820 2>/dev/null || true
 
 		iptables -t mangle -D PREROUTING -s 10.19.0.0/24 -m set --match-set wg_split_v4 dst -j MARK --set-mark 0x51820 2>/dev/null || true
-		iptables -t mangle -I PREROUTING 2 -s 10.19.0.0/24 -m set --match-set wg_split_v4 dst -j MARK --set-mark 0x51820 2>/dev/null || true
+		iptables -t mangle -I PREROUTING 5 -s 10.19.0.0/24 -m set --match-set wg_split_v4 dst -j MARK --set-mark 0x51820 2>/dev/null || true
 
 		iptables -t nat -D POSTROUTING -o "$WARP_NIC" -j MASQUERADE 2>/dev/null || true
 		iptables -t nat -I POSTROUTING 1 -o "$WARP_NIC" -j MASQUERADE 2>/dev/null || true
@@ -1952,10 +2033,10 @@ function domainSplitTunneling() {
 						applyDomainSplitRulesLive
 						;;
 					3)
-						for d in paypal.com paypalobjects.com chase.com bankofamerica.com wellsfargo.com stripe.com; do
+						for d in paypal.com paypalobjects.com cardinalcommerce.com braintreegateway.com braintree-api.com chase.com bankofamerica.com wellsfargo.com stripe.com; do
 							grep -q "^${d}\$" /etc/wireguard/split_domains.txt 2>/dev/null || echo "$d" >> /etc/wireguard/split_domains.txt
 						done
-						echo -e "${GREEN}[✔] Added Banking & Finance preset domains.${NC}"
+						echo -e "${GREEN}[✔] Added Banking & Finance (PayPal, 3D-Secure, Braintree, Banks) preset domains.${NC}"
 						applyDomainSplitRulesLive
 						;;
 					4)
@@ -2247,12 +2328,16 @@ function setupCloudflareWarpClient() {
 		showWarpProgressBar 65 "Verifying device registration & TOS..."
 		warp-cli --accept-tos registration new 2>/dev/null || warp-cli --accept-tos register 2>/dev/null || echo "y" | warp-cli register 2>/dev/null || true
 
-		showWarpProgressBar 85 "Configuring route exclusions (SSH, WireGuard, Web)..."
+		showWarpProgressBar 85 "Configuring route exclusions (SSH, WireGuard, Web, PayPal)..."
 		local PUB_IP="${SERVER_PUB_IP:-}"
 		[[ -n "$PUB_IP" && "$PUB_IP" != "127.0.0.1" ]] && (warp-cli --accept-tos add-excluded-route "${PUB_IP}/32" 2>/dev/null || true)
 		warp-cli --accept-tos add-excluded-route "0.0.0.0/0:22" 2>/dev/null || true
 		warp-cli --accept-tos add-excluded-route "0.0.0.0/0:${SERVER_PORT:-4500}" 2>/dev/null || true
 		warp-cli --accept-tos add-excluded-route "0.0.0.0/0:${WEB_PORT:-51821}" 2>/dev/null || true
+		# Exclude PayPal Official Autonomous System CIDRs (AS11643) so payment transactions never route via WARP
+		for pcidr in 64.4.240.0/21 66.211.168.0/21 173.0.80.0/20 173.224.160.0/19 185.177.52.0/22 192.148.20.0/23 198.54.120.0/22 216.113.160.0/19; do
+			warp-cli --accept-tos add-excluded-route "$pcidr" 2>/dev/null || warp-cli add-excluded-route "$pcidr" 2>/dev/null || true
+		done
 
 		showWarpProgressBar 95 "Connecting WARP consumer gateway..."
 		warp-cli --accept-tos mode warp 2>/dev/null || warp-cli --accept-tos set-mode warp 2>/dev/null || warp-cli set-mode proxy 2>/dev/null || true
@@ -2355,12 +2440,16 @@ function setupCloudflareWarpClient() {
 		|| echo "y" | warp-cli register 2>/dev/null \
 		|| true
 
-	showWarpProgressBar 94 "Excluding VPS management ports (SSH & WireGuard)..."
+	showWarpProgressBar 94 "Excluding VPS management ports (SSH & WireGuard) & PayPal..."
 	local PUB_IP="${SERVER_PUB_IP:-}"
 	[[ -n "$PUB_IP" && "$PUB_IP" != "127.0.0.1" ]] && (warp-cli --accept-tos add-excluded-route "${PUB_IP}/32" 2>/dev/null || warp-cli add-excluded-route "${PUB_IP}/32" 2>/dev/null || true)
 	warp-cli --accept-tos add-excluded-route "0.0.0.0/0:22" 2>/dev/null || warp-cli add-excluded-route "0.0.0.0/0:22" 2>/dev/null || true
 	warp-cli --accept-tos add-excluded-route "0.0.0.0/0:${SERVER_PORT:-4500}" 2>/dev/null || warp-cli add-excluded-route "0.0.0.0/0:${SERVER_PORT:-4500}" 2>/dev/null || true
 	warp-cli --accept-tos add-excluded-route "0.0.0.0/0:${WEB_PORT:-51821}" 2>/dev/null || warp-cli add-excluded-route "0.0.0.0/0:${WEB_PORT:-51821}" 2>/dev/null || true
+	# Exclude PayPal Official Autonomous System CIDRs (AS11643) so payment transactions never route via WARP
+	for pcidr in 64.4.240.0/21 66.211.168.0/21 173.0.80.0/20 173.224.160.0/19 185.177.52.0/22 192.148.20.0/23 198.54.120.0/22 216.113.160.0/19; do
+		warp-cli --accept-tos add-excluded-route "$pcidr" 2>/dev/null || warp-cli add-excluded-route "$pcidr" 2>/dev/null || true
+	done
 
 	showWarpProgressBar 97 "Connecting WARP consumer gateway..."
 	warp-cli --accept-tos mode warp 2>/dev/null || warp-cli --accept-tos set-mode warp 2>/dev/null || warp-cli set-mode proxy 2>/dev/null || true

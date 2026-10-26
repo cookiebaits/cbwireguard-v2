@@ -95,7 +95,7 @@ export const SplitTunnelingTab: React.FC = () => {
                 </span>
               </div>
               <p className="text-xs sm:text-sm text-slate-300 mt-1 max-w-2xl leading-relaxed">
-                Exclude streaming services, LinkedIn, Amazon, and banking sites from the VPN tunnel. Adding apex domains like <code className="text-purple-300 font-mono text-[11px]">linkedin.com</code> or <code className="text-purple-300 font-mono text-[11px]">amazon.com</code> automatically expands to all required CDN/media subdomains (<code className="text-purple-300 font-mono text-[11px]">licdn.com</code>, <code className="text-purple-300 font-mono text-[11px]">ssl-images-amazon.com</code>, etc.) and resolves active IPs into server-side forwarding rules.
+                Exclude streaming services, LinkedIn, Amazon, PayPal, and banking sites from the VPN tunnel. Adding apex domains like <code className="text-purple-300 font-mono text-[11px]">paypal.com</code>, <code className="text-purple-300 font-mono text-[11px]">linkedin.com</code> or <code className="text-purple-300 font-mono text-[11px]">amazon.com</code> automatically expands to all required risk/auth subdomains (<code className="text-purple-300 font-mono text-[11px]">c.paypal.com</code> ThreatMetrix, <code className="text-purple-300 font-mono text-[11px]">cardinalcommerce.com</code> 3D-Secure 2.0, <code className="text-purple-300 font-mono text-[11px]">licdn.com</code>, etc.) and guarantees seamless checkout and zero proxy flags.
               </p>
             </div>
           </div>
@@ -112,6 +112,10 @@ export const SplitTunnelingTab: React.FC = () => {
                 ? svc.enabled
                   ? 'bg-gradient-to-br from-[#0c1427] to-[#131c36] border-amber-500/50 shadow-lg shadow-amber-950/20'
                   : 'bg-[#0b101e] border-slate-800/80 opacity-70'
+                : svc.id === 'paypal_checkout'
+                ? svc.enabled
+                  ? 'bg-gradient-to-br from-[#0c1927] to-[#0f2438] border-emerald-500/40 shadow-lg shadow-emerald-950/20'
+                  : 'bg-[#0b101e] border-slate-800/80 opacity-70'
                 : svc.enabled
                 ? 'bg-[#0f172a] border-purple-500/40 shadow-lg shadow-purple-950/20'
                 : 'bg-[#0b101e] border-slate-800/80 opacity-70'
@@ -122,9 +126,14 @@ export const SplitTunnelingTab: React.FC = () => {
                 Anti-Flag Shield
               </span>
             )}
+            {svc.id === 'paypal_checkout' && (
+              <span className="absolute top-2 right-14 text-[9px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 uppercase tracking-wider">
+                3D-Secure Protected
+              </span>
+            )}
             <div className="flex items-center justify-between mb-3">
               <div className="flex items-center gap-2.5">
-                <div className={`p-2 rounded-xl ${svc.id === 'cloudflare' ? 'bg-amber-500/10' : 'bg-slate-800'}`}>
+                <div className={`p-2 rounded-xl ${svc.id === 'cloudflare' ? 'bg-amber-500/10' : svc.id === 'paypal_checkout' ? 'bg-emerald-500/10' : 'bg-slate-800'}`}>
                   {getCategoryIcon(svc.category, svc.id)}
                 </div>
                 <div>
