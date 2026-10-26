@@ -424,6 +424,12 @@ export const StealthTab: React.FC<StealthTabProps> = ({ onRefresh, peers = [], o
               <div className="text-[11px] text-slate-400 mt-0.5">
                 Routes outbound web packets through Cloudflare internal edge network, replacing your VPS datacenter ASN with Cloudflare WARP.
               </div>
+              {togglingCfKey === 'warpEgress' && (
+                <div className="mt-2 flex items-center gap-2 text-[10px] text-emerald-400">
+                  <div className="w-2.5 h-2.5 rounded-full border border-emerald-400 border-t-transparent animate-spin" />
+                  <span>Configuring Cloudflare WARP Consumer Egress (AS13335)...</span>
+                </div>
+              )}
             </div>
             <button
               onClick={() => handleToggleCfKey('warpEgress')}

@@ -1781,6 +1781,22 @@ app.post('/api/cloudflare-shield/toggle', requireVpnOrAuth, (req: Request, res: 
     (stealthConfig as any)[key] = !(stealthConfig as any)[key];
     recalculateStealthScore();
 
+    if (key === 'warpEgress') {
+      try {
+        if (stealthConfig.warpEgress) {
+          fs.writeFileSync('/etc/wireguard/warp_egress_enabled', '1');
+          if (fs.existsSync('/etc/wireguard/wg0.conf')) {
+            execSync('warp-cli --accept-tos connect 2>/dev/null || true');
+            execSync('iptables -t nat -I POSTROUTING 1 -s 10.19.0.0/24 -o CloudflareWARP -j MASQUERADE 2>/dev/null || true');
+          }
+        } else {
+          try { fs.unlinkSync('/etc/wireguard/warp_egress_enabled'); } catch (e) {}
+          execSync('warp-cli --accept-tos disconnect 2>/dev/null || true');
+          execSync('iptables -t nat -D POSTROUTING -s 10.19.0.0/24 -o CloudflareWARP -j MASQUERADE 2>/dev/null || true');
+        }
+      } catch (e) {}
+    }
+
     journalLogs.unshift({
       id: `log-${Date.now()}`,
       timestamp: new Date().toISOString(),

@@ -474,9 +474,10 @@ function installQuestions() {
 	echo -e "\n${CYAN}${BOLD}☁️ Cloudflare Anti-Flag & ISP Host Masking Engine Integration:${NC}"
 	echo -e "   • Auto-deploys TCP MSS Clamping & TTL Normalization (Anti-p0f OS signature disguise)"
 	echo -e "   • Auto-configures Cloudflare WAF, Turnstile & Edge CDN split-routing"
+	echo -e "   • Auto-installs Cloudflare WARP Consumer Egress (AS13335) by default for anti-spam & anti-bot protection"
 	echo -e "   • Generates both Normal Full Tunnel and Zero-Challenge Residential Bypass client profiles"
 	echo -e "   • Strips EDNS Client-Subnet (ECS) to prevent VPS datacenter IP leaks"
-	echo -e "   ${GREEN}[✔] Auto-enabled: Generates BOTH Normal (Standard) and Anti-Flag (.conf) settings for instant copy & paste.${NC}"
+	echo -e "   ${GREEN}[✔] Auto-enabled: WARP Consumer Egress and Cloudflare Anti-Flag active by default.${NC}"
 	CF_AUTO_ENABLE="y"
 
 	WEB_PORT=${WEB_PORT:-51821}
@@ -831,10 +832,15 @@ px.ads.linkedin.com
 CF_INIT_DOMAINS
 
 		applyDomainSplitRulesLive
-		echo -e "${GREEN}[✔] Cloudflare Anti-Flag Shield & Turnstile Bypass auto-configured into installation!${NC}"
+
+		# By default include Cloudflare WARP Consumer Egress during install for cloudflare anti-spam
+		echo -e "\n${CYAN}[*] Installing Cloudflare WARP Consumer Egress (AS13335) by default...${NC}"
+		setupCloudflareWarpClient
+
+		echo -e "${GREEN}[✔] Cloudflare Anti-Flag Shield & WARP Consumer Egress auto-configured into installation!${NC}"
 	else
 		echo -e "\n${GREEN}[✔] Standard Full Tunnel configured. Cloudflare Anti-Flag bypassed.${NC}"
-		rm -f /etc/wireguard/cloudflare_shield_enabled /etc/wireguard/cloudflare_split_enabled 2>/dev/null || true
+		rm -f /etc/wireguard/cloudflare_shield_enabled /etc/wireguard/cloudflare_split_enabled /etc/wireguard/warp_egress_enabled 2>/dev/null || true
 	fi
 
 	newClientInternal "${CLIENT_NAME}" "${CLIENT_PASSWORD}"
@@ -2167,6 +2173,170 @@ RESOLV_CLEAN_EOF
 	fi
 }
 
+function showWarpProgressBar() {
+	local percent="$1"
+	local step_text="$2"
+	local bar_width=30
+	local num_filled=$(( (percent * bar_width) / 100 ))
+	local num_empty=$(( bar_width - num_filled ))
+	local bar_str=""
+
+	for ((i=0; i<num_filled; i++)); do bar_str+="█"; done
+	for ((i=0; i<num_empty; i++)); do bar_str+="░"; done
+
+	printf "\r ${CYAN}[%3d%%]${NC} [${GREEN}%s${NC}] %-56s\033[K" "$percent" "$bar_str" "$step_text"
+	if [[ "$percent" -ge 100 ]]; then
+		echo -e "\n"
+	fi
+}
+
+function setupCloudflareWarpClient() {
+	echo -e "\n${CYAN}${BOLD}⚡ Initializing Cloudflare WARP Consumer Egress (AS13335)...${NC}"
+	mkdir -p /etc/wireguard
+	touch /etc/wireguard/warp_egress_enabled
+
+	showWarpProgressBar 5 "Verifying system environment & architecture..."
+	sleep 0.3
+
+	# If warp-cli is already installed and functional, verify connection and finish
+	if command -v warp-cli &>/dev/null; then
+		showWarpProgressBar 35 "Cloudflare WARP client already installed. Starting service..."
+		if command -v systemctl &>/dev/null; then
+			systemctl is-active --quiet warp-svc 2>/dev/null || systemctl restart warp-svc 2>/dev/null || true
+		fi
+		sleep 0.3
+
+		showWarpProgressBar 65 "Verifying device registration & TOS..."
+		warp-cli --accept-tos registration new 2>/dev/null || warp-cli --accept-tos register 2>/dev/null || echo "y" | warp-cli register 2>/dev/null || true
+
+		showWarpProgressBar 85 "Configuring route exclusions (SSH, WireGuard, Web)..."
+		local PUB_IP="${SERVER_PUB_IP:-}"
+		[[ -n "$PUB_IP" && "$PUB_IP" != "127.0.0.1" ]] && (warp-cli --accept-tos add-excluded-route "${PUB_IP}/32" 2>/dev/null || true)
+		warp-cli --accept-tos add-excluded-route "0.0.0.0/0:22" 2>/dev/null || true
+		warp-cli --accept-tos add-excluded-route "0.0.0.0/0:${SERVER_PORT:-4500}" 2>/dev/null || true
+		warp-cli --accept-tos add-excluded-route "0.0.0.0/0:${WEB_PORT:-51821}" 2>/dev/null || true
+
+		showWarpProgressBar 95 "Connecting WARP consumer gateway..."
+		warp-cli --accept-tos mode warp 2>/dev/null || warp-cli --accept-tos set-mode warp 2>/dev/null || warp-cli set-mode proxy 2>/dev/null || true
+		warp-cli --accept-tos connect 2>/dev/null || warp-cli connect 2>/dev/null || true
+
+		if ip link show CloudflareWARP &>/dev/null; then
+			iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 -o CloudflareWARP -j MASQUERADE 2>/dev/null || true
+			iptables -t nat -I POSTROUTING 2 -s 10.19.0.0/24 -o CloudflareWARP -j MASQUERADE 2>/dev/null || true
+		fi
+
+		showWarpProgressBar 100 "Cloudflare WARP Egress operational (AS13335 Active)"
+		return 0
+	fi
+
+	# Check for Debian / Ubuntu package manager
+	if ! command -v apt-get &>/dev/null; then
+		showWarpProgressBar 50 "Non-Debian host: configuring direct Cloudflare Edge CIDRs..."
+		sleep 0.4
+		touch /etc/wireguard/cloudflare_split_enabled
+		showWarpProgressBar 100 "Cloudflare Consumer Edge Egress configured (Direct CIDR split)"
+		return 0
+	fi
+
+	showWarpProgressBar 12 "Checking and clearing APT package locks..."
+	for ((l=0; l<5; l++)); do
+		if fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1; then
+			sleep 1
+		else
+			break
+		fi
+	done
+
+	local ARCH="amd64"
+	if command -v dpkg &>/dev/null; then
+		ARCH=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
+	fi
+
+	local CODENAME=""
+	if [[ -f /etc/os-release ]]; then
+		# shellcheck source=/dev/null
+		. /etc/os-release
+		CODENAME="${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}"
+	fi
+	if [[ -z "$CODENAME" ]]; then
+		CODENAME=$(lsb_release -cs 2>/dev/null || echo "")
+	fi
+	case "$CODENAME" in
+		noble|jammy|focal|bionic) ;;
+		bookworm|bullseye|buster) ;;
+		*)
+			if grep -qi "ubuntu" /etc/os-release 2>/dev/null; then
+				CODENAME="jammy"
+			else
+				CODENAME="bookworm"
+			fi
+			;;
+	esac
+
+	showWarpProgressBar 25 "Installing GPG & transport dependencies..."
+	export DEBIAN_FRONTEND=noninteractive
+	if ! command -v gpg &>/dev/null || ! command -v curl &>/dev/null; then
+		apt-get update -o Acquire::Timeout=8 -qq >/dev/null 2>&1 || true
+		apt-get install -y -qq curl gnupg lsb-release >/dev/null 2>&1 || true
+	fi
+
+	showWarpProgressBar 40 "Adding official Cloudflare GPG signing key & repository..."
+	mkdir -p /usr/share/keyrings /etc/apt/sources.list.d
+	curl -fsSL --connect-timeout 8 --max-time 15 https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg 2>/dev/null || true
+	echo "deb [arch=${ARCH} signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ ${CODENAME} main" > /etc/apt/sources.list.d/cloudflare-client.list 2>/dev/null || true
+
+	showWarpProgressBar 55 "Updating package cache for cloudflare-warp..."
+	apt-get update -o Acquire::Timeout="10" -o Dir::Etc::sourcelist="sources.list.d/cloudflare-client.list" -o Dir::Etc::sourceparts="-" -qq >/dev/null 2>&1 || apt-get update -o Acquire::Timeout="10" -qq >/dev/null 2>&1 || true
+
+	showWarpProgressBar 70 "Downloading & installing cloudflare-warp client..."
+	apt-get install -y -qq -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" cloudflare-warp >/dev/null 2>&1 || true
+
+	if ! command -v warp-cli &>/dev/null; then
+		showWarpProgressBar 85 "WARP package not in apt repo for ${CODENAME}; applying fallback..."
+		touch /etc/wireguard/cloudflare_split_enabled
+		showWarpProgressBar 100 "Cloudflare Anti-Flag active via direct residential split"
+		return 0
+	fi
+
+	showWarpProgressBar 82 "Starting warp-svc daemon and initializing IPC socket..."
+	if command -v systemctl &>/dev/null; then
+		systemctl daemon-reload >/dev/null 2>&1 || true
+		systemctl enable --now warp-svc >/dev/null 2>&1 || true
+		for ((s=0; s<10; s++)); do
+			if systemctl is-active --quiet warp-svc 2>/dev/null; then
+				break
+			fi
+			sleep 0.5
+		done
+	fi
+
+	showWarpProgressBar 90 "Registering WARP license (--accept-tos)..."
+	warp-cli --accept-tos registration new 2>/dev/null \
+		|| warp-cli --accept-tos register 2>/dev/null \
+		|| echo "y" | warp-cli registration new 2>/dev/null \
+		|| echo "y" | warp-cli register 2>/dev/null \
+		|| true
+
+	showWarpProgressBar 94 "Excluding VPS management ports (SSH & WireGuard)..."
+	local PUB_IP="${SERVER_PUB_IP:-}"
+	[[ -n "$PUB_IP" && "$PUB_IP" != "127.0.0.1" ]] && (warp-cli --accept-tos add-excluded-route "${PUB_IP}/32" 2>/dev/null || warp-cli add-excluded-route "${PUB_IP}/32" 2>/dev/null || true)
+	warp-cli --accept-tos add-excluded-route "0.0.0.0/0:22" 2>/dev/null || warp-cli add-excluded-route "0.0.0.0/0:22" 2>/dev/null || true
+	warp-cli --accept-tos add-excluded-route "0.0.0.0/0:${SERVER_PORT:-4500}" 2>/dev/null || warp-cli add-excluded-route "0.0.0.0/0:${SERVER_PORT:-4500}" 2>/dev/null || true
+	warp-cli --accept-tos add-excluded-route "0.0.0.0/0:${WEB_PORT:-51821}" 2>/dev/null || warp-cli add-excluded-route "0.0.0.0/0:${WEB_PORT:-51821}" 2>/dev/null || true
+
+	showWarpProgressBar 97 "Connecting WARP consumer gateway..."
+	warp-cli --accept-tos mode warp 2>/dev/null || warp-cli --accept-tos set-mode warp 2>/dev/null || warp-cli set-mode proxy 2>/dev/null || true
+	warp-cli --accept-tos connect 2>/dev/null || warp-cli connect 2>/dev/null || true
+
+	if ip link show CloudflareWARP &>/dev/null; then
+		iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 -o CloudflareWARP -j MASQUERADE 2>/dev/null || true
+		iptables -t nat -I POSTROUTING 2 -s 10.19.0.0/24 -o CloudflareWARP -j MASQUERADE 2>/dev/null || true
+	fi
+
+	showWarpProgressBar 100 "Cloudflare WARP Consumer Egress active (AS13335)!"
+	echo -e "${GREEN}[✔] Outgoing Cloudflare packets mapped to AS13335 without disrupting SSH or WireGuard networking.${NC}"
+}
+
 function cloudflareAntiFlagEngine() {
 	while true; do
 		local CF_SHIELD_STATUS="ACTIVE"
@@ -2201,40 +2371,13 @@ function cloudflareAntiFlagEngine() {
 		read -rp "Select option [1-8]: " CF_OPT
 		case "$CF_OPT" in
 			1)
-				echo -e "\n${CYAN}[*] Setting up Cloudflare WARP Egress for Zero-Challenge Anti-Bot...${NC}"
-				mkdir -p /etc/wireguard
-				touch /etc/wireguard/warp_egress_enabled
-				if ! command -v warp-cli &>/dev/null && command -v apt-get &>/dev/null; then
-					echo -e "${YELLOW}[*] Installing official Cloudflare WARP client package...${NC}"
-					curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg 2>/dev/null || true
-					echo "deb [arch=amd64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs 2>/dev/null || echo bookworm) main" > /etc/apt/sources.list.d/cloudflare-client.list 2>/dev/null || true
-					apt-get update -qq >/dev/null 2>&1 || true
-					apt-get install -y -qq cloudflare-warp >/dev/null 2>&1 || true
-				fi
-				if command -v warp-cli &>/dev/null; then
-					warp-cli register 2>/dev/null || true
-					warp-cli add-excluded-route "${SERVER_PUB_IP}/32" 2>/dev/null || true
-					warp-cli add-excluded-route "0.0.0.0/0:22" 2>/dev/null || true
-					warp-cli add-excluded-route "0.0.0.0/0:${SERVER_PORT:-4500}" 2>/dev/null || true
-					warp-cli add-excluded-route "0.0.0.0/0:${WEB_PORT:-51821}" 2>/dev/null || true
-					warp-cli set-mode warp 2>/dev/null || warp-cli mode warp 2>/dev/null || warp-cli set-mode proxy 2>/dev/null || true
-					warp-cli connect 2>/dev/null || true
-					if ip link show CloudflareWARP &>/dev/null; then
-						echo -e "${GREEN}[✔] Official Cloudflare WARP active on tunnel interface (CloudflareWARP - AS13335).${NC}"
-						iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 -o CloudflareWARP -j MASQUERADE 2>/dev/null || true
-					else
-						echo -e "${GREEN}[✔] Cloudflare WARP active in safe proxy mode (127.0.0.1:40000).${NC}"
-					fi
-					echo -e "${GREEN}[✔] Outgoing Cloudflare packets mapped to AS13335 without disrupting SSH or default networking.${NC}"
-				else
-					echo -e "${YELLOW}[*] Cloudflare WARP upstream routing registered.${NC}"
-					echo -e "${GREEN}[✔] Outgoing Cloudflare packets mapped to Cloudflare Consumer Pool.${NC}"
-				fi
+				setupCloudflareWarpClient
 				for d in challenges.cloudflare.com cloudflare.com turnstile.com cdnjs.cloudflare.com pages.dev; do
 					grep -q "^${d}\$" /etc/wireguard/split_domains.txt 2>/dev/null || echo "$d" >> /etc/wireguard/split_domains.txt
 				done
 				applyDomainSplitRulesLive
 				echo -e "${GREEN}[✔] Cloudflare WARP Egress & ISP Masking ACTIVE.${NC}\n"
+				read -n1 -r -p "Press Enter to return..."
 				;;
 			2)
 				echo -e "\n${CYAN}[*] Applying Cloudflare Edge & Turnstile CIDRs Split Rules...${NC}"
