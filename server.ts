@@ -870,39 +870,39 @@ SaveConfig = false
 # Serves BOTH Standard Direct VPS Egress & Cloudflare Anti-Flag Profiles
 # ==============================================================================
 
-# --- 1. CORE NETWORKING & FIREWALL ---
+# --- 1. CORE NETWORKING & FIREWALL (Port ${port}/udp for Both Profiles) ---
 PostUp = sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true
 PostUp = iptables -I INPUT 1 -p udp --dport ${port} -j ACCEPT 2>/dev/null || true
-PostUp = iptables -I INPUT 2 -p udp --dport ${port} -m recent --set --name WG_SCANNER 2>/dev/null || true
-PostUp = iptables -I INPUT 3 -p udp --dport ${port} -m recent --update --seconds 10 --hitcount 35 --name WG_SCANNER -j DROP 2>/dev/null || true
 PostUp = iptables -I FORWARD 1 -i wg0 -j ACCEPT 2>/dev/null || true
-PostUp = iptables -I FORWARD 2 -o wg0 -j ACCEPT 2>/dev/null || true
-PostUp = iptables -I FORWARD 3 -s 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
-PostUp = iptables -I FORWARD 4 -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
-PostUp = iptables -t nat -I POSTROUTING 1 -s 10.19.0.0/24 -j MASQUERADE 2>/dev/null || true
-PostUp = iptables -t nat -I POSTROUTING 2 -s 10.18.0.0/24 -j MASQUERADE 2>/dev/null || true
+PostUp = iptables -I FORWARD 2 -o wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+PostUp = iptables -I FORWARD 3 -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
+PostUp = iptables -I FORWARD 4 -d 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
+PostUp = iptables -I FORWARD 5 -s 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
+PostUp = iptables -I FORWARD 6 -d 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
+PostUp = iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 ! -o wg0 -j MASQUERADE 2>/dev/null || true
+PostUp = iptables -t nat -I POSTROUTING 2 -s 10.19.0.0/24 ! -o wg0 -j MASQUERADE 2>/dev/null || true
 
 # --- 2. PROFILE 1: CLOUDFLARE ANTI-FLAG & STEALTH PROFILE (10.19.0.0/24) ---
-# Active UDP scanner drop, PMTU MSS Clamping (prevents TLS ClientHello fragmentation on LinkedIn / Akamai), Windows 11 TTL=128 disguise
+# Active TCP MSS PMTU Clamping (prevents TLS ClientHello fragmentation on LinkedIn / Akamai) and Windows 11 Desktop TTL=128 disguise
 PostUp = iptables -t mangle -I FORWARD 1 -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 PostUp = iptables -t mangle -I FORWARD 2 -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 PostUp = iptables -t mangle -I POSTROUTING 1 -s 10.19.0.0/24 -j TTL --ttl-set 128 2>/dev/null || true
 
 # --- 3. PROFILE 2: STANDARD DIRECT VPS EGRESS (10.18.0.0/24) ---
-# Direct VPS egress, PMTU clamp only. 100% Amazon/shopping/banking compatibility.
+# Direct VPS egress, standard PMTU clamp only. 100% Amazon/shopping/banking compatibility.
 PostUp = iptables -t mangle -I FORWARD 3 -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 PostUp = iptables -t mangle -I FORWARD 4 -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 
 # Teardown Rules
 PostDown = iptables -D INPUT -p udp --dport ${port} -j ACCEPT 2>/dev/null || true
-PostDown = iptables -D INPUT -p udp --dport ${port} -m recent --update --seconds 10 --hitcount 35 --name WG_SCANNER -j DROP 2>/dev/null || true
-PostDown = iptables -D INPUT -p udp --dport ${port} -m recent --set --name WG_SCANNER 2>/dev/null || true
 PostDown = iptables -D FORWARD -i wg0 -j ACCEPT 2>/dev/null || true
-PostDown = iptables -D FORWARD -o wg0 -j ACCEPT 2>/dev/null || true
-PostDown = iptables -D FORWARD -s 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D FORWARD -o wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
-PostDown = iptables -t nat -D POSTROUTING -s 10.19.0.0/24 -j MASQUERADE 2>/dev/null || true
-PostDown = iptables -t nat -D POSTROUTING -s 10.18.0.0/24 -j MASQUERADE 2>/dev/null || true
+PostDown = iptables -D FORWARD -d 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D FORWARD -s 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D FORWARD -d 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
+PostDown = iptables -t nat -D POSTROUTING -s 10.18.0.0/24 ! -o wg0 -j MASQUERADE 2>/dev/null || true
+PostDown = iptables -t nat -D POSTROUTING -s 10.19.0.0/24 ! -o wg0 -j MASQUERADE 2>/dev/null || true
 PostDown = iptables -t mangle -D FORWARD -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 PostDown = iptables -t mangle -D FORWARD -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 PostDown = iptables -t mangle -D POSTROUTING -s 10.19.0.0/24 -j TTL --ttl-set 128 2>/dev/null || true
@@ -956,11 +956,11 @@ function generateClientConfigText(peer: Peer, antiFlag: boolean = false): string
 # • Port: ${targetPort} (Unified Port - Shared with Standard Profile)
 # • Subnet / Assigned IP: ${targetIp}/32 (Subnet: 10.19.0.0/24)
 # • MTU: 1360 (Anti-Fragmentation Cloudflare-Tuned MTU)
-# • DNS: 94.140.14.14, 1.1.1.2 (Encrypted Security DNS + ECS-Stripping)
+# • DNS: ${peer.dns || serverState.defaultDns || '1.1.1.1, 1.0.0.1'} (Primary & Backup DNS Resolvers)
 # • Target Use Case: Cloudflare Turnstile captcha bypass, LinkedIn 403 unblocking,
 #                    evading active ISP port scanners & anti-VPN deep inspection.
 # • Server Protections: Windows 11 Desktop TTL=128 Disguise, TCP MSS PMTU Clamping,
-#                       Active UDP Scanner Drop Rate-Limiting, Smart Egress Relay.
+#                       High-Performance In-Memory Obfuscation, Smart Egress Relay.
 #
 # • AmneziaWG Obfuscation Parameters (for AmneziaWG / AWG clients):
 #   Jc = 4 | Jmin = 40 | Jmax = 70 | S1 = 15 | S2 = 20 | H1 = 1 | H2 = 2 | H3 = 3 | H4 = 4
@@ -968,7 +968,7 @@ function generateClientConfigText(peer: Peer, antiFlag: boolean = false): string
 [Interface]
 PrivateKey = ${privateKey}
 Address = ${targetIp}/32
-DNS = 94.140.14.14, 1.1.1.2
+DNS = ${peer.dns || serverState.defaultDns || '1.1.1.1, 1.0.0.1'}
 MTU = 1360
 # AmneziaWG Obfuscation (Active when imported into AmneziaWG client):
 # Jc = 4
@@ -1393,8 +1393,19 @@ app.delete('/api/clients/:id', requireVpnOrAuth, (req: Request, res: Response) =
   // Remove live from kernel and delete encrypted files from easy_wireguard
   if (checkLiveWireguard()) {
     try {
-      execSync(`wg set wg0 peer "${deleted.publicKey}" remove 2>/dev/null || true`);
-      execSync(`wg set wg1 peer "${deleted.publicKey}" remove 2>/dev/null || true`);
+      if (deleted.publicKey) {
+        execSync(`wg set wg0 peer "${deleted.publicKey}" remove 2>/dev/null || true`);
+        execSync(`wg set wg1 peer "${deleted.publicKey}" remove 2>/dev/null || true`);
+      }
+      if (deleted.cfPublicKey) {
+        execSync(`wg set wg0 peer "${deleted.cfPublicKey}" remove 2>/dev/null || true`);
+        execSync(`wg set wg1 peer "${deleted.cfPublicKey}" remove 2>/dev/null || true`);
+      }
+      if (fs.existsSync('/etc/wireguard/wg0.conf')) {
+        try {
+          fs.writeFileSync('/etc/wireguard/wg0.conf', generateServerConfigText('wg0'));
+        } catch (e) {}
+      }
       const easyWgDir = '/root/easy_wireguard';
       const filePrefixes = [
         `${deleted.name}`,

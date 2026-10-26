@@ -712,39 +712,43 @@ PrivateKey = ${SERVER_PRIV_KEY}
 MTU = 1420
 SaveConfig = false
 
-# --- 1. CORE NETWORKING & FIREWALL (Port ${SERVER_PORT} for Both Profiles) ---
+# --- 1. CORE NETWORKING & FIREWALL (Port ${SERVER_PORT}/udp for Both Profiles) ---
 PostUp = sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true
 PostUp = iptables -I INPUT 1 -p udp --dport ${SERVER_PORT} -j ACCEPT 2>/dev/null || true
-PostUp = iptables -I INPUT 2 -p udp --dport ${SERVER_PORT} -m recent --set --name WG_SCANNER 2>/dev/null || true
-PostUp = iptables -I INPUT 3 -p udp --dport ${SERVER_PORT} -m recent --update --seconds 10 --hitcount 35 --name WG_SCANNER -j DROP 2>/dev/null || true
 PostUp = iptables -I FORWARD 1 -i wg0 -j ACCEPT 2>/dev/null || true
-PostUp = iptables -I FORWARD 2 -o wg0 -j ACCEPT 2>/dev/null || true
-PostUp = iptables -I FORWARD 3 -s 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
-PostUp = iptables -I FORWARD 4 -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
-PostUp = iptables -t nat -I POSTROUTING 1 -s 10.19.0.0/24 -j MASQUERADE 2>/dev/null || true
-PostUp = iptables -t nat -I POSTROUTING 2 -s 10.18.0.0/24 -j MASQUERADE 2>/dev/null || true
+PostUp = iptables -I FORWARD 2 -o wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+PostUp = iptables -I FORWARD 3 -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
+PostUp = iptables -I FORWARD 4 -d 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
+PostUp = iptables -I FORWARD 5 -s 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
+PostUp = iptables -I FORWARD 6 -d 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
+PostUp = iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 ! -o wg0 -j MASQUERADE 2>/dev/null || true
+PostUp = iptables -t nat -I POSTROUTING 2 -s 10.19.0.0/24 ! -o wg0 -j MASQUERADE 2>/dev/null || true
+PostUp = iptables -t nat -I POSTROUTING 3 -s 10.18.0.0/24 -o ${SERVER_PUB_NIC} -j MASQUERADE 2>/dev/null || true
+PostUp = iptables -t nat -I POSTROUTING 4 -s 10.19.0.0/24 -o ${SERVER_PUB_NIC} -j MASQUERADE 2>/dev/null || true
 
 # --- 2. PROFILE 1: CLOUDFLARE ANTI-FLAG & STEALTH PROFILE (10.19.0.0/24) ---
-# Active UDP scanner drop, PMTU MSS Clamping (prevents TLS ClientHello fragmentation on LinkedIn / Akamai), Windows 11 TTL=128 disguise
+# Active TCP MSS PMTU Clamping (prevents TLS ClientHello fragmentation on LinkedIn / Akamai) and Windows 11 Desktop TTL=128 disguise
 PostUp = iptables -t mangle -I FORWARD 1 -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 PostUp = iptables -t mangle -I FORWARD 2 -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 PostUp = iptables -t mangle -I POSTROUTING 1 -s 10.19.0.0/24 -j TTL --ttl-set 128 2>/dev/null || true
 
 # --- 3. PROFILE 2: STANDARD DIRECT VPS EGRESS (10.18.0.0/24) ---
-# Direct VPS egress, PMTU clamp only. 100% Amazon/shopping/banking compatibility.
+# Direct VPS egress, standard PMTU clamp only. 100% Amazon/shopping/banking compatibility.
 PostUp = iptables -t mangle -I FORWARD 3 -s 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 PostUp = iptables -t mangle -I FORWARD 4 -d 10.18.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 
 # Teardown Rules
 PostDown = iptables -D INPUT -p udp --dport ${SERVER_PORT} -j ACCEPT 2>/dev/null || true
-PostDown = iptables -D INPUT -p udp --dport ${SERVER_PORT} -m recent --update --seconds 10 --hitcount 35 --name WG_SCANNER -j DROP 2>/dev/null || true
-PostDown = iptables -D INPUT -p udp --dport ${SERVER_PORT} -m recent --set --name WG_SCANNER 2>/dev/null || true
 PostDown = iptables -D FORWARD -i wg0 -j ACCEPT 2>/dev/null || true
-PostDown = iptables -D FORWARD -o wg0 -j ACCEPT 2>/dev/null || true
-PostDown = iptables -D FORWARD -s 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D FORWARD -o wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
-PostDown = iptables -t nat -D POSTROUTING -s 10.19.0.0/24 -j MASQUERADE 2>/dev/null || true
-PostDown = iptables -t nat -D POSTROUTING -s 10.18.0.0/24 -j MASQUERADE 2>/dev/null || true
+PostDown = iptables -D FORWARD -d 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D FORWARD -s 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D FORWARD -d 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
+PostDown = iptables -t nat -D POSTROUTING -s 10.18.0.0/24 ! -o wg0 -j MASQUERADE 2>/dev/null || true
+PostDown = iptables -t nat -D POSTROUTING -s 10.19.0.0/24 ! -o wg0 -j MASQUERADE 2>/dev/null || true
+PostDown = iptables -t nat -D POSTROUTING -s 10.18.0.0/24 -o ${SERVER_PUB_NIC} -j MASQUERADE 2>/dev/null || true
+PostDown = iptables -t nat -D POSTROUTING -s 10.19.0.0/24 -o ${SERVER_PUB_NIC} -j MASQUERADE 2>/dev/null || true
 PostDown = iptables -t mangle -D FORWARD -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 PostDown = iptables -t mangle -D FORWARD -d 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 PostDown = iptables -t mangle -D POSTROUTING -s 10.19.0.0/24 -j TTL --ttl-set 128 2>/dev/null || true
@@ -1046,11 +1050,11 @@ function newClientInternal() {
 # • Port: ${SERVER_PORT} (Unified Port - Shared with Standard Profile)
 # • Subnet / Assigned IP: ${CLIENT_WG_CF_IPV4}/32 (Subnet: 10.19.0.0/24)
 # • MTU: 1360 (Anti-Fragmentation Cloudflare-Tuned MTU)
-# • DNS: 94.140.14.14, 1.1.1.2 (Encrypted Security DNS + ECS-Stripping)
+# • DNS: ${CLIENT_DNS_LINE} (Primary & Backup DNS Resolvers)
 # • Target Use Case: Cloudflare Turnstile captcha bypass, LinkedIn 403 unblocking,
 #                    evading active ISP port scanners & anti-VPN deep inspection.
 # • Server Protections: Windows 11 Desktop TTL=128 Disguise, TCP MSS PMTU Clamping,
-#                       Active UDP Scanner Drop Rate-Limiting, Smart Egress Relay.
+#                       High-Performance In-Memory Obfuscation, Smart Egress Relay.
 #
 # • AmneziaWG Obfuscation Parameters (for AmneziaWG / AWG clients):
 #   Jc = 4 | Jmin = 40 | Jmax = 70 | S1 = 15 | S2 = 20 | H1 = 1 | H2 = 2 | H3 = 3 | H4 = 4
@@ -1058,7 +1062,7 @@ function newClientInternal() {
 [Interface]
 PrivateKey = ${CLIENT_CF_PRIV_KEY}
 Address = ${CLIENT_WG_CF_IPV4}/32
-DNS = 94.140.14.14, 1.1.1.2
+DNS = ${CLIENT_DNS_LINE}
 MTU = 1360
 # AmneziaWG Obfuscation (Active when imported into AmneziaWG client):
 # Jc = 4
@@ -1220,24 +1224,34 @@ function newClient() {
 
 function listClients() {
 	echo -e "\n${CYAN}--- Active WireGuard Clients ---${NC}"
-	if ! grep -q "^### Client" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" 2>/dev/null; then
+	local CONF_FILE="/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf"
+	local CLIENT_LIST=()
+	while IFS= read -r cname; do
+		[[ -n "$cname" ]] && CLIENT_LIST+=("$cname")
+	done < <(grep -E "^### Client" "$CONF_FILE" 2>/dev/null | awk '{print $3}' | sort -u)
+
+	if [[ ${#CLIENT_LIST[@]} -eq 0 ]]; then
 		echo -e "${YELLOW}No clients registered yet.${NC}\n"
 		return
 	fi
 
-	echo -e "${BOLD}Client Name\t\tIPv4 Address${NC}"
-	echo "--------------------------------------------------------"
-	grep -E "^### Client" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" | cut -d ' ' -f 3 | while read -r name; do
-		local ip
-		ip=$(grep -A 4 "### Client ${name}" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" | grep "AllowedIPs" | awk '{print $3}' | cut -d',' -f1)
-		echo -e "   - ${BOLD}${name}${NC}\t\t(${ip})"
+	echo -e "${BOLD}Client Name\t\tStandard IP\t\tAnti-Flag Stealth IP${NC}"
+	echo "------------------------------------------------------------------------"
+	for name in "${CLIENT_LIST[@]}"; do
+		local std_ip
+		std_ip=$(grep -A 5 "### Client ${name} \[Standard Profile" "$CONF_FILE" 2>/dev/null | grep "AllowedIPs" | awk '{print $3}' | cut -d',' -f1)
+		[[ -z "$std_ip" ]] && std_ip=$(grep -A 5 "### Client ${name}" "$CONF_FILE" 2>/dev/null | grep "AllowedIPs" | awk '{print $3}' | cut -d',' -f1)
+		local cf_ip
+		cf_ip=$(grep -A 5 "### Client ${name} \[Cloudflare Anti-Flag" "$CONF_FILE" 2>/dev/null | grep "AllowedIPs" | awk '{print $3}' | cut -d',' -f1)
+		echo -e "   - ${BOLD}${name}${NC}\t\t${std_ip:-N/A}\t\t${cf_ip:-N/A}"
 	done
 	echo ""
 }
 
 function configureClients() {
 	echo -e "\n${CYAN}--- Configure Clients (Check / Edit / Remove) ---${NC}"
-	if ! grep -q "^### Client" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" 2>/dev/null; then
+	local CONF_FILE="/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf"
+	if ! grep -q "^### Client" "$CONF_FILE" 2>/dev/null; then
 		echo -e "${YELLOW}No clients registered yet.${NC}\n"
 		return
 	fi
@@ -1263,24 +1277,35 @@ function configureClients() {
 
 function showClientQr() {
 	echo -e "\n${CYAN}--- Show Client QR Code & Configuration ---${NC}"
-	local CLIENT_COUNT
-	CLIENT_COUNT=$(grep -c -E "^### Client" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" 2>/dev/null || echo 0)
+	local CONF_FILE="/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf"
+	local CLIENT_LIST=()
+	while IFS= read -r cname; do
+		[[ -n "$cname" ]] && CLIENT_LIST+=("$cname")
+	done < <(grep -E "^### Client" "$CONF_FILE" 2>/dev/null | awk '{print $3}' | sort -u)
+
+	local CLIENT_COUNT=${#CLIENT_LIST[@]}
 	if [[ ${CLIENT_COUNT} -eq 0 ]]; then
 		echo -e "${YELLOW}No clients registered.${NC}\n"
+		read -n1 -r -p "Press Enter to return..."
 		return
 	fi
 
-	echo "Select the client to display:"
-	grep -E "^### Client" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" | cut -d ' ' -f 3 | nl -s ') '
+	echo -e "${BOLD}Select the client to display:${NC}"
+	for i in "${!CLIENT_LIST[@]}"; do
+		echo "  $((i+1))) ${CLIENT_LIST[$i]}"
+	done
+	echo "  $((CLIENT_COUNT+1))) Cancel and return"
 
 	local CLIENT_NUMBER=0
-	until [[ ${CLIENT_NUMBER} -ge 1 && ${CLIENT_NUMBER} -le ${CLIENT_COUNT} ]]; do
-		read -rp "Select client [1-${CLIENT_COUNT}]: " CLIENT_NUMBER
+	until [[ ${CLIENT_NUMBER} -ge 1 && ${CLIENT_NUMBER} -le $((CLIENT_COUNT+1)) ]]; do
+		read -rp "Select client [1-$((CLIENT_COUNT+1))]: " CLIENT_NUMBER
 	done
 
-	local TARGET_CLIENT
-	TARGET_CLIENT=$(grep -E "^### Client" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" | cut -d ' ' -f 3 | sed -n "${CLIENT_NUMBER}"p)
+	if [[ ${CLIENT_NUMBER} -eq $((CLIENT_COUNT+1)) ]]; then
+		return
+	fi
 
+	local TARGET_CLIENT="${CLIENT_LIST[$((CLIENT_NUMBER-1))]}"
 	local EASY_DIR
 	EASY_DIR=$(getEasyWgDir "${TARGET_CLIENT}")
 
@@ -1362,24 +1387,35 @@ function showClientQr() {
 
 function exportDecryptedClientConfig() {
 	echo -e "\n${CYAN}--- Export / Decrypt Client Configuration ---${NC}"
-	local CLIENT_COUNT
-	CLIENT_COUNT=$(grep -c -E "^### Client" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" 2>/dev/null || echo 0)
+	local CONF_FILE="/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf"
+	local CLIENT_LIST=()
+	while IFS= read -r cname; do
+		[[ -n "$cname" ]] && CLIENT_LIST+=("$cname")
+	done < <(grep -E "^### Client" "$CONF_FILE" 2>/dev/null | awk '{print $3}' | sort -u)
+
+	local CLIENT_COUNT=${#CLIENT_LIST[@]}
 	if [[ ${CLIENT_COUNT} -eq 0 ]]; then
 		echo -e "${YELLOW}No clients registered.${NC}\n"
+		read -n1 -r -p "Press Enter to return..."
 		return
 	fi
 
-	echo "Select the client to export:"
-	grep -E "^### Client" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" | cut -d ' ' -f 3 | nl -s ') '
+	echo -e "${BOLD}Select the client to export:${NC}"
+	for i in "${!CLIENT_LIST[@]}"; do
+		echo "  $((i+1))) ${CLIENT_LIST[$i]}"
+	done
+	echo "  $((CLIENT_COUNT+1))) Cancel and return"
 
 	local CLIENT_NUMBER=0
-	until [[ ${CLIENT_NUMBER} -ge 1 && ${CLIENT_NUMBER} -le ${CLIENT_COUNT} ]]; do
-		read -rp "Select client [1-${CLIENT_COUNT}]: " CLIENT_NUMBER
+	until [[ ${CLIENT_NUMBER} -ge 1 && ${CLIENT_NUMBER} -le $((CLIENT_COUNT+1)) ]]; do
+		read -rp "Select client [1-$((CLIENT_COUNT+1))]: " CLIENT_NUMBER
 	done
 
-	local TARGET_CLIENT
-	TARGET_CLIENT=$(grep -E "^### Client" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" | cut -d ' ' -f 3 | sed -n "${CLIENT_NUMBER}"p)
+	if [[ ${CLIENT_NUMBER} -eq $((CLIENT_COUNT+1)) ]]; then
+		return
+	fi
 
+	local TARGET_CLIENT="${CLIENT_LIST[$((CLIENT_NUMBER-1))]}"
 	local EASY_DIR
 	EASY_DIR=$(getEasyWgDir "${TARGET_CLIENT}")
 
@@ -1446,43 +1482,107 @@ function exportDecryptedClientConfig() {
 
 function revokeClient() {
 	echo -e "\n${CYAN}--- Revoke / Remove a Client ---${NC}"
-	local CLIENT_COUNT
-	CLIENT_COUNT=$(grep -c -E "^### Client" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" 2>/dev/null || echo 0)
-	if [[ ${CLIENT_COUNT} -eq 0 ]]; then
-		echo -e "${YELLOW}No clients registered to revoke.${NC}\n"
+	local CONF_FILE="/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf"
+	if [[ ! -f "$CONF_FILE" ]]; then
+		echo -e "${YELLOW}WireGuard server configuration file not found (${CONF_FILE}).${NC}\n"
+		read -n1 -r -p "Press Enter to return..."
 		return
 	fi
 
-	echo "Select the client to revoke:"
-	grep -E "^### Client" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" | cut -d ' ' -f 3 | nl -s ') '
+	# Extract unique client names
+	local CLIENT_LIST=()
+	while IFS= read -r cname; do
+		[[ -n "$cname" ]] && CLIENT_LIST+=("$cname")
+	done < <(grep -E "^### Client" "$CONF_FILE" 2>/dev/null | awk '{print $3}' | sort -u)
+
+	local CLIENT_COUNT=${#CLIENT_LIST[@]}
+	if [[ ${CLIENT_COUNT} -eq 0 ]]; then
+		echo -e "${YELLOW}No registered clients found to revoke.${NC}\n"
+		read -n1 -r -p "Press Enter to return..."
+		return
+	fi
+
+	echo -e "${BOLD}Select the client to revoke:${NC}"
+	for i in "${!CLIENT_LIST[@]}"; do
+		echo "  $((i+1))) ${CLIENT_LIST[$i]}"
+	done
+	echo "  $((CLIENT_COUNT+1))) Cancel and return"
 
 	local CLIENT_NUMBER=0
-	until [[ ${CLIENT_NUMBER} -ge 1 && ${CLIENT_NUMBER} -le ${CLIENT_COUNT} ]]; do
-		read -rp "Select client [1-${CLIENT_COUNT}]: " CLIENT_NUMBER
+	until [[ ${CLIENT_NUMBER} -ge 1 && ${CLIENT_NUMBER} -le $((CLIENT_COUNT+1)) ]]; do
+		read -rp "Select client [1-$((CLIENT_COUNT+1))]: " CLIENT_NUMBER
 	done
 
-	local TARGET_CLIENT
-	TARGET_CLIENT=$(grep -E "^### Client" "/etc/wireguard/${SERVER_WG_NIC:-wg0}.conf" | cut -d ' ' -f 3 | sed -n "${CLIENT_NUMBER}"p)
+	if [[ ${CLIENT_NUMBER} -eq $((CLIENT_COUNT+1)) ]]; then
+		echo -e "${YELLOW}Revocation cancelled.${NC}\n"
+		return
+	fi
 
+	local TARGET_CLIENT="${CLIENT_LIST[$((CLIENT_NUMBER-1))]}"
+	echo -e "\n${YELLOW}Are you sure you want to revoke client '${BOLD}${TARGET_CLIENT}${NC}${YELLOW}'?${NC}"
+	read -rp "Type 'yes' or 'y' to confirm: " CONFIRM_REVOKE
+	if [[ "$CONFIRM_REVOKE" != "yes" && "$CONFIRM_REVOKE" != "y" ]]; then
+		echo -e "${YELLOW}Revocation cancelled.${NC}\n"
+		return
+	fi
+
+	echo -e "${CYAN}[*] Revoking client '${TARGET_CLIENT}'...${NC}"
+
+	# 1. Extract public keys for this client and live-remove peers from kernel
+	local PUB_KEYS
+	PUB_KEYS=$(grep -A 5 -E "^### Client ${TARGET_CLIENT}\b" "$CONF_FILE" 2>/dev/null | grep -E "^\s*PublicKey\s*=" | awk '{print $3}')
+	for pk in $PUB_KEYS; do
+		if [[ -n "$pk" ]] && command -v wg &>/dev/null; then
+			wg set "${SERVER_WG_NIC:-wg0}" peer "$pk" remove 2>/dev/null || true
+			wg set wg1 peer "$pk" remove 2>/dev/null || true
+		fi
+	done
+
+	# 2. Clean client peer blocks from wg0.conf and wg1.conf
+	if command -v python3 &>/dev/null; then
+		python3 -c "
+import sys, re
+target = sys.argv[1]
+for conf_path in ['/etc/wireguard/wg0.conf', '/etc/wireguard/wg1.conf']:
+    try:
+        with open(conf_path, 'r') as f:
+            content = f.read()
+        pattern = r'(?m)^\s*### Client\s+' + re.escape(target) + r'\b[\s\S]*?(?=(?:^\s*### Client)|\Z)'
+        new_content = re.sub(pattern, '', content)
+        new_content = re.sub(r'\n{3,}', '\n\n', new_content).rstrip() + '\n'
+        with open(conf_path, 'w') as f:
+            f.write(new_content)
+    except Exception:
+        pass
+" "$TARGET_CLIENT"
+	fi
+	sed -i "/^### Client ${TARGET_CLIENT}\b/,/^$/d" "$CONF_FILE" 2>/dev/null || true
+	sed -i "/^### Client ${TARGET_CLIENT}\b/,/^$/d" "/etc/wireguard/wg1.conf" 2>/dev/null || true
+
+	# 3. Synchronize live WireGuard kernel interface with stripped config
+	if command -v wg-quick &>/dev/null && command -v wg &>/dev/null; then
+		wg syncconf "${SERVER_WG_NIC:-wg0}" <(wg-quick strip "${SERVER_WG_NIC:-wg0}") 2>/dev/null || true
+		if [[ -f /etc/wireguard/wg1.conf ]]; then
+			wg syncconf wg1 <(wg-quick strip wg1) 2>/dev/null || true
+		fi
+	fi
+
+	# 4. Remove encrypted and decrypted config files
 	local EASY_DIR
 	EASY_DIR=$(getEasyWgDir "${TARGET_CLIENT}")
 	local HOME_DIR
 	HOME_DIR=$(getHomeDirForClient "${TARGET_CLIENT}")
 
-	sed -i "/^### Client ${TARGET_CLIENT}\$/,/^$/d" "/etc/wireguard/wg0.conf" 2>/dev/null || true
-	sed -i "/^### Client ${TARGET_CLIENT}\$/,/^$/d" "/etc/wireguard/wg1.conf" 2>/dev/null || true
-
-	# Remove encrypted and unencrypted configs
 	rm -f "${EASY_DIR}/${TARGET_CLIENT}"*.conf "${EASY_DIR}/${TARGET_CLIENT}"*.conf.enc 2>/dev/null || true
 	rm -f "/etc/wireguard/clients/${TARGET_CLIENT}"*.conf "/etc/wireguard/clients/${TARGET_CLIENT}"*.conf.enc 2>/dev/null || true
-	rm -f "${HOME_DIR}/${TARGET_CLIENT}"*.conf "${HOME_DIR}/${TARGET_CLIENT}"*.conf.enc "/root/${TARGET_CLIENT}"*.conf "/root/${TARGET_CLIENT}"*.conf.enc 2>/dev/null || true
+	rm -f "${HOME_DIR}/${TARGET_CLIENT}"*.conf "${HOME_DIR}/${TARGET_CLIENT}"*.conf.enc 2>/dev/null || true
+	rm -f "/root/${TARGET_CLIENT}"*.conf "/root/${TARGET_CLIENT}"*.conf.enc 2>/dev/null || true
 
-	if command -v wg-quick &>/dev/null && command -v wg &>/dev/null; then
-		wg syncconf wg0 <(wg-quick strip wg0) 2>/dev/null || true
-		wg syncconf wg1 <(wg-quick strip wg1) 2>/dev/null || true
-	fi
-
-	echo -e "${GREEN}[✔] Client ${TARGET_CLIENT} revoked successfully from both instances and encrypted store.${NC}\n"
+	echo -e "${GREEN}${BOLD}[✔] Client '${TARGET_CLIENT}' successfully revoked!${NC}"
+	echo -e "    - Peer removed live from WireGuard kernel (${SERVER_WG_NIC:-wg0})"
+	echo -e "    - Both profiles (Standard & Cloudflare Anti-Flag) removed from ${CONF_FILE}"
+	echo -e "    - Encrypted configs deleted from ${EASY_DIR}/\n"
+	read -n1 -r -p "Press Enter to return..."
 }
 
 function backupRestoreManager() {
@@ -1656,9 +1756,13 @@ DNSMASQ_STEALTH_EOF
 	iptables -I FORWARD 2 -o "${SERVER_WG_NIC:-wg0}" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
 	iptables -I FORWARD 3 -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
 	iptables -I FORWARD 4 -d 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
+	iptables -I FORWARD 5 -s 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
+	iptables -I FORWARD 6 -d 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
 	iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 ! -o "${SERVER_WG_NIC:-wg0}" -j MASQUERADE 2>/dev/null || true
+	iptables -t nat -I POSTROUTING 2 -s 10.19.0.0/24 ! -o "${SERVER_WG_NIC:-wg0}" -j MASQUERADE 2>/dev/null || true
 	if [[ -n "$DEF_NIC" ]]; then
-		iptables -t nat -I POSTROUTING 2 -s 10.18.0.0/24 -o "$DEF_NIC" -j MASQUERADE 2>/dev/null || true
+		iptables -t nat -I POSTROUTING 3 -s 10.18.0.0/24 -o "$DEF_NIC" -j MASQUERADE 2>/dev/null || true
+		iptables -t nat -I POSTROUTING 4 -s 10.19.0.0/24 -o "$DEF_NIC" -j MASQUERADE 2>/dev/null || true
 	fi
 	sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
 
@@ -1673,14 +1777,18 @@ DNSMASQ_STEALTH_EOF
 	fi
 
 	# TRANSPARENT DNS FAILOVER & ANONYMIZATION:
-	# Ensures clients querying internal IP (10.18.0.1:53) never experience timeout even if local dnsmasq is inactive
+	# Ensures clients querying internal IP (10.18.0.1:53 or 10.19.0.1:53) never experience timeout
 	iptables -I INPUT 1 -i "${SERVER_WG_NIC:-wg0}" -p udp --dport 53 -j ACCEPT 2>/dev/null || true
 	iptables -I INPUT 2 -i "${SERVER_WG_NIC:-wg0}" -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
 	iptables -t nat -D PREROUTING -i "${SERVER_WG_NIC:-wg0}" -d "${SERVER_WG_IPV4:-10.18.0.1}" -p udp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
 	iptables -t nat -D PREROUTING -i "${SERVER_WG_NIC:-wg0}" -d "${SERVER_WG_IPV4:-10.18.0.1}" -p tcp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
+	iptables -t nat -D PREROUTING -i "${SERVER_WG_NIC:-wg0}" -d 10.19.0.1 -p udp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
+	iptables -t nat -D PREROUTING -i "${SERVER_WG_NIC:-wg0}" -d 10.19.0.1 -p tcp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
 	if ! systemctl is-active --quiet dnsmasq 2>/dev/null; then
 		iptables -t nat -A PREROUTING -i "${SERVER_WG_NIC:-wg0}" -d "${SERVER_WG_IPV4:-10.18.0.1}" -p udp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
 		iptables -t nat -A PREROUTING -i "${SERVER_WG_NIC:-wg0}" -d "${SERVER_WG_IPV4:-10.18.0.1}" -p tcp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
+		iptables -t nat -A PREROUTING -i "${SERVER_WG_NIC:-wg0}" -d 10.19.0.1 -p udp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
+		iptables -t nat -A PREROUTING -i "${SERVER_WG_NIC:-wg0}" -d 10.19.0.1 -p tcp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
 	fi
 
 	# Re-apply Stealth Packet Normalization Rules (Clean non-colliding order)
