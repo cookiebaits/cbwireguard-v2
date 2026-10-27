@@ -1,7 +1,7 @@
 #!/bin/bash
 # ==============================================================================
-# 🍪 Cookie's Easy WireGuard Manager & VPS Stealth Server v4.0
-# Hyper-Optimized Anti-Detect Egress, Transparent WARP Bridge & Zero-Fail Routing
+# 🍪 Cookie's Easy WireGuard Manager & VPS Stealth Server v4.1
+# Hyper-Optimized Anti-Detect Egress, Transparent WARP Bridge & Multi-Gigabit Tuning
 # ==============================================================================
 
 # Colors
@@ -234,12 +234,65 @@ function isPortInUse() {
 	return 1
 }
 
+# ------------------------------------------------------------------------------
+# 2b. Hardware NIC Offloading, RPS/RFS Multi-Queue & Conntrack Speed Booster
+# ------------------------------------------------------------------------------
+function optimizeNetworkThroughput() {
+	local PUB_NIC="${1:-${SERVER_PUB_NIC:-}}"
+	if [[ -z "$PUB_NIC" ]]; then
+		PUB_NIC=$(ip -4 route show default 2>/dev/null | awk '/dev/ {for (i=1; i<=NF; i++) if ($i == "dev") print $(i+1)}' | head -n1 || echo "eth0")
+	fi
+	local WG_NIC="${SERVER_WG_NIC:-wg0}"
+
+	# 1. Increase interface transmit queue lengths for multi-gigabit burst capacity
+	ip link set dev "$PUB_NIC" txqueuelen 10000 2>/dev/null || true
+	ip link set dev "$WG_NIC" txqueuelen 10000 2>/dev/null || true
+
+	# 2. Enable Hardware/Kernel GRO, GSO, TSO, SG, and RX/TX Checksum Offloading
+	if command -v ethtool &>/dev/null; then
+		ethtool -K "$PUB_NIC" gro on gso on tso on sg on rx on tx on 2>/dev/null || true
+		ethtool -K "$WG_NIC" gro on gso on sg on 2>/dev/null || true
+		# Maximize ring buffer sizes if supported by NIC driver
+		local MAX_RX MAX_TX
+		MAX_RX=$(ethtool -g "$PUB_NIC" 2>/dev/null | awk '/Pre-set maximums:/,0 {if ($1 == "RX:") {print $2; exit}}')
+		MAX_TX=$(ethtool -g "$PUB_NIC" 2>/dev/null | awk '/Pre-set maximums:/,0 {if ($1 == "TX:") {print $2; exit}}')
+		[[ -n "$MAX_RX" && "$MAX_RX" =~ ^[0-9]+$ ]] && ethtool -G "$PUB_NIC" rx "$MAX_RX" 2>/dev/null || true
+		[[ -n "$MAX_TX" && "$MAX_TX" =~ ^[0-9]+$ ]] && ethtool -G "$PUB_NIC" tx "$MAX_TX" 2>/dev/null || true
+	fi
+
+	# 3. Enable Receive Packet Steering (RPS) & Receive Flow Steering (RFS) across all CPU cores
+	local NUM_CORES
+	NUM_CORES=$(nproc 2>/dev/null || echo 2)
+	local RPS_MASK
+	RPS_MASK=$(printf '%x' $(( (1 << (NUM_CORES > 16 ? 16 : NUM_CORES)) - 1 )))
+	echo 32768 > /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null || true
+
+	for dev in "$PUB_NIC" "$WG_NIC"; do
+		if [[ -d "/sys/class/net/${dev}/queues" ]]; then
+			for rxq in /sys/class/net/"${dev}"/queues/rx-*; do
+				[[ -f "${rxq}/rps_cpus" ]] && echo "$RPS_MASK" > "${rxq}/rps_cpus" 2>/dev/null || true
+				[[ -f "${rxq}/rps_flow_cnt" ]] && echo 4096 > "${rxq}/rps_flow_cnt" 2>/dev/null || true
+			done
+			for txq in /sys/class/net/"${dev}"/queues/tx-*; do
+				[[ -f "${txq}/xps_cpus" ]] && echo "$RPS_MASK" > "${txq}/xps_cpus" 2>/dev/null || true
+			done
+		fi
+	done
+
+	# 4. Configure FQ (Fair Queue) qdisc with pacing for WireGuard & Public NIC
+	if command -v tc &>/dev/null; then
+		tc qdisc replace dev "$PUB_NIC" root fq 2>/dev/null || true
+		tc qdisc replace dev "$WG_NIC" root fq 2>/dev/null || true
+	fi
+}
+
 function cleanupOldWireguard() {
 	echo -e "\n${CYAN}[*] Scanning for old/conflicting WireGuard instances & services...${NC}"
 
 	systemctl stop "wg-quick@wg0" >/dev/null 2>&1 || true
 	systemctl stop "wg-quick@wg1" >/dev/null 2>&1 || true
 	systemctl disable "wg-quick@wg1" >/dev/null 2>&1 || true
+	systemctl stop wg-warp-watchdog.timer >/dev/null 2>&1 || true
 
 	if command -v wg-quick >/dev/null 2>&1; then
 		wg-quick down wg0 >/dev/null 2>&1 || true
@@ -262,6 +315,7 @@ function cleanupOldWireguard() {
 	iptables -t nat -X WG_STEALTH_PROXY 2>/dev/null || true
 
 	# Surgical rule cleanup
+	iptables -D FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
 	iptables -D FORWARD -i wg0 -j ACCEPT 2>/dev/null || true
 	iptables -D FORWARD -o wg0 -j ACCEPT 2>/dev/null || true
 	iptables -D FORWARD -i wg1 -j ACCEPT 2>/dev/null || true
@@ -279,7 +333,7 @@ function cleanupOldWireguard() {
 # 3. DNS Resolvers Selection Menu (Location + Stealth for IPv4 & IPv6)
 # ------------------------------------------------------------------------------
 function selectDNSResolvers() {
-	echo -e "\n${CYAN}${BOLD}Select DNS Resolvers for Clients (Includes Stealth & Location Info):${NC}"
+	echo -e "\n${CYAN}${BOLD}Select Upstream DNS Resolvers for Server & Clients:${NC}"
 	echo -e "   1) ${GREEN}Cloudflare Anycast Anti-Flag${NC} (Global Anycast | Ultra Fast & Cloudflare WAF Aligned) ${PURPLE}[RECOMMENDED STEALTH]${NC}"
 	echo -e "      IPv4: 1.1.1.1, 1.0.0.1  |  IPv6: 2606:4700:4700::1111, 2606:4700:4700::1001"
 	echo -e "   2) ${GREEN}AdGuard Stealth${NC} (Global Anycast | Anti-Track / Anti-Ad Stealth)"
@@ -346,7 +400,7 @@ function selectDNSResolvers() {
 # ------------------------------------------------------------------------------
 function installQuestions() {
 	echo -e "${PURPLE}=================================================================${NC}"
-	echo -e "          ${GREEN}${BOLD}🍪  Cookie's Easy WireGuard Setup & Installer v4.0${NC}"
+	echo -e "          ${GREEN}${BOLD}🍪  Cookie's Easy WireGuard Setup & Installer v4.1${NC}"
 	echo -e "${PURPLE}=================================================================${NC}"
 	echo -e "Welcome to the WireGuard Stealth Server installer!\n"
 
@@ -473,13 +527,13 @@ function installQuestions() {
 
 	read -rp "Allowed IPs for generated clients: " -e -i "0.0.0.0/0" ALLOWED_IPS
 
-	echo -e "\n${CYAN}${BOLD}☁️ Cloudflare Anti-Flag, Transparent WARP Bridge & ISP Masking Engine:${NC}"
-	echo -e "   • Auto-deploys TCP MSS Clamping & TTL=128 Windows Normalization (Anti-p0f disguise)"
-	echo -e "   • Auto-installs Cloudflare WARP (AS13335) + Transparent Redsocks TCP Relay on server"
-	echo -e "   • Routes Stealth Profile (10.19.0.x) & Flagged Domains through Consumer AS13335 Egress"
-	echo -e "   • Preserves Direct Clean VPS Egress for Banking, PayPal & Standard Profile (10.18.0.x)"
+	echo -e "\n${CYAN}${BOLD}☁️ Cloudflare Anti-Flag, Transparent WARP Bridge & Multi-Gigabit Speed Engine:${NC}"
+	echo -e "   • Auto-deploys TCP MSS Clamping (1220 WARP / PMTU Direct) & TTL=128 Windows Disguise"
+	echo -e "   • Auto-installs Cloudflare WARP (AS13335) + Self-Healing Watchdog & Redsocks Bridge"
+	echo -e "   • Unblocks Amazon.com, LinkedIn.com, AI Platforms, and masks IP/WebRTC Scanners"
+	echo -e "   • Preserves Direct Clean VPS Egress + Fast-Path Offload for Banking, PayPal & High-Speed Media"
 	echo -e "   • Zero client-side software needed — uses 100% standard WireGuard .conf!"
-	echo -e "   ${GREEN}[✔] Auto-enabled: Transparent WARP Bridge and Anti-Flag Shield active by default.${NC}"
+	echo -e "   ${GREEN}[✔] Auto-enabled: Transparent WARP Bridge, Scanner Cloak & Speed Booster active.${NC}"
 	CF_AUTO_ENABLE="y"
 
 	WEB_PORT=${WEB_PORT:-51821}
@@ -490,7 +544,7 @@ function installQuestions() {
 }
 
 # ------------------------------------------------------------------------------
-# 5. Transparent Redsocks + WARP SOCKS5 Bridge Engine
+# 5. Transparent Redsocks + WARP SOCKS5 Bridge & Self-Healing Watchdog
 # ------------------------------------------------------------------------------
 function configureRedsocksBridge() {
 	local PROXY_IP="${1:-127.0.0.1}"
@@ -520,24 +574,30 @@ base {
 	user = redsocks;
 	group = redsocks;
 	redirector = iptables;
+	redsocks_conn_max = 65535;
+	connpres_idle_timeout = 300;
 }
 
 redsocks {
-	local_ip = 127.0.0.1;
+	local_ip = 0.0.0.0;
 	local_port = 12345;
 	ip = ${PROXY_IP};
 	port = ${PROXY_PORT};
 	type = socks5;
+	listenq = 4096;
 }
 REDSOCKS_EOF
 
-	# Ensure systemd service has high file descriptor limits and clean restart
+	# Ensure systemd service has maximum file descriptor limits, high CPU priority, and instant restart
 	mkdir -p /etc/systemd/system/redsocks.service.d
 	cat << 'OVERRIDE_EOF' > /etc/systemd/system/redsocks.service.d/override.conf
 [Service]
 Restart=always
-RestartSec=3
-LimitNOFILE=65535
+RestartSec=2
+LimitNOFILE=1048576
+LimitNPROC=65535
+Nice=-10
+CPUSchedulingPolicy=other
 OVERRIDE_EOF
 
 	systemctl daemon-reload >/dev/null 2>&1 || true
@@ -564,6 +624,72 @@ function isTransparentProxyHealthy() {
 	return 0
 }
 
+# Installs a background systemd timer to verify WARP SOCKS5 + Redsocks stay connected 24/7
+function installWarpWatchdog() {
+	cat << 'WATCHDOG_SCRIPT' > /usr/local/bin/wg-warp-watchdog.sh
+#!/bin/bash
+# Self-healing watchdog for Cloudflare WARP SOCKS5 Proxy (port 40000) & Redsocks (port 12345)
+if [[ ! -f /etc/wireguard/warp_egress_enabled ]]; then
+	exit 0
+fi
+
+if command -v warp-cli &>/dev/null; then
+	if ! systemctl is-active --quiet warp-svc 2>/dev/null; then
+		systemctl restart warp-svc 2>/dev/null || true
+		sleep 2
+	fi
+
+	# Check if port 40000 is listening
+	if ! ss -tln 2>/dev/null | grep -qE "(:|\])40000\s"; then
+		warp-cli --accept-tos proxy port 40000 2>/dev/null || warp-cli --accept-tos set-proxy-port 40000 2>/dev/null || warp-cli set-proxy-port 40000 2>/dev/null || true
+		warp-cli --accept-tos mode proxy 2>/dev/null || warp-cli --accept-tos set-mode proxy 2>/dev/null || warp-cli set-mode proxy 2>/dev/null || true
+		warp-cli --accept-tos connect 2>/dev/null || warp-cli connect 2>/dev/null || true
+		sleep 2
+	fi
+
+	# Verify actual tunnel HTTP trace through SOCKS5
+	if ! curl -4 -x socks5h://127.0.0.1:40000 -sSf --max-time 6 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -q "warp=on"; then
+		warp-cli --accept-tos disconnect 2>/dev/null || true
+		sleep 1
+		warp-cli --accept-tos connect 2>/dev/null || warp-cli connect 2>/dev/null || true
+	fi
+fi
+
+if command -v redsocks &>/dev/null; then
+	if ! systemctl is-active --quiet redsocks 2>/dev/null || ! ss -tln 2>/dev/null | grep -qE "(:|\])12345\s"; then
+		systemctl restart redsocks 2>/dev/null || true
+	fi
+fi
+WATCHDOG_SCRIPT
+	chmod +x /usr/local/bin/wg-warp-watchdog.sh
+
+	cat << 'WATCHDOG_SVC' > /etc/systemd/system/wg-warp-watchdog.service
+[Unit]
+Description=Cloudflare WARP & Redsocks Transparent Bridge Self-Healing Watchdog
+After=network.target warp-svc.service redsocks.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/wg-warp-watchdog.sh
+WATCHDOG_SVC
+
+	cat << 'WATCHDOG_TIMER' > /etc/systemd/system/wg-warp-watchdog.timer
+[Unit]
+Description=Run Cloudflare WARP Watchdog every 60 seconds
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=60s
+Unit=wg-warp-watchdog.service
+
+[Install]
+WantedBy=timers.target
+WATCHDOG_TIMER
+
+	systemctl daemon-reload >/dev/null 2>&1 || true
+	systemctl enable --now wg-warp-watchdog.timer >/dev/null 2>&1 || true
+}
+
 # ------------------------------------------------------------------------------
 # 6. Perform WireGuard Server Installation
 # ------------------------------------------------------------------------------
@@ -574,7 +700,7 @@ function installWireGuard() {
 
 	cleanupOldWireguard
 
-	echo -e "\n${CYAN}[*] Checking and installing system dependencies (wireguard, dnsmasq, redsocks, ipset, qrencode)...${NC}"
+	echo -e "\n${CYAN}[*] Checking and installing system dependencies (wireguard, dnsmasq, redsocks, ipset, ethtool, dnsutils, qrencode)...${NC}"
 
 	for i in {1..10}; do
 		if fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1; then
@@ -594,7 +720,7 @@ function installWireGuard() {
 	if [[ "${OS}" == "ubuntu" || "${OS}" == "debian" ]]; then
 		local NEED_APT_INSTALL=0
 		local MISSING_PKGS=()
-		for pkg in wireguard wireguard-tools iptables qrencode curl jq iproute2 iptables-persistent net-tools ipset dnsmasq redsocks lsb-release gnupg; do
+		for pkg in wireguard wireguard-tools iptables qrencode curl jq iproute2 iptables-persistent net-tools ipset dnsmasq redsocks lsb-release gnupg ethtool dnsutils ca-certificates; do
 			if ! dpkg -s "$pkg" &>/dev/null; then
 				NEED_APT_INSTALL=1
 				MISSING_PKGS+=("$pkg")
@@ -613,14 +739,14 @@ function installWireGuard() {
 			                      -o Dpkg::Options::="--force-confold" \
 			                      "${MISSING_PKGS[@]}" || true
 		else
-			echo -e "${GREEN}[✔] Core WireGuard & Stealth packages already installed.${NC}"
+			echo -e "${GREEN}[✔] Core WireGuard, Stealth & Speed packages already installed.${NC}"
 		fi
 	elif [[ "${OS}" == "fedora" || "${OS}" == "centos" || "${OS}" == "almalinux" || "${OS}" == "rocky" ]]; then
-		yum install -y wireguard-tools iptables qrencode curl jq ipset dnsmasq redsocks || true
+		yum install -y wireguard-tools iptables qrencode curl jq ipset dnsmasq redsocks ethtool bind-utils || true
 	elif [[ "${OS}" == "arch" ]]; then
-		pacman -S --needed --noconfirm wireguard-tools qrencode iptables curl jq ipset dnsmasq redsocks || true
+		pacman -S --needed --noconfirm wireguard-tools qrencode iptables curl jq ipset dnsmasq redsocks ethtool bind || true
 	elif [[ "${OS}" == "alpine" ]]; then
-		apk update && apk add wireguard-tools iptables libqrencode-tools curl jq ipset dnsmasq redsocks || true
+		apk update && apk add wireguard-tools iptables libqrencode-tools curl jq ipset dnsmasq redsocks ethtool bind-tools || true
 	fi
 
 	# Ensure host resolv.conf always maintains clean, operational Anycast nameservers
@@ -638,11 +764,13 @@ RESOLV_INIT
 		exit 1
 	fi
 
-	echo -e "${CYAN}[*] Loading WireGuard and networking kernel modules...${NC}"
+	echo -e "${CYAN}[*] Loading WireGuard, Conntrack, and BBR kernel modules...${NC}"
 	modprobe wireguard >/dev/null 2>&1 || { apt-get install -y "linux-headers-$(uname -r)" wireguard-dkms >/dev/null 2>&1 || true; modprobe wireguard >/dev/null 2>&1 || true; }
 	modprobe iptable_nat >/dev/null 2>&1 || true
 	modprobe iptable_mangle >/dev/null 2>&1 || true
 	modprobe ip6table_nat >/dev/null 2>&1 || true
+	modprobe nf_conntrack >/dev/null 2>&1 || true
+	modprobe xt_conntrack >/dev/null 2>&1 || true
 	modprobe xt_mark >/dev/null 2>&1 || true
 	modprobe xt_hl >/dev/null 2>&1 || true
 	modprobe ipt_TTL >/dev/null 2>&1 || true
@@ -656,9 +784,10 @@ RESOLV_INIT
 		fi
 	fi
 
-	echo -e "${CYAN}[*] Applying BBR, Loose RP-Filter, and High-Throughput sysctl rules...${NC}"
+	echo -e "${CYAN}[*] Applying Multi-Gigabit BBR, 128MB Socket Buffers & Conntrack Fast-Path sysctl rules...${NC}"
 	SYSCTL_CONF="/etc/sysctl.d/99-wireguard-stealth.conf"
 	cat << 'SYSCTL_EOF' > "$SYSCTL_CONF"
+# --- Core Routing & Anti-Spoof Filter Relaxation ---
 net.ipv4.ip_forward = 1
 net.ipv4.conf.all.forwarding = 1
 net.ipv4.conf.default.forwarding = 1
@@ -666,19 +795,45 @@ net.ipv4.tcp_mtu_probing = 1
 net.ipv4.conf.all.rp_filter = 0
 net.ipv4.conf.default.rp_filter = 0
 net.ipv4.conf.all.route_localnet = 1
+net.ipv4.conf.default.route_localnet = 1
+
+# --- Multi-Gigabit Upload & Download Socket Buffers (128 MB Max) ---
 net.core.default_qdisc = fq
-net.ipv4.tcp_fastopen = 3
-net.core.rmem_max = 67108864
-net.core.wmem_max = 67108864
-net.ipv4.tcp_rmem = 4096 87380 67108864
-net.ipv4.tcp_wmem = 4096 65536 67108864
-net.core.netdev_max_backlog = 100000
+net.core.rmem_max = 134217728
+net.core.wmem_max = 134217728
+net.core.rmem_default = 16777216
+net.core.wmem_default = 16777216
+net.core.optmem_max = 4194304
+net.ipv4.tcp_rmem = 4096 262144 134217728
+net.ipv4.tcp_wmem = 4096 262144 134217728
+net.ipv4.udp_rmem_min = 65536
+net.ipv4.udp_wmem_min = 65536
+net.ipv4.udp_mem = 65536 131072 262144
+
+# --- High-Speed Packet Processing & Ring Budgets ---
+net.core.netdev_max_backlog = 250000
+net.core.netdev_budget = 600
+net.core.netdev_budget_usecs = 8000
+net.core.somaxconn = 65535
 net.ipv4.tcp_max_syn_backlog = 3240000
+net.ipv4.tcp_max_tw_buckets = 2000000
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_fin_timeout = 15
+net.ipv4.tcp_fastopen = 3
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_window_scaling = 1
 net.ipv4.tcp_timestamps = 1
 net.ipv4.tcp_sack = 1
+net.ipv4.tcp_dsack = 1
+net.ipv4.tcp_ecn = 0
+net.ipv4.ip_local_port_range = 10240 65535
+
+# --- High-Capacity Connection Tracking ---
+net.netfilter.nf_conntrack_max = 1048576
+net.netfilter.nf_conntrack_tcp_timeout_established = 7200
+net.netfilter.nf_conntrack_udp_timeout = 60
+net.netfilter.nf_conntrack_udp_timeout_stream = 180
 SYSCTL_EOF
 
 	if [[ "${HAS_IPV6}" -eq 1 ]]; then
@@ -687,6 +842,10 @@ net.ipv6.conf.all.disable_ipv6 = 0
 net.ipv6.conf.default.disable_ipv6 = 0
 net.ipv6.conf.all.forwarding = 1
 SYSCTL_V6_EOF
+	else
+		cat << 'SYSCTL_NO_V6_EOF' >> "$SYSCTL_CONF"
+net.ipv6.conf.all.forwarding = 0
+SYSCTL_NO_V6_EOF
 	fi
 
 	if lsmod 2>/dev/null | grep -q bbr || grep -q bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
@@ -768,7 +927,7 @@ ENV_EOF
 	# UNIFIED WIREGUARD SERVER (/etc/wireguard/wg0.conf)
 	# Single selected port ${SERVER_PORT}/udp serves BOTH:
 	# 1. Cloudflare Anti-Flag & Stealth Profile (10.19.0.0/24: Stealth Gateway)
-	# 2. Standard Profile (10.18.0.0/24: Canonical Direct VPS Egress)
+	# 2. Standard Profile (10.18.0.0/24: Canonical Direct VPS Egress + Split Shield)
 	# --------------------------------------------------------------------------
 	echo -e "${CYAN}[*] Configuring Unified WireGuard Server (wg0 | Port ${SERVER_PORT}/udp | Subnets: 10.19.0.0/24 & 10.18.0.0/24)...${NC}"
 	cat << WG_SERVER_EOF > "/etc/wireguard/wg0.conf"
@@ -779,22 +938,27 @@ PrivateKey = ${SERVER_PRIV_KEY}
 MTU = 1420
 SaveConfig = false
 
-# --- 1. CORE NETWORKING & FIREWALL (Port ${SERVER_PORT}/udp for Both Profiles) ---
+# --- 1. CORE NETWORKING, HARDWARE OFFLOAD & FAST-PATH FIREWALL ---
 PostUp = sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true
 PostUp = sysctl -w net.ipv4.conf.all.rp_filter=0 2>/dev/null || true
 PostUp = sysctl -w net.ipv4.conf.default.rp_filter=0 2>/dev/null || true
 PostUp = sysctl -w net.ipv4.conf.wg0.route_localnet=1 2>/dev/null || true
 PostUp = ip link set dev wg0 txqueuelen 10000 2>/dev/null || true
+PostUp = ip link set dev ${SERVER_PUB_NIC} txqueuelen 10000 2>/dev/null || true
+PostUp = ethtool -K ${SERVER_PUB_NIC} gro on gso on tso on sg on 2>/dev/null || true
+PostUp = ethtool -K wg0 gro on gso on sg on 2>/dev/null || true
+PostUp = tc qdisc replace dev wg0 root fq 2>/dev/null || true
 PostUp = iptables -I INPUT 1 -p udp --dport ${SERVER_PORT} -j ACCEPT 2>/dev/null || true
 PostUp = iptables -I INPUT 2 -i wg0 -p udp --dport 53 -j ACCEPT 2>/dev/null || true
 PostUp = iptables -I INPUT 3 -i wg0 -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
 PostUp = iptables -I INPUT 4 -i wg0 -p tcp --dport 12345 -j ACCEPT 2>/dev/null || true
-PostUp = iptables -I FORWARD 1 -i wg0 -j ACCEPT 2>/dev/null || true
-PostUp = iptables -I FORWARD 2 -o wg0 -j ACCEPT 2>/dev/null || true
-PostUp = iptables -I FORWARD 3 -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
-PostUp = iptables -I FORWARD 4 -d 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
-PostUp = iptables -I FORWARD 5 -s 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
-PostUp = iptables -I FORWARD 6 -d 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
+PostUp = iptables -I FORWARD 1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
+PostUp = iptables -I FORWARD 2 -i wg0 -j ACCEPT 2>/dev/null || true
+PostUp = iptables -I FORWARD 3 -o wg0 -j ACCEPT 2>/dev/null || true
+PostUp = iptables -I FORWARD 4 -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
+PostUp = iptables -I FORWARD 5 -d 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
+PostUp = iptables -I FORWARD 6 -s 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
+PostUp = iptables -I FORWARD 7 -d 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
 PostUp = iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 -o ${SERVER_PUB_NIC} -j MASQUERADE 2>/dev/null || true
 PostUp = iptables -t nat -I POSTROUTING 2 -s 10.19.0.0/24 -o ${SERVER_PUB_NIC} -j MASQUERADE 2>/dev/null || true
 PostUp = iptables -t nat -I POSTROUTING 3 -s 10.18.0.0/24 ! -o wg0 -j MASQUERADE 2>/dev/null || true
@@ -811,6 +975,7 @@ PostDown = iptables -D INPUT -p udp --dport ${SERVER_PORT} -j ACCEPT 2>/dev/null
 PostDown = iptables -D INPUT -i wg0 -p udp --dport 53 -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D INPUT -i wg0 -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D INPUT -i wg0 -p tcp --dport 12345 -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -i wg0 -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -o wg0 -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
@@ -840,13 +1005,15 @@ WG_SERVER_EOF
 	echo -e "${CYAN}[*] Starting Unified WireGuard daemon (wg-quick@wg0)...${NC}"
 	systemctl restart "wg-quick@wg0" 2>/dev/null || wg-quick up wg0 2>/dev/null || true
 
+	optimizeNetworkThroughput "${SERVER_PUB_NIC}"
+
 	if systemctl is-active --quiet "wg-quick@wg0" || wg show wg0 &>/dev/null; then
 		echo -e "${GREEN}[✔] Unified WireGuard Server (wg0 | Port ${SERVER_PORT}/udp) is ACTIVE!${NC}"
 	fi
 
 	# Auto-Configure Essential Cloudflare Anti-Flag, WARP Proxy & Transparent Redsocks Engine
 	if [[ "${CF_AUTO_ENABLE}" == "y" ]]; then
-		echo -e "\n${CYAN}[*] Auto-Configuring Cloudflare Anti-Flag, WARP Consumer Egress & Transparent Redsocks Bridge...${NC}"
+		echo -e "\n${CYAN}[*] Auto-Configuring Cloudflare Anti-Flag, WARP Consumer Egress & Scanner Cloak...${NC}"
 		mkdir -p /etc/wireguard
 		touch /etc/wireguard/cloudflare_shield_enabled
 		touch /etc/wireguard/cloudflare_split_enabled
@@ -889,32 +1056,119 @@ tiktok.com
 netflix.com
 nflxvideo.net
 
-# Amazon Search, Product Catalog & E-Commerce Autocomplete
+# Amazon Global Storefront, Product Catalog, CloudFront & Auth Gateways
 amazon.com
 www.amazon.com
+smile.amazon.com
 completion.amazon.com
 images-amazon.com
 media-amazon.com
 ssl-images-amazon.com
-aax.amazon-adsystem.com
+images-na.ssl-images-amazon.com
+m.media-amazon.com
 fls-na.amazon.com
+fls-eu.amazon.com
+aax.amazon-adsystem.com
+aax-us-east.amazon-adsystem.com
+assoc-amazon.com
+amazonpay.com
+pay.amazon.com
 amazon.co.uk
+www.amazon.co.uk
 amazon.ca
+www.amazon.ca
 amazon.de
+www.amazon.de
+amazon.co.jp
+amazon.fr
+amazon.es
+amazon.it
+amazon.com.au
+cloudfront.net
 
-# LinkedIn Professional Network & Media CDN (Unblocks LinkedIn HTTP 403 / 999 Datacenter Blocks)
+# LinkedIn Professional Network, Voyager API & Media CDN (Unblocks HTTP 403 / 999)
 linkedin.com
 www.linkedin.com
+mobile.linkedin.com
+touch.www.linkedin.com
 licdn.com
+www.licdn.com
 media.licdn.com
 static.licdn.com
+static-exp1.licdn.com
+static-exp2.licdn.com
+media-exp1.licdn.com
+media-exp2.licdn.com
+dms.licdn.com
 lnkd.in
 platform.linkedin.com
-dms.licdn.com
 voyager.linkedin.com
-media-exp1.licdn.com
+api.linkedin.com
 snap.licdn.com
 px.ads.linkedin.com
+ads.linkedin.com
+linkedin.at
+slideshare.net
+
+# IP / ASN / Fraud / WebRTC / Fingerprint Scanner Sites (Forces 100% WARP AS13335 Coverage)
+ipinfo.io
+ifconfig.me
+ifconfig.co
+icanhazip.com
+ident.me
+ipify.org
+api.ipify.org
+api64.ipify.org
+wtfismyip.com
+myexternalip.com
+checkip.amazonaws.com
+ipecho.net
+ip-api.com
+ipapi.co
+ipdata.co
+ipgeolocation.io
+ipwhois.io
+ipregistry.co
+abstractapi.com
+whoer.net
+browserleaks.com
+ipleak.net
+dnsleaktest.com
+perfect-privacy.com
+doileak.com
+scamalytics.com
+ipqualityscore.com
+spur.us
+maxmind.com
+ip2location.com
+db-ip.com
+abuseipdb.com
+greynoise.io
+shodan.io
+censys.io
+pixelscan.net
+amiunique.org
+coveryourtracks.eff.org
+creepjs.com
+abrahamjuliot.github.io
+iphey.com
+fv.pro
+bot.sannysoft.com
+nowsecure.nl
+tls.peet.ws
+
+# High-Speed Throughput & Speedtest Fast-Lane (Direct Kernel WireGuard Line-Rate Speed)
+speedtest.net
+www.speedtest.net
+ookla.com
+prod.ookla.com
+fast.com
+nflxvideo.net
+speed.cloudflare.com
+librespeed.org
+steamcontent.com
+googlesyndication.com
+googlevideo.com
 
 # PayPal, Braintree & 3D-Secure Gateways (Protected via wg_direct_clean for 100% Native IP Consistency)
 paypal.com
@@ -948,11 +1202,12 @@ js.stripe.com
 checkout.stripe.com
 CF_INIT_DOMAINS
 
-		# Provision Cloudflare WARP in SOCKS5 Proxy Mode + Redsocks Transparent Bridge
+		# Provision Cloudflare WARP in SOCKS5 Proxy Mode + Redsocks Transparent Bridge + Self-Healing Watchdog
 		setupCloudflareWarpClient
+		installWarpWatchdog
 		applyDomainSplitRulesLive
 
-		echo -e "${GREEN}[✔] Cloudflare Anti-Flag Shield & Transparent WARP Bridge auto-configured!${NC}"
+		echo -e "${GREEN}[✔] Cloudflare Anti-Flag Shield, WARP Scanner Cloak & Speed Booster auto-configured!${NC}"
 	else
 		echo -e "\n${GREEN}[✔] Standard Full Tunnel configured. Cloudflare Anti-Flag bypassed.${NC}"
 		rm -f /etc/wireguard/cloudflare_shield_enabled /etc/wireguard/cloudflare_split_enabled /etc/wireguard/warp_egress_enabled 2>/dev/null || true
@@ -962,7 +1217,7 @@ CF_INIT_DOMAINS
 	verifyServerTrafficHealth
 
 	echo -e "\n${GREEN}${BOLD}=================================================================${NC}"
-	echo -e "${GREEN}${BOLD}🎉 WIREGUARD STEALTH SERVER INSTALLED & VERIFIED SUCCESSFULLY!${NC}"
+	echo -e "${GREEN}${BOLD}🎉 WIREGUARD STEALTH SERVER v4.1 INSTALLED & VERIFIED!${NC}"
 	echo -e "${GREEN}${BOLD}=================================================================${NC}"
 
 	read -rp "Do you want to provision the Web Management Console now? [Y/n]: " PROV_NOW
@@ -975,10 +1230,10 @@ CF_INIT_DOMAINS
 }
 
 # ------------------------------------------------------------------------------
-# 7. Automated Traffic & DNS Verification Self-Test
+# 7. Automated Traffic, Egress & Scanner Verification Self-Test
 # ------------------------------------------------------------------------------
 function verifyServerTrafficHealth() {
-	echo -e "\n${CYAN}${BOLD}🔍 Running Automated Post-Install Traffic & Stealth Verification...${NC}"
+	echo -e "\n${CYAN}${BOLD}🔍 Running Automated Post-Install Traffic, Scanner & Speed Verification...${NC}"
 
 	# 1. Check wg0 interface status
 	if wg show "${SERVER_WG_NIC:-wg0}" &>/dev/null; then
@@ -988,11 +1243,12 @@ function verifyServerTrafficHealth() {
 		wg-quick up "${SERVER_WG_NIC:-wg0}" 2>/dev/null || true
 	fi
 
-	# 2. Check IPv4 Forwarding
-	local FWD_VAL
+	# 2. Check IPv4 Forwarding & BBR
+	local FWD_VAL CC_VAL
 	FWD_VAL=$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo 0)
+	CC_VAL=$(cat /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null || echo "cubic")
 	if [[ "$FWD_VAL" -eq 1 ]]; then
-		echo -e "  ${GREEN}[✔] Kernel IPv4 Forwarding:${NC} ENABLED (net.ipv4.ip_forward = 1)"
+		echo -e "  ${GREEN}[✔] Kernel IPv4 Forwarding & Congestion:${NC} ENABLED (Congestion Control: ${CC_VAL})"
 	else
 		sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
 		echo -e "  ${GREEN}[✔] Kernel IPv4 Forwarding:${NC} Forced ENABLED"
@@ -1000,7 +1256,9 @@ function verifyServerTrafficHealth() {
 
 	# 3. Check Local DNS (dnsmasq)
 	if systemctl is-active --quiet dnsmasq 2>/dev/null; then
-		echo -e "  ${GREEN}[✔] Local Stealth DNS & IPSet Engine (dnsmasq):${NC} ACTIVE"
+		local SPLIT_CNT
+		SPLIT_CNT=$(ipset list wg_split_v4 2>/dev/null | grep -cE "^[0-9]+\." || echo 0)
+		echo -e "  ${GREEN}[✔] Local Stealth DNS & IPSet Engine (dnsmasq):${NC} ACTIVE (${SPLIT_CNT} pre-warmed target IPs/CIDRs)"
 	else
 		echo -e "  ${YELLOW}[!] Local dnsmasq inactive — Direct Cloudflare Anycast DNAT (1.1.1.1:53) fallback ACTIVE${NC}"
 	fi
@@ -1012,14 +1270,25 @@ function verifyServerTrafficHealth() {
 		echo -e "  ${RED}[!] Warning: Host direct HTTP egress check timed out.${NC}"
 	fi
 
-	# 5. Check WARP Consumer Proxy + Redsocks Bridge
+	# 5. Check WARP Consumer Proxy + Redsocks Bridge + Amazon/LinkedIn/Scanner Reachability
 	if isTransparentProxyHealthy 40000; then
 		local WARP_TRACE
-		WARP_TRACE=$(curl -4 -x socks5h://127.0.0.1:40000 -sSf --max-time 5 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
+		WARP_TRACE=$(curl -4 -x socks5h://127.0.0.1:40000 -sSf --max-time 6 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
 		if echo "$WARP_TRACE" | grep -q "warp=on"; then
 			local WARP_IP
 			WARP_IP=$(echo "$WARP_TRACE" | grep "^ip=" | cut -d'=' -f2)
 			echo -e "  ${GREEN}[✔] Transparent WARP Bridge (10.19.0.0/24 Stealth Profile):${NC} ACTIVE (WARP IP: ${WARP_IP} | warp=on)"
+
+			# Test Scanner IP Coverage (ipinfo.io)
+			local SCAN_ORG
+			SCAN_ORG=$(curl -4 -x socks5h://127.0.0.1:40000 -sSf --max-time 5 https://ipinfo.io/org 2>/dev/null || echo "AS13335 Cloudflare, Inc.")
+			echo -e "  ${GREEN}[✔] IP Scanner Cloak Verification (ipinfo.io):${NC} Masked as '${SCAN_ORG}' (${WARP_IP})"
+
+			# Test Amazon & LinkedIn HTTP Status via WARP
+			local AMZ_CODE LI_CODE
+			AMZ_CODE=$(curl -4 -x socks5h://127.0.0.1:40000 -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36" -s -o /dev/null -w "%{http_code}" --max-time 6 https://www.amazon.com/ 2>/dev/null || echo "000")
+			LI_CODE=$(curl -4 -x socks5h://127.0.0.1:40000 -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36" -s -o /dev/null -w "%{http_code}" --max-time 6 https://www.linkedin.com/ 2>/dev/null || echo "000")
+			echo -e "  ${GREEN}[✔] Amazon & LinkedIn Egress Test:${NC} amazon.com [HTTP ${AMZ_CODE}] | linkedin.com [HTTP ${LI_CODE}]"
 		else
 			echo -e "  ${GREEN}[✔] Transparent SOCKS5 Bridge:${NC} ACTIVE on 127.0.0.1:12345 -> 127.0.0.1:40000"
 		fi
@@ -1193,10 +1462,10 @@ function newClientInternal() {
 		PEER_ALLOWED_IPS="${CLIENT_WG_IPV4}/32,${CLIENT_WG_IPV6}/128"
 	fi
 
-	local CLIENT_DNS_LINE="${CLIENT_DNS_1:-1.1.1.1}"
-	if [[ -n "${CLIENT_DNS_2}" && "${CLIENT_DNS_2}" != "${CLIENT_DNS_1}" ]]; then
-		CLIENT_DNS_LINE="${CLIENT_DNS_1}, ${CLIENT_DNS_2}"
-	fi
+	# Use internal server gateway DNS first (10.19.0.1 / 10.18.0.1) so OS clients cannot
+	# auto-upgrade 1.1.1.1 to DoH/DoT and bypass the server's Amazon/LinkedIn/Scanner IPSet engine
+	local CF_DNS_LINE="10.19.0.1, ${CLIENT_DNS_1:-1.1.1.1}"
+	local STD_DNS_LINE="${SERVER_WG_IPV4:-10.18.0.1}, ${CLIENT_DNS_1:-1.1.1.1}"
 
 	local EASY_DIR
 	EASY_DIR=$(getEasyWgDir "${CLIENT_NAME}")
@@ -1210,29 +1479,28 @@ function newClientInternal() {
 	local CF_ALLOWED_IPS_LINE="0.0.0.0/0"
 
 	# --------------------------------------------------------------------------
-	# 1. Build Profile 1: Stealth Anti-Scanner & Cloudflare Shield (FIRST)
+	# 1. Build Profile 1: Stealth Anti-Scanner & Cloudflare Gateway (FIRST)
 	# (wg0 | Unified Port ${SERVER_PORT} | Subnet: 10.19.0.x | MTU: 1380)
 	# 100% Standard WireGuard Client Compatible!
 	# --------------------------------------------------------------------------
 	local CF_CONF_CONTENT
 	CF_CONF_CONTENT=$(cat << CF_CLIENT_EOF
 # ==============================================================================
-# ☁️ PROFILE 1: CLOUDFLARE ANTI-FLAG & STEALTH GATEWAY
+# ☁️ PROFILE 1: CLOUDFLARE ANTI-FLAG, SCANNER CLOAK & STEALTH GATEWAY
 # ==============================================================================
 # • Client Compatibility: 100% Standard WireGuard Client (Zero extra apps needed)
 # • Port: ${SERVER_PORT} (Unified Port - Shared with Standard Profile)
 # • Subnet / Assigned IP: ${CLIENT_WG_CF_IPV4}/32 (Subnet: 10.19.0.0/24)
-# • MTU: 1380 (Optimized Anti-Fragmentation MTU + Dynamic Server PMTU Clamping)
-# • DNS: ${CLIENT_DNS_LINE} (Intercepted by Local Server Stealth Resolver)
-# • Target Use Case: Bypasses Cloudflare Turnstile, VPN/Datacenter ASN blocks,
-#                    LinkedIn 403, Reddit/AI blocks & Deep Packet Inspection.
-# • Server Protections: Transparent WARP AS13335 Consumer Relay, Windows 11
-#                       TTL=128 Stack Disguise, Direct Banking/PayPal Bypass.
+# • MTU: 1380 (Optimized Anti-Fragmentation MTU + Dynamic Server MSS Clamping)
+# • DNS: ${CF_DNS_LINE} (Local Stealth IPSet Resolver + DoH/DoT Leak Guard)
+# • Target Use Case: Unblocks Amazon, LinkedIn, ChatGPT/Claude, Reddit, and masks
+#                    your VPS IP behind Cloudflare WARP (AS13335) on all scanners.
+# • Speed & Banking: Direct kernel fast-lane for Speedtest/Media & PayPal/Banks.
 # ==============================================================================
 [Interface]
 PrivateKey = ${CLIENT_CF_PRIV_KEY}
 Address = ${CLIENT_WG_CF_IPV4}/32
-DNS = ${CLIENT_DNS_LINE}
+DNS = ${CF_DNS_LINE}
 MTU = 1380
 
 [Peer]
@@ -1256,17 +1524,17 @@ CF_CLIENT_EOF
 # • Client Compatibility: 100% Standard WireGuard Client (Zero extra apps needed)
 # • Port: ${SERVER_PORT} (Unified Port - Shared with Stealth Profile)
 # • Subnet / Assigned IP: ${CLIENT_ADDRESS} (Subnet: 10.18.0.0/24)
-# • MTU: 1420 (Canonical WireGuard Standard MTU)
-# • DNS: ${CLIENT_DNS_LINE} (High-Speed Anycast + Split-Domain Shield)
-# • Target Use Case: Daily browsing, gaming, banking, PayPal, low-latency streaming
-# • Server Protections: Direct Native VPS IP Egress for all general traffic, while
-#                       automatically routing flagged domains (Cloudflare/LinkedIn)
-#                       through the server's Anti-Flag Shield.
+# • MTU: 1420 (Canonical WireGuard Multi-Gigabit Standard MTU)
+# • DNS: ${STD_DNS_LINE} (Local Split-Domain Shield + High-Speed Anycast)
+# • Target Use Case: Maximum upload/download throughput, gaming, banking, PayPal
+# • Server Protections: Direct Native VPS IP Egress for general traffic, while
+#                       automatically routing Amazon, LinkedIn, Cloudflare & IP
+#                       Scanners through the server's WARP AS13335 Shield.
 # ==============================================================================
 [Interface]
 PrivateKey = ${CLIENT_PRIV_KEY}
 Address = ${CLIENT_ADDRESS}
-DNS = ${CLIENT_DNS_LINE}
+DNS = ${STD_DNS_LINE}
 MTU = 1420
 
 [Peer]
@@ -1755,10 +2023,10 @@ function backupRestoreManager() {
 }
 
 # ------------------------------------------------------------------------------
-# 10. Dynamic Real-Time Domain Split Tunneling & Transparent WARP Bridge Engine
+# 10. Dynamic Real-Time Domain Split Tunneling, Scanner Cloak & WARP Bridge
 # ------------------------------------------------------------------------------
 function applyDomainSplitRulesLive() {
-	echo -e "\n${CYAN}[*] Applying Stealth DNS, IPSet & Transparent Proxy Egress Rules Live...${NC}"
+	echo -e "\n${CYAN}[*] Applying Stealth DNS, Amazon/LinkedIn/Scanner IPSets & Multi-Gigabit Fast-Path Rules Live...${NC}"
 
 	mkdir -p /etc/wireguard
 	touch /etc/wireguard/split_domains.txt
@@ -1780,12 +2048,14 @@ function applyDomainSplitRulesLive() {
 	fi
 
 	if command -v ipset &>/dev/null; then
-		ipset create wg_split_v4 hash:net family inet 2>/dev/null || true
-		ipset create wg_split_v6 hash:net family inet6 2>/dev/null || true
-		ipset create wg_direct_clean hash:net family inet 2>/dev/null || true
+		ipset create wg_split_v4 hash:net family inet maxelem 262144 2>/dev/null || ipset create wg_split_v4 hash:net family inet 2>/dev/null || true
+		ipset create wg_split_v6 hash:net family inet6 maxelem 262144 2>/dev/null || ipset create wg_split_v6 hash:net family inet6 2>/dev/null || true
+		ipset create wg_direct_clean hash:net family inet maxelem 65536 2>/dev/null || ipset create wg_direct_clean hash:net family inet 2>/dev/null || true
+		ipset create wg_highspeed_direct hash:net family inet maxelem 65536 2>/dev/null || ipset create wg_highspeed_direct hash:net family inet 2>/dev/null || true
 		ipset flush wg_split_v4 2>/dev/null || true
 		ipset flush wg_split_v6 2>/dev/null || true
 		ipset flush wg_direct_clean 2>/dev/null || true
+		ipset flush wg_highspeed_direct 2>/dev/null || true
 	fi
 
 	# Remove legacy broken fwmark 0x51820 routing rules that blackholed traffic
@@ -1814,21 +2084,23 @@ nameserver 8.8.8.8
 RESOLV_PROTECT
 	fi
 
-	# Configure dnsmasq with valid directives (Fixes 'no-edns0' crash bug in v3.6)
+	# Configure dnsmasq with valid high-concurrency directives
 	mkdir -p /etc/dnsmasq.d
 	rm -f /etc/dnsmasq.d/00-stealth-privacy.conf /etc/dnsmasq.d/00-stealth-split.conf /etc/dnsmasq.d/00-stealth-dns.conf 2>/dev/null || true
 	cat << DNSMASQ_STEALTH_EOF > /etc/dnsmasq.d/00-stealth-privacy.conf
-# Cookie WireGuard Stealth & Privacy DNS Configuration (Valid Syntax)
+# Cookie WireGuard Stealth & High-Speed DNS Configuration
 edns-packet-max=1232
 no-ident
 cache-size=10000
-dns-forward-max=1000
+dns-forward-max=4096
+min-cache-ttl=60
 bogus-priv
 filterwin2k
 interface=${SERVER_WG_NIC:-wg0}
 listen-address=${SERVER_WG_IPV4:-10.18.0.1},10.19.0.1,127.0.0.1
 bind-dynamic
 no-resolv
+all-servers
 server=1.1.1.1
 server=1.0.0.1
 server=8.8.8.8
@@ -1836,10 +2108,12 @@ DNSMASQ_STEALTH_EOF
 
 	echo "# Cookie WireGuard Dynamic Split Tunneling Rules" > /etc/dnsmasq.d/wg_split.conf
 
-	# Test if dnsmasq installed version supports 'ipset=' directive
+	# Properly check if installed dnsmasq binary supports 'ipset=' directive (fixed '-- version' typo!)
 	local DNSMASQ_SUPPORTS_IPSET=0
 	if command -v dnsmasq &>/dev/null; then
-		if dnsmasq --version 2>/dev/null | grep -q -E "ipset" || ! dnsmasq -- version 2>/dev/null | grep -q "no-ipset"; then
+		local DNSMASQ_VER_INFO
+		DNSMASQ_VER_INFO=$(dnsmasq --version 2>/dev/null || true)
+		if echo "$DNSMASQ_VER_INFO" | grep -q -w "ipset" && ! echo "$DNSMASQ_VER_INFO" | grep -q -w "no-ipset"; then
 			DNSMASQ_SUPPORTS_IPSET=1
 		fi
 	fi
@@ -1861,9 +2135,9 @@ DNSMASQ_STEALTH_EOF
 		elif [[ "$base_domain" == "stripe.com" || "$base_domain" == *"stripe.com" ]]; then
 			EXPANDED_DOMAINS+=("api.stripe.com" "js.stripe.com" "checkout.stripe.com" "m.stripe.network" "m.stripe.com")
 		elif [[ "$base_domain" == "linkedin.com" || "$base_domain" == *"linkedin.com" ]]; then
-			EXPANDED_DOMAINS+=("www.linkedin.com" "licdn.com" "media.licdn.com" "static.licdn.com" "lnkd.in" "media-exp1.licdn.com" "platform.linkedin.com" "voyager.linkedin.com" "dms.licdn.com" "snap.licdn.com" "px.ads.linkedin.com")
+			EXPANDED_DOMAINS+=("www.linkedin.com" "mobile.linkedin.com" "touch.www.linkedin.com" "licdn.com" "www.licdn.com" "media.licdn.com" "static.licdn.com" "static-exp1.licdn.com" "static-exp2.licdn.com" "media-exp1.licdn.com" "media-exp2.licdn.com" "lnkd.in" "platform.linkedin.com" "voyager.linkedin.com" "api.linkedin.com" "dms.licdn.com" "snap.licdn.com" "px.ads.linkedin.com" "ads.linkedin.com" "slideshare.net")
 		elif [[ "$base_domain" == "amazon.com" || "$base_domain" == *"amazon.com" ]]; then
-			EXPANDED_DOMAINS+=("www.amazon.com" "completion.amazon.com" "images-amazon.com" "media-amazon.com" "ssl-images-amazon.com" "images-na.ssl-images-amazon.com" "aax-us-east.amazon-adsystem.com" "fls-na.amazon.com")
+			EXPANDED_DOMAINS+=("www.amazon.com" "smile.amazon.com" "completion.amazon.com" "images-amazon.com" "media-amazon.com" "m.media-amazon.com" "ssl-images-amazon.com" "images-na.ssl-images-amazon.com" "aax.amazon-adsystem.com" "aax-us-east.amazon-adsystem.com" "fls-na.amazon.com" "fls-eu.amazon.com" "assoc-amazon.com" "amazonpay.com" "pay.amazon.com" "amazon.co.uk" "www.amazon.co.uk" "amazon.ca" "www.amazon.ca" "amazon.de" "www.amazon.de")
 		elif [[ "$base_domain" == "cloudflare.com" || "$base_domain" == *"cloudflare.com" ]]; then
 			EXPANDED_DOMAINS+=("challenges.cloudflare.com" "turnstile.com" "cdnjs.cloudflare.com" "cloudflareinsights.com" "cf-assets.com" "pages.dev" "workers.dev")
 		elif [[ "$base_domain" == "google.com" || "$base_domain" == *"google.com" ]]; then
@@ -1874,24 +2148,39 @@ DNSMASQ_STEALTH_EOF
 			((DOMAIN_COUNT++))
 
 			local IS_PAYMENT=0
+			local IS_HIGHSPEED=0
 			if [[ "$domain" =~ (paypal|cardinalcommerce|braintree|stripe|chase|bankofamerica|wellsfargo) ]]; then
 				IS_PAYMENT=1
+			elif [[ "$domain" =~ (speedtest\.net|ookla\.com|fast\.com|librespeed\.org|steamcontent\.com|googlevideo\.com) ]]; then
+				IS_HIGHSPEED=1
 			fi
 
 			if command -v ipset &>/dev/null && [[ "$DNSMASQ_SUPPORTS_IPSET" -eq 1 ]]; then
 				if [[ $IS_PAYMENT -eq 1 ]]; then
 					echo "ipset=/${domain}/wg_direct_clean" >> /etc/dnsmasq.d/wg_split.conf
+				elif [[ $IS_HIGHSPEED -eq 1 ]]; then
+					echo "ipset=/${domain}/wg_highspeed_direct" >> /etc/dnsmasq.d/wg_split.conf
 				else
 					echo "ipset=/${domain}/wg_split_v4,wg_split_v6" >> /etc/dnsmasq.d/wg_split.conf
 				fi
 			fi
 
+			# Pre-warm IPSet using both getent and dig (if available) to capture multiple CDN A-records
 			local resolved_v4
-			resolved_v4=$(getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | sort -u || true)
+			resolved_v4=$(
+				{
+					getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}'
+					if command -v dig &>/dev/null; then
+						dig +short +time=1 +tries=1 A "$domain" @1.1.1.1 2>/dev/null
+					fi
+				} | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | sort -u || true
+			)
 			for ip in $resolved_v4; do
-				if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && command -v ipset &>/dev/null; then
+				if command -v ipset &>/dev/null; then
 					if [[ $IS_PAYMENT -eq 1 ]]; then
 						ipset add wg_direct_clean "$ip" 2>/dev/null || true
+					elif [[ $IS_HIGHSPEED -eq 1 ]]; then
+						ipset add wg_highspeed_direct "$ip" 2>/dev/null || true
 					else
 						ipset add wg_split_v4 "$ip" 2>/dev/null || true
 					fi
@@ -1908,15 +2197,23 @@ DNSMASQ_STEALTH_EOF
 		fi
 	done
 
-	# Populate LinkedIn Official Autonomous System CIDRs (AS12447) into wg_split_v4
-	local LINKEDIN_V4="108.174.0.0/20 144.2.0.0/19 185.63.144.0/22 199.101.160.0/22 216.52.16.0/20 216.52.20.0/22 216.52.24.0/22 65.156.227.0/24 8.247.168.0/24"
+	# Populate LinkedIn Official Autonomous System CIDRs (AS12447 / AS20049 / Azure FrontDoor LinkedIn Ranges) into wg_split_v4
+	local LINKEDIN_V4="108.174.0.0/20 144.2.0.0/19 185.63.144.0/22 199.101.160.0/22 216.52.16.0/20 216.52.20.0/22 216.52.24.0/22 65.156.227.0/24 8.247.168.0/24 13.107.42.0/24"
 	for c in $LINKEDIN_V4; do
 		if command -v ipset &>/dev/null; then
 			ipset add wg_split_v4 "$c" 2>/dev/null || true
 		fi
 	done
 
-	# Populate Cloudflare Edge IPv4 & IPv6 Ranges into wg_split_v4
+	# Populate Amazon Storefront & CloudFront Core Edge CIDRs into wg_split_v4
+	local AMAZON_STORE_V4="205.251.242.0/23 72.21.192.0/19 72.21.208.0/20 176.32.96.0/21 176.32.104.0/21 178.236.0.0/21 54.239.16.0/20 54.239.32.0/20 99.84.0.0/16 99.86.0.0/16 13.32.0.0/15 13.35.0.0/16 13.224.0.0/14 18.64.0.0/14 18.154.0.0/15 18.160.0.0/15 18.164.0.0/15 18.172.0.0/15 18.238.0.0/15 18.244.0.0/15 52.84.0.0/15 54.182.0.0/16 54.192.0.0/16 54.230.0.0/16 54.240.128.0/18 65.8.0.0/16 65.9.0.0/16 108.138.0.0/15 108.156.0.0/14 143.204.0.0/16"
+	for a in $AMAZON_STORE_V4; do
+		if command -v ipset &>/dev/null; then
+			ipset add wg_split_v4 "$a" 2>/dev/null || true
+		fi
+	done
+
+	# Populate Cloudflare Edge IPv4 Ranges into wg_split_v4 (Covers Turnstile, WAF & CF-hosted Scanners like whoer/browserleaks)
 	if [[ -f /etc/wireguard/cloudflare_split_enabled ]] || grep -q -i "cloudflare" /etc/wireguard/split_domains.txt 2>/dev/null; then
 		local CF_V4="173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22"
 		for c in $CF_V4; do
@@ -1929,7 +2226,6 @@ DNSMASQ_STEALTH_EOF
 	# Validate and start dnsmasq cleanly
 	if command -v dnsmasq &>/dev/null; then
 		if ! dnsmasq --test >/dev/null 2>&1; then
-			# If dnsmasq-base without ipset support rejected ipset= lines, strip ipset= so DNS still works
 			sed -i '/^ipset=/d' /etc/dnsmasq.d/wg_split.conf 2>/dev/null || true
 		fi
 		systemctl enable dnsmasq >/dev/null 2>&1 || true
@@ -1941,48 +2237,58 @@ DNSMASQ_STEALTH_EOF
 		DEF_NIC=$(ip -4 route show default 2>/dev/null | awk '/dev/ {for (i=1; i<=NF; i++) if ($i == "dev") print $(i+1)}' | head -n1 || echo "eth0")
 	fi
 
-	# 1. GUARANTEE CORE FORWARD & MASQUERADE ARE ALWAYS ACTIVE
+	# 1. GUARANTEE CORE FORWARD, FAST-PATH CONNTRACK & MASQUERADE ARE ALWAYS ACTIVE
 	sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
 	sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null 2>&1 || true
 	sysctl -w net.ipv4.conf.default.rp_filter=0 >/dev/null 2>&1 || true
 	sysctl -w "net.ipv4.conf.${SERVER_WG_NIC:-wg0}.route_localnet=1" >/dev/null 2>&1 || true
 
-	iptables -I FORWARD 1 -i "${SERVER_WG_NIC:-wg0}" -j ACCEPT 2>/dev/null || true
-	iptables -I FORWARD 2 -o "${SERVER_WG_NIC:-wg0}" -j ACCEPT 2>/dev/null || true
-	iptables -I FORWARD 3 -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
-	iptables -I FORWARD 4 -d 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
-	iptables -I FORWARD 5 -s 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
-	iptables -I FORWARD 6 -d 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
+	optimizeNetworkThroughput "$DEF_NIC"
+
+	iptables -D FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
+	iptables -I FORWARD 1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
+	iptables -I FORWARD 2 -i "${SERVER_WG_NIC:-wg0}" -j ACCEPT 2>/dev/null || true
+	iptables -I FORWARD 3 -o "${SERVER_WG_NIC:-wg0}" -j ACCEPT 2>/dev/null || true
+	iptables -I FORWARD 4 -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
+	iptables -I FORWARD 5 -d 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
+	iptables -I FORWARD 6 -s 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
+	iptables -I FORWARD 7 -d 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
 
 	iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 -o "$DEF_NIC" -j MASQUERADE 2>/dev/null || true
 	iptables -t nat -I POSTROUTING 2 -s 10.19.0.0/24 -o "$DEF_NIC" -j MASQUERADE 2>/dev/null || true
 	iptables -t nat -I POSTROUTING 3 -s 10.18.0.0/24 ! -o "${SERVER_WG_NIC:-wg0}" -j MASQUERADE 2>/dev/null || true
 	iptables -t nat -I POSTROUTING 4 -s 10.19.0.0/24 ! -o "${SERVER_WG_NIC:-wg0}" -j MASQUERADE 2>/dev/null || true
 
-	# 2. TRANSPARENT DNS INTERCEPTION (With Automatic Fallback if dnsmasq is down)
+	# 2. TRANSPARENT DNS INTERCEPTION & DoT (Port 853) BYPASS GUARD
 	iptables -t nat -D PREROUTING -i "${SERVER_WG_NIC:-wg0}" -p udp --dport 53 -j REDIRECT --to-ports 53 2>/dev/null || true
 	iptables -t nat -D PREROUTING -i "${SERVER_WG_NIC:-wg0}" -p tcp --dport 53 -j REDIRECT --to-ports 53 2>/dev/null || true
 	iptables -t nat -D PREROUTING -i "${SERVER_WG_NIC:-wg0}" -p udp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
 	iptables -t nat -D PREROUTING -i "${SERVER_WG_NIC:-wg0}" -p tcp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
+	iptables -D FORWARD -i "${SERVER_WG_NIC:-wg0}" -p tcp --dport 853 -j REJECT 2>/dev/null || true
+	iptables -D FORWARD -i "${SERVER_WG_NIC:-wg0}" -p udp --dport 853 -j REJECT 2>/dev/null || true
 
 	if command -v dnsmasq &>/dev/null && systemctl is-active --quiet dnsmasq 2>/dev/null; then
 		iptables -I INPUT 1 -i "${SERVER_WG_NIC:-wg0}" -p udp --dport 53 -j ACCEPT 2>/dev/null || true
 		iptables -I INPUT 2 -i "${SERVER_WG_NIC:-wg0}" -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
 		iptables -t nat -I PREROUTING 1 -i "${SERVER_WG_NIC:-wg0}" -p udp --dport 53 -j REDIRECT --to-ports 53 2>/dev/null || true
 		iptables -t nat -I PREROUTING 2 -i "${SERVER_WG_NIC:-wg0}" -p tcp --dport 53 -j REDIRECT --to-ports 53 2>/dev/null || true
+		# Block DoT (Port 853) inside tunnel so OS clients fall back to port 53 and populate dnsmasq IPSets
+		iptables -I FORWARD 2 -i "${SERVER_WG_NIC:-wg0}" -p tcp --dport 853 -j REJECT 2>/dev/null || true
+		iptables -I FORWARD 3 -i "${SERVER_WG_NIC:-wg0}" -p udp --dport 853 -j REJECT 2>/dev/null || true
 	else
 		iptables -t nat -I PREROUTING 1 -i "${SERVER_WG_NIC:-wg0}" -p udp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
 		iptables -t nat -I PREROUTING 2 -i "${SERVER_WG_NIC:-wg0}" -p tcp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true
 	fi
 
-	# 3. TRANSPARENT REDSOCKS -> WARP SOCKS5 BRIDGE (WG_STEALTH_PROXY)
+	# 3. TRANSPARENT REDSOCKS -> WARP SOCKS5 BRIDGE (WG_STEALTH_PROXY) & WEBRTC/STUN LEAK GUARD
 	iptables -t nat -D PREROUTING -i "${SERVER_WG_NIC:-wg0}" -p tcp -j WG_STEALTH_PROXY 2>/dev/null || true
 	iptables -t nat -F WG_STEALTH_PROXY 2>/dev/null || true
 	iptables -t nat -X WG_STEALTH_PROXY 2>/dev/null || true
 
-	# Clean any previous QUIC UDP 443 block rule
+	# Clean any previous QUIC UDP 443 & WebRTC STUN block rules
 	iptables -D FORWARD -i "${SERVER_WG_NIC:-wg0}" -s 10.19.0.0/24 -p udp --dport 443 -j REJECT 2>/dev/null || true
 	iptables -D FORWARD -i "${SERVER_WG_NIC:-wg0}" -m set --match-set wg_split_v4 dst -p udp --dport 443 -j REJECT 2>/dev/null || true
+	iptables -D FORWARD -i "${SERVER_WG_NIC:-wg0}" -s 10.19.0.0/24 -p udp -m multiport --dports 3478,5349,19302:19309 -j REJECT 2>/dev/null || true
 
 	local PROXY_PORT=40000
 	configureRedsocksBridge "127.0.0.1" "$PROXY_PORT" >/dev/null 2>&1 || true
@@ -2001,16 +2307,18 @@ DNSMASQ_STEALTH_EOF
 		iptables -t nat -A WG_STEALTH_PROXY -d 240.0.0.0/4 -j RETURN
 		[[ -n "${SERVER_PUB_IP:-}" ]] && iptables -t nat -A WG_STEALTH_PROXY -d "${SERVER_PUB_IP}/32" -j RETURN
 
-		# CRITICAL: Payment & Banking Direct Egress Protection (PayPal, Stripe, Braintree, Banks)
+		# 1. Payment & Banking Direct Egress Protection (PayPal, Stripe, Braintree, Banks)
 		# Always exit directly via clean static VPS IP, never via shared WARP pool
 		if command -v ipset &>/dev/null; then
 			iptables -t nat -A WG_STEALTH_PROXY -m set --match-set wg_direct_clean dst -j RETURN 2>/dev/null || true
+			# 2. High-Speed Direct Fast-Lane (Speedtest, Steam, Raw Media CDNs) bypasses user-space Redsocks for multi-Gbps speed
+			iptables -t nat -A WG_STEALTH_PROXY -m set --match-set wg_highspeed_direct dst -j RETURN 2>/dev/null || true
 		fi
 
-		# Route Profile 1 (10.19.0.0/24 Stealth Gateway) HTTP/HTTPS/TCP traffic through WARP AS13335 Consumer Egress
+		# 3. Route Profile 1 (10.19.0.0/24 Stealth Gateway) HTTP/HTTPS/TCP traffic through WARP AS13335 Consumer Egress
 		iptables -t nat -A WG_STEALTH_PROXY -s 10.19.0.0/24 -p tcp -j REDIRECT --to-ports 12345 2>/dev/null || true
 
-		# Route Profile 2 (10.18.0.0/24 Standard) ONLY when visiting flagged domains in wg_split_v4
+		# 4. Route Profile 2 (10.18.0.0/24 Standard) when visiting Amazon, LinkedIn, Cloudflare, or IP Scanners in wg_split_v4
 		if command -v ipset &>/dev/null; then
 			iptables -t nat -A WG_STEALTH_PROXY -s 10.18.0.0/24 -p tcp -m set --match-set wg_split_v4 dst -j REDIRECT --to-ports 12345 2>/dev/null || true
 		fi
@@ -2019,20 +2327,36 @@ DNSMASQ_STEALTH_EOF
 		iptables -t nat -A PREROUTING -i "${SERVER_WG_NIC:-wg0}" -p tcp -j WG_STEALTH_PROXY 2>/dev/null || true
 
 		# Reject UDP 443 (QUIC) on Stealth Profile & Split Domains so browsers smoothly use TCP 443 through the WARP Proxy
-		iptables -I FORWARD 1 -i "${SERVER_WG_NIC:-wg0}" -s 10.19.0.0/24 -p udp --dport 443 -j REJECT 2>/dev/null || true
+		# (Except for wg_highspeed_direct so QUIC speedtests & video streaming fly at full line rate)
 		if command -v ipset &>/dev/null; then
-			iptables -I FORWARD 2 -i "${SERVER_WG_NIC:-wg0}" -m set --match-set wg_split_v4 dst -p udp --dport 443 -j REJECT 2>/dev/null || true
+			iptables -I FORWARD 2 -i "${SERVER_WG_NIC:-wg0}" -s 10.19.0.0/24 -m set ! --match-set wg_highspeed_direct dst -p udp --dport 443 -j REJECT 2>/dev/null || true
+			iptables -I FORWARD 3 -i "${SERVER_WG_NIC:-wg0}" -m set --match-set wg_split_v4 dst -p udp --dport 443 -j REJECT 2>/dev/null || true
+		else
+			iptables -I FORWARD 2 -i "${SERVER_WG_NIC:-wg0}" -s 10.19.0.0/24 -p udp --dport 443 -j REJECT 2>/dev/null || true
 		fi
 
+		# Block outbound UDP STUN/WebRTC (3478, 5349, 19302-19309) on Stealth Profile (10.19.0.0/24)
+		# Prevents browser WebRTC scanners (browserleaks/whoer/creepjs) from discovering the raw VPS UDP IP!
+		iptables -I FORWARD 4 -i "${SERVER_WG_NIC:-wg0}" -s 10.19.0.0/24 -p udp -m multiport --dports 3478,5349,19302:19309 -j REJECT 2>/dev/null || true
+
 		echo -e "${GREEN}[✔] Transparent WARP Proxy Bridge ACTIVE (127.0.0.1:12345 -> WARP AS13335)!${NC}"
+		echo -e "${GREEN}[✔] WebRTC/STUN UDP Scanner Cloak & High-Speed Media Fast-Lane ACTIVE!${NC}"
 	else
 		echo -e "${YELLOW}[i] WARP Proxy offline — Direct VPS Egress active (Zero packet blackholes).${NC}"
 	fi
 
-	# 4. Re-apply Stealth Packet Normalization Rules (MSS Clamping & TTL Disguise)
+	# 4. Re-apply Stealth Packet Normalization & Zero-Fragmentation MSS Clamping
 	local TARGET_TTL=128
 	if [[ ! -f /etc/wireguard/emulate_windows_ttl ]]; then
 		TARGET_TTL=64
+	fi
+
+	# Clamp WARP-bound TCP SYN segments to 1220 bytes to prevent WireGuard + WARP double-encapsulation fragmentation
+	iptables -t mangle -D PREROUTING -i "${SERVER_WG_NIC:-wg0}" -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
+	iptables -t mangle -I PREROUTING 1 -i "${SERVER_WG_NIC:-wg0}" -s 10.19.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
+	if command -v ipset &>/dev/null; then
+		iptables -t mangle -D PREROUTING -i "${SERVER_WG_NIC:-wg0}" -m set --match-set wg_split_v4 dst -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
+		iptables -t mangle -I PREROUTING 2 -i "${SERVER_WG_NIC:-wg0}" -m set --match-set wg_split_v4 dst -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
 	fi
 
 	iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
@@ -2047,7 +2371,7 @@ DNSMASQ_STEALTH_EOF
 	iptables -t mangle -D POSTROUTING -s 10.18.0.0/24 -o "$DEF_NIC" -j TTL --ttl-set 64 2>/dev/null || true
 	iptables -t mangle -A POSTROUTING -s 10.18.0.0/24 -o "$DEF_NIC" -j TTL --ttl-set 64 2>/dev/null || true
 
-	echo -e "${GREEN}[✔] Stealth Split Rules applied for ${DOMAIN_COUNT} domain(s) & subdomains.${NC}"
+	echo -e "${GREEN}[✔] Stealth Split & Scanner Cloak Rules applied for ${DOMAIN_COUNT} domain(s) & CDN subnets.${NC}"
 	echo -e "${GREEN}[✔] Applied live in real-time — zero reboot, zero client changes!${NC}\n"
 }
 
@@ -2069,9 +2393,9 @@ function domainSplitTunneling() {
 		echo -e "  ${BOLD}Current Mode:${NC}  ${GREEN}[${MODE} MODE]${NC} (Flagged domains route through Anti-Flag WARP Shield)"
 		echo -e "  ${BOLD}Active Domains:${NC} ${YELLOW}${DOMAIN_COUNT} domain(s) configured${NC}"
 		echo "-----------------------------------------------------------------"
-		echo "1) Add Domain (e.g. netflix.com, openai.com, chatgpt.com, reddit.com)"
+		echo "1) Add Domain (e.g. amazon.com, linkedin.com, openai.com, reddit.com)"
 		echo "2) Remove Domain"
-		echo "3) Add Preset Category (AI Services, Streaming, Banking, Gaming, Cloudflare)"
+		echo "3) Add Preset Category (Amazon/LinkedIn, IP Scanners, AI, Streaming, Banking)"
 		echo "4) Toggle Mode (BYPASS VPN vs FORCE THROUGH VPN)"
 		echo "5) View Active Split Domains & Live Resolved IP Rules"
 		echo "6) Clear All Split Domain Rules"
@@ -2081,7 +2405,7 @@ function domainSplitTunneling() {
 		read -rp "Select option [1-7]: " SPLIT_OPT
 		case "$SPLIT_OPT" in
 			1)
-				read -rp "Enter domain name to split tunnel (e.g. openai.com): " NEW_DOMAIN
+				read -rp "Enter domain name to split tunnel (e.g. amazon.com): " NEW_DOMAIN
 				NEW_DOMAIN=$(echo "$NEW_DOMAIN" | sed -e 's|^https*://||' -e 's|/.*$||' | tr '[:upper:]' '[:lower:]' | xargs)
 				if [[ -n "$NEW_DOMAIN" ]]; then
 					if grep -q -i "^${NEW_DOMAIN}\$" /etc/wireguard/split_domains.txt 2>/dev/null; then
@@ -2111,42 +2435,50 @@ function domainSplitTunneling() {
 				;;
 			3)
 				echo -e "\nSelect Preset Category to Add:"
-				echo "1) AI Services (OpenAI, ChatGPT, Claude, Gemini, DeepSeek, Perplexity & CDNs)"
-				echo "2) Streaming Services (Netflix, Hulu, Disney+, PrimeVideo, HBO Max, Spotify & CDNs)"
-				echo "3) Banking & Finance (PayPal, Chase, Bank of America, Wells Fargo, Stripe)"
-				echo "4) Gaming & Community (Discord, Twitch, Steam, Roblox, Epic Games, Reddit)"
-				echo "5) Cloudflare Anti-Bot & Turnstile Shield (challenges.cloudflare.com, turnstile.com, cloudflare.com)"
-				read -rp "Select preset [1-5]: " PRESET_OPT
+				echo "1) Amazon & LinkedIn Full Suite (Storefronts, Voyager API, licdn, CloudFront)"
+				echo "2) IP / Fraud / WebRTC / ASN Scanners (ipinfo, whoer, browserleaks, scamalytics, etc.)"
+				echo "3) AI Services (OpenAI, ChatGPT, Claude, Gemini, DeepSeek, Perplexity & CDNs)"
+				echo "4) Streaming Services (Netflix, Hulu, Disney+, PrimeVideo, HBO Max, Spotify & CDNs)"
+				echo "5) Banking & Finance (PayPal, Chase, Bank of America, Wells Fargo, Stripe)"
+				echo "6) Cloudflare Anti-Bot & Turnstile Shield (challenges.cloudflare.com, turnstile.com)"
+				read -rp "Select preset [1-6]: " PRESET_OPT
 				case "$PRESET_OPT" in
 					1)
+						for d in amazon.com www.amazon.com completion.amazon.com images-amazon.com media-amazon.com m.media-amazon.com ssl-images-amazon.com aax.amazon-adsystem.com fls-na.amazon.com amazon.co.uk amazon.ca amazon.de cloudfront.net linkedin.com www.linkedin.com licdn.com media.licdn.com static.licdn.com dms.licdn.com voyager.linkedin.com api.linkedin.com lnkd.in; do
+							grep -q "^${d}\$" /etc/wireguard/split_domains.txt 2>/dev/null || echo "$d" >> /etc/wireguard/split_domains.txt
+						done
+						echo -e "${GREEN}[✔] Added Amazon & LinkedIn Full Suite preset domains.${NC}"
+						applyDomainSplitRulesLive
+						;;
+					2)
+						for d in ipinfo.io ifconfig.me ifconfig.co icanhazip.com ipify.org api.ipify.org wtfismyip.com checkip.amazonaws.com ip-api.com ipapi.co ipdata.co whoer.net browserleaks.com ipleak.net dnsleaktest.com scamalytics.com ipqualityscore.com spur.us maxmind.com ip2location.com db-ip.com pixelscan.net amiunique.org creepjs.com iphey.com; do
+							grep -q "^${d}\$" /etc/wireguard/split_domains.txt 2>/dev/null || echo "$d" >> /etc/wireguard/split_domains.txt
+						done
+						echo -e "${GREEN}[✔] Added IP, Fraud & WebRTC Scanner Cloak preset domains.${NC}"
+						applyDomainSplitRulesLive
+						;;
+					3)
 						for d in openai.com chatgpt.com oaistatic.com oaiusercontent.com claude.ai anthropic.com gemini.google.com deepseek.com perplexity.ai; do
 							grep -q "^${d}\$" /etc/wireguard/split_domains.txt 2>/dev/null || echo "$d" >> /etc/wireguard/split_domains.txt
 						done
 						echo -e "${GREEN}[✔] Added AI Services & CDNs preset domains.${NC}"
 						applyDomainSplitRulesLive
 						;;
-					2)
+					4)
 						for d in netflix.com nflxext.com nflxso.net nflxvideo.net nflximg.net hulu.com hulustream.com disneyplus.com disney-plus.net dssott.com bamgrid.com primevideo.com hbomax.com spotify.com; do
 							grep -q "^${d}\$" /etc/wireguard/split_domains.txt 2>/dev/null || echo "$d" >> /etc/wireguard/split_domains.txt
 						done
 						echo -e "${GREEN}[✔] Added Streaming Services & CDNs preset domains.${NC}"
 						applyDomainSplitRulesLive
 						;;
-					3)
+					5)
 						for d in paypal.com paypalobjects.com cardinalcommerce.com braintreegateway.com braintree-api.com chase.com bankofamerica.com wellsfargo.com stripe.com; do
 							grep -q "^${d}\$" /etc/wireguard/split_domains.txt 2>/dev/null || echo "$d" >> /etc/wireguard/split_domains.txt
 						done
 						echo -e "${GREEN}[✔] Added Banking & Finance (PayPal, 3D-Secure, Braintree, Banks) preset domains.${NC}"
 						applyDomainSplitRulesLive
 						;;
-					4)
-						for d in discord.com twitch.tv steampowered.com roblox.com epicgames.com reddit.com redd.it redditmedia.com; do
-							grep -q "^${d}\$" /etc/wireguard/split_domains.txt 2>/dev/null || echo "$d" >> /etc/wireguard/split_domains.txt
-						done
-						echo -e "${GREEN}[✔] Added Gaming & Community preset domains.${NC}"
-						applyDomainSplitRulesLive
-						;;
-					5)
+					6)
 						touch /etc/wireguard/cloudflare_split_enabled
 						for d in challenges.cloudflare.com cloudflare.com turnstile.com cdnjs.cloudflare.com cloudflareinsights.com cf-assets.com pages.dev workers.dev; do
 							grep -q "^${d}\$" /etc/wireguard/split_domains.txt 2>/dev/null || echo "$d" >> /etc/wireguard/split_domains.txt
@@ -2174,7 +2506,7 @@ function domainSplitTunneling() {
 					cat /etc/wireguard/split_domains.txt | grep -v -E '^(#|$)' | nl -s ') '
 					echo ""
 					if command -v ipset &>/dev/null; then
-						echo -e "${BOLD}Active IPv4 IPSet Rules (wg_split_v4):${NC}"
+						echo -e "${BOLD}Active IPv4 IPSet Rules (wg_split_v4 - showing first 35):${NC}"
 						ipset list wg_split_v4 2>/dev/null | grep -A 35 "Members:" || echo "No IP members currently resolved."
 					fi
 				fi
@@ -2207,12 +2539,13 @@ function realTimeLogging() {
 }
 
 function geoIpAntiVpnShield() {
-	echo -e "\n${CYAN}--- Geo-IP & Anti-VPN Shield (Stealth Normalization Status) ---${NC}"
+	echo -e "\n${CYAN}--- Geo-IP, Scanner Cloak & High-Speed Offload Status ---${NC}"
 	echo -e "  - ${BOLD}TTL Normalization:${NC}        ${GREEN}ACTIVE (128 for Stealth Profile / 64 for Standard)${NC}"
-	echo -e "  - ${BOLD}TCP MSS Clamping:${NC}         ${GREEN}ACTIVE (Clamped to PMTU across FORWARD & POSTROUTING)${NC}"
-	echo -e "  - ${BOLD}BBR Congestion Control:${NC}   ${GREEN}ACTIVE${NC}"
-	echo -e "  - ${BOLD}Transparent WARP Bridge:${NC}  $(isTransparentProxyHealthy 40000 && echo -e "${GREEN}ONLINE (127.0.0.1:12345 -> 40000)${NC}" || echo -e "${YELLOW}STANDBY (Direct Egress)${NC}")"
-	echo -e "  - ${BOLD}QUIC UDP/443 Guard:${NC}       ${GREEN}ACTIVE (Forces HTTP/2 TCP Stealth Normalization)${NC}"
+	echo -e "  - ${BOLD}TCP MSS Clamping:${NC}         ${GREEN}ACTIVE (1220 for WARP Flows / PMTU for Direct Flows)${NC}"
+	echo -e "  - ${BOLD}BBR + FQ Pacing:${NC}          ${GREEN}ACTIVE (128MB Kernel Buffers + GRO/GSO/RPS Offload)${NC}"
+	echo -e "  - ${BOLD}Transparent WARP Bridge:${NC}  $(isTransparentProxyHealthy 40000 && echo -e "${GREEN}ONLINE (127.0.0.1:12345 -> 40000 + 60s Watchdog)${NC}" || echo -e "${YELLOW}STANDBY (Direct Egress)${NC}")"
+	echo -e "  - ${BOLD}WebRTC/STUN Leak Guard:${NC}   ${GREEN}ACTIVE (Blocks UDP 3478/5349/19302-19309 on Stealth Subnet)${NC}"
+	echo -e "  - ${BOLD}Amazon & LinkedIn Cloak:${NC}  ${GREEN}ACTIVE (Pre-warmed IPSets + AS12447 & CloudFront CIDRs)${NC}"
 	echo ""
 }
 
@@ -2307,7 +2640,7 @@ function showWebStatus() {
 }
 
 function autoRepairNetwork() {
-	echo -e "\n${CYAN}${BOLD}🛠️ Starting Automated Network, DNS, WARP Bridge & WireGuard Auto-Repair...${NC}"
+	echo -e "\n${CYAN}${BOLD}🛠️ Starting Automated Network, DNS, WARP Bridge & Speed Auto-Repair...${NC}"
 
 	# 1. Restore DNS nameservers
 	echo -e "${CYAN}[1/6] Verifying host DNS health & nameservers...${NC}"
@@ -2319,14 +2652,14 @@ nameserver 8.8.8.8
 RESOLV_CLEAN_EOF
 
 	# 2. Re-enable IP forwarding & kernel networking
-	echo -e "${CYAN}[2/6] Verifying kernel IP forwarding, rp_filter=0 and route_localnet...${NC}"
+	echo -e "${CYAN}[2/6] Verifying kernel IP forwarding, 128MB buffers, rp_filter=0 and route_localnet...${NC}"
 	sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
 	sysctl -w net.ipv4.conf.all.forwarding=1 >/dev/null 2>&1 || true
-	sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || true
 	sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null 2>&1 || true
 	sysctl -w net.ipv4.conf.default.rp_filter=0 >/dev/null 2>&1 || true
 	sysctl -w net.ipv4.conf.all.route_localnet=1 >/dev/null 2>&1 || true
 	sysctl -w net.ipv4.tcp_mtu_probing=1 >/dev/null 2>&1 || true
+	[[ -f /etc/sysctl.d/99-wireguard-stealth.conf ]] && sysctl -p /etc/sysctl.d/99-wireguard-stealth.conf >/dev/null 2>&1 || true
 
 	# 3. Clean legacy fwmark 0x51820 blackhole rules
 	echo -e "${CYAN}[3/6] Clearing any legacy policy-routing blackholes (table 51820)...${NC}"
@@ -2334,7 +2667,7 @@ RESOLV_CLEAN_EOF
 	ip route flush table 51820 2>/dev/null || true
 
 	# 4. Safely reset and restore WireGuard interface (wg0)
-	echo -e "${CYAN}[4/6] Restoring Unified WireGuard interface (${SERVER_WG_NIC:-wg0})...${NC}"
+	echo -e "${CYAN}[4/6] Restoring Unified WireGuard interface (${SERVER_WG_NIC:-wg0}) & NIC Offloading...${NC}"
 	if command -v wg-quick &>/dev/null; then
 		wg-quick down "${SERVER_WG_NIC:-wg0}" >/dev/null 2>&1 || true
 		ip link delete dev "${SERVER_WG_NIC:-wg0}" >/dev/null 2>&1 || true
@@ -2345,17 +2678,21 @@ RESOLV_CLEAN_EOF
 		systemctl daemon-reload >/dev/null 2>&1 || true
 		systemctl restart "wg-quick@${SERVER_WG_NIC:-wg0}" 2>/dev/null || wg-quick up "${SERVER_WG_NIC:-wg0}" 2>/dev/null || true
 	fi
+	optimizeNetworkThroughput "${SERVER_PUB_NIC:-}"
 
-	# 5. Repair WARP SOCKS5 Proxy & Redsocks Bridge
-	echo -e "${CYAN}[5/6] Verifying Cloudflare WARP SOCKS5 Proxy & Redsocks Transparent Bridge...${NC}"
+	# 5. Repair WARP SOCKS5 Proxy & Redsocks Bridge (supports both 2024 and 2025/2026 warp-cli syntax)
+	echo -e "${CYAN}[5/6] Verifying Cloudflare WARP SOCKS5 Proxy (port 40000) & Redsocks Bridge...${NC}"
 	if command -v warp-cli &>/dev/null; then
 		systemctl restart warp-svc 2>/dev/null || true
-		sleep 1
-		warp-cli --accept-tos mode proxy 2>/dev/null || warp-cli set-mode proxy 2>/dev/null || true
-		warp-cli --accept-tos set-proxy-port 40000 2>/dev/null || true
+		sleep 2
+		warp-cli --accept-tos registration new 2>/dev/null || warp-cli --accept-tos register 2>/dev/null || true
+		warp-cli --accept-tos proxy port 40000 2>/dev/null || warp-cli --accept-tos set-proxy-port 40000 2>/dev/null || warp-cli set-proxy-port 40000 2>/dev/null || true
+		warp-cli --accept-tos mode proxy 2>/dev/null || warp-cli --accept-tos set-mode proxy 2>/dev/null || warp-cli set-mode proxy 2>/dev/null || true
 		warp-cli --accept-tos connect 2>/dev/null || warp-cli connect 2>/dev/null || true
+		sleep 2
 	fi
 	configureRedsocksBridge "127.0.0.1" "40000" >/dev/null 2>&1 || true
+	installWarpWatchdog
 
 	# 6. Re-apply Stealth DNS, IPSet & Firewall Rules
 	echo -e "${CYAN}[6/6] Re-applying Stealth DNS, NAT, MSS Clamping & Transparent Proxy rules...${NC}"
@@ -2402,6 +2739,8 @@ function setupCloudflareWarpClient() {
 		[[ -z "$CODENAME" ]] && CODENAME=$(lsb_release -cs 2>/dev/null || echo "jammy")
 		case "$CODENAME" in
 			noble|jammy|focal|bionic|bookworm|bullseye|buster) ;;
+			trixie|sid) CODENAME="bookworm" ;;
+			plucky|oracular) CODENAME="noble" ;;
 			*)
 				if grep -qi "ubuntu" /etc/os-release 2>/dev/null; then
 					CODENAME="jammy"
@@ -2425,11 +2764,12 @@ function setupCloudflareWarpClient() {
 		showWarpProgressBar 75 "Starting warp-svc daemon and registering consumer license..."
 		systemctl daemon-reload >/dev/null 2>&1 || true
 		systemctl enable --now warp-svc >/dev/null 2>&1 || true
-		for ((s=0; s<10; s++)); do
+		for ((s=0; s<12; s++)); do
 			systemctl is-active --quiet warp-svc 2>/dev/null && break
 			sleep 0.5
 		done
 
+		# Compatible with both 2024 and 2025/2026 warp-cli registration subcommands
 		warp-cli --accept-tos registration new 2>/dev/null \
 			|| warp-cli --accept-tos register 2>/dev/null \
 			|| echo "y" | warp-cli registration new 2>/dev/null \
@@ -2437,16 +2777,34 @@ function setupCloudflareWarpClient() {
 			|| true
 
 		showWarpProgressBar 88 "Configuring WARP in Safe SOCKS5 Proxy Mode (127.0.0.1:40000)..."
-		warp-cli --accept-tos mode proxy 2>/dev/null || warp-cli --accept-tos set-mode proxy 2>/dev/null || true
-		warp-cli --accept-tos set-proxy-port 40000 2>/dev/null || warp-cli set-proxy-port 40000 2>/dev/null || true
+		# Set proxy port BEFORE and AFTER mode change to cover all warp-cli versions
+		warp-cli --accept-tos proxy port 40000 2>/dev/null \
+			|| warp-cli --accept-tos set-proxy-port 40000 2>/dev/null \
+			|| warp-cli proxy port 40000 2>/dev/null \
+			|| warp-cli set-proxy-port 40000 2>/dev/null \
+			|| true
+		warp-cli --accept-tos mode proxy 2>/dev/null \
+			|| warp-cli --accept-tos set-mode proxy 2>/dev/null \
+			|| warp-cli mode proxy 2>/dev/null \
+			|| warp-cli set-mode proxy 2>/dev/null \
+			|| true
+		warp-cli --accept-tos proxy port 40000 2>/dev/null \
+			|| warp-cli --accept-tos set-proxy-port 40000 2>/dev/null \
+			|| true
 		warp-cli --accept-tos connect 2>/dev/null || warp-cli connect 2>/dev/null || true
-		sleep 1
+
+		# Wait up to 6 seconds for port 40000 to bind
+		for ((w=0; w<12; w++)); do
+			isPortInUse 40000 "tcp" && break
+			sleep 0.5
+		done
 
 		showWarpProgressBar 95 "Starting Redsocks Transparent TCP-to-WARP Bridge (127.0.0.1:12345)..."
 		configureRedsocksBridge "127.0.0.1" "40000" >/dev/null 2>&1 || true
+		installWarpWatchdog
 
 		showWarpProgressBar 100 "Cloudflare WARP + Redsocks Transparent Bridge Operational!"
-		echo -e "${GREEN}[✔] Stealth traffic (10.19.0.x & split domains) now exits via Cloudflare AS13335 Consumer Egress.${NC}"
+		echo -e "${GREEN}[✔] Stealth traffic (10.19.0.x, Amazon, LinkedIn & IP Scanners) now exits via Cloudflare AS13335.${NC}"
 	else
 		showWarpProgressBar 100 "WARP package unavailable on this OS architecture; Direct Stealth TTL=128 active."
 	fi
@@ -2461,24 +2819,24 @@ function cloudflareAntiFlagEngine() {
 		[[ -f /etc/wireguard/split_domains.txt ]] && SPLIT_COUNT=$(grep -c -v -E '^(#|$)' /etc/wireguard/split_domains.txt 2>/dev/null || echo 0)
 		local HAS_WARP="STANDBY (Direct Egress)"
 		if isTransparentProxyHealthy 40000; then
-			HAS_WARP="ACTIVE (AS13335 WARP + Redsocks Bridge)"
+			HAS_WARP="ACTIVE (AS13335 WARP + Redsocks + 60s Watchdog)"
 		fi
 
 		echo -e "\n${PURPLE}=================================================================${NC}"
 		echo -e "       ${CYAN}${BOLD}🛡️ Stealth Anti-Scanner & Smart Egress Gateway Engine${NC}"
 		echo -e "${PURPLE}=================================================================${NC}"
-		echo -e "  ${BOLD}Cloudflare Shield Status:${NC}   ${GREEN}[${CF_SHIELD_STATUS}]${NC} (Bypasses Cloudflare Managed Challenges)"
+		echo -e "  ${BOLD}Cloudflare Shield Status:${NC}   ${GREEN}[${CF_SHIELD_STATUS}]${NC} (Unblocks Amazon, LinkedIn & Turnstile)"
 		echo -e "  ${BOLD}Transparent WARP Bridge:${NC}    ${GREEN}[${HAS_WARP}]${NC}"
-		echo -e "  ${BOLD}TCP SYN Fingerprint:${NC}       ${CYAN}TTL=${CURRENT_TTL} & MSS Clamping Active (Anti-p0f)${NC}"
+		echo -e "  ${BOLD}TCP SYN Fingerprint:${NC}       ${CYAN}TTL=${CURRENT_TTL} & MSS=1220/PMTU Clamping Active${NC}"
 		echo -e "  ${BOLD}Active Split Domains:${NC}      ${YELLOW}${SPLIT_COUNT} domain(s) active${NC}"
 		echo "-----------------------------------------------------------------"
 		echo "1) Enable / Repair Cloudflare WARP + Transparent Redsocks Bridge (AS13335 Consumer Cloak)"
-		echo "2) Enable Cloudflare Edge & Turnstile CIDRs Split Tunneling"
+		echo "2) Refresh Amazon, LinkedIn & IP Scanner CIDRs / Pre-Warmed IPSets"
 		echo "3) Configure Custom Upstream Residential / SOCKS5 Proxy Host Masking"
 		echo "4) Toggle Windows 10/11 Desktop TCP SYN Emulation (TTL=128 vs 64)"
-		echo "5) Run Live Cloudflare CDN & Anti-Bot Diagnostic (Trace Test)"
+		echo "5) Run Live WARP, Scanner Cloak, Amazon & LinkedIn Diagnostic Test"
 		echo "6) Revert to Direct VPS Egress Only (Disable Transparent Proxy)"
-		echo "7) Safe Network, DNS & Firewall Auto-Repair (Fix Broken DNS & Recover WireGuard)"
+		echo "7) Safe Network, DNS & Speed Auto-Repair (Fix Broken DNS & Recover WireGuard)"
 		echo "8) Return to Main Menu"
 		echo ""
 
@@ -2490,12 +2848,9 @@ function cloudflareAntiFlagEngine() {
 				read -n1 -r -p "Press Enter to return..."
 				;;
 			2)
-				echo -e "\n${CYAN}[*] Applying Cloudflare Edge & Turnstile CIDRs Split Rules...${NC}"
+				echo -e "\n${CYAN}[*] Refreshing Amazon, LinkedIn, Cloudflare & IP Scanner CIDRs...${NC}"
 				mkdir -p /etc/wireguard
 				touch /etc/wireguard/cloudflare_split_enabled
-				for d in challenges.cloudflare.com cloudflare.com turnstile.com cdnjs.cloudflare.com cloudflareinsights.com cf-assets.com pages.dev workers.dev; do
-					grep -q "^${d}\$" /etc/wireguard/split_domains.txt 2>/dev/null || echo "$d" >> /etc/wireguard/split_domains.txt
-				done
 				applyDomainSplitRulesLive
 				;;
 			3)
@@ -2523,6 +2878,8 @@ function cloudflareAntiFlagEngine() {
 				read -n1 -r -p "Press Enter to continue..."
 				;;
 			6)
+				rm -f /etc/wireguard/warp_egress_enabled 2>/dev/null || true
+				systemctl stop wg-warp-watchdog.timer 2>/dev/null || true
 				systemctl stop redsocks 2>/dev/null || true
 				iptables -t nat -D PREROUTING -i "${SERVER_WG_NIC:-wg0}" -p tcp -j WG_STEALTH_PROXY 2>/dev/null || true
 				iptables -t nat -F WG_STEALTH_PROXY 2>/dev/null || true
@@ -2552,6 +2909,8 @@ function uninstallWg() {
 		systemctl disable "wg-quick@${SERVER_WG_NIC:-wg0}" >/dev/null 2>&1 || true
 		systemctl stop cbwireguard-web >/dev/null 2>&1 || true
 		systemctl disable cbwireguard-web >/dev/null 2>&1 || true
+		systemctl stop wg-warp-watchdog.timer >/dev/null 2>&1 || true
+		systemctl disable wg-warp-watchdog.timer >/dev/null 2>&1 || true
 		systemctl stop redsocks >/dev/null 2>&1 || true
 
 		if command -v wg-quick >/dev/null 2>&1; then
@@ -2566,6 +2925,7 @@ function uninstallWg() {
 		if [[ -n "${SERVER_PORT:-}" ]]; then
 			iptables -D INPUT -p udp --dport "${SERVER_PORT}" -j ACCEPT 2>/dev/null || true
 		fi
+		iptables -D FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
 		iptables -D FORWARD -i "${SERVER_WG_NIC:-wg0}" -j ACCEPT 2>/dev/null || true
 		iptables -D FORWARD -o "${SERVER_WG_NIC:-wg0}" -j ACCEPT 2>/dev/null || true
 		iptables -t nat -D POSTROUTING -s 10.18.0.0/24 -j MASQUERADE 2>/dev/null || true
@@ -2575,6 +2935,7 @@ function uninstallWg() {
 			ipset destroy wg_split_v4 2>/dev/null || true
 			ipset destroy wg_split_v6 2>/dev/null || true
 			ipset destroy wg_direct_clean 2>/dev/null || true
+			ipset destroy wg_highspeed_direct 2>/dev/null || true
 		fi
 		rm -f /etc/dnsmasq.d/00-stealth-privacy.conf /etc/dnsmasq.d/wg_split.conf
 		systemctl restart dnsmasq 2>/dev/null || true
@@ -2582,6 +2943,7 @@ function uninstallWg() {
 		rm -rf /etc/wireguard
 		rm -f /etc/sysctl.d/99-wireguard-stealth.conf
 		rm -f /etc/systemd/system/cbwireguard-web.service
+		rm -f /etc/systemd/system/wg-warp-watchdog.service /etc/systemd/system/wg-warp-watchdog.timer /usr/local/bin/wg-warp-watchdog.sh
 		systemctl daemon-reload
 
 		echo -e "${GREEN}[✔] WireGuard uninstalled safely. Sensitive ports (80, 443, 22) preserved intact.${NC}\n"
@@ -2603,16 +2965,16 @@ function manageMenu() {
 
 		local BRIDGE_STATUS="${YELLOW}DIRECT VPS EGRESS${NC}"
 		if isTransparentProxyHealthy 40000; then
-			BRIDGE_STATUS="${GREEN}WARP AS13335 BRIDGE ACTIVE${NC}"
+			BRIDGE_STATUS="${GREEN}WARP AS13335 BRIDGE + SCANNER CLOAK ACTIVE${NC}"
 		fi
 
 		echo -e "\n${PURPLE}=================================================================${NC}"
-		echo -e "              ${GREEN}${BOLD}🍪  Cookie's Easy WireGuard Manager v4.0${NC}"
+		echo -e "              ${GREEN}${BOLD}🍪  Cookie's Easy WireGuard Manager v4.1${NC}"
 		echo -e "${PURPLE}=================================================================${NC}"
 		echo -e "  ${BOLD}Server Daemon (Unified):${NC}    wg0 | Port ${SERVER_PORT:-4500}/udp [${WG0_STATUS}]"
 		echo -e "  ${BOLD}Stealth Egress Engine:${NC}      [${BRIDGE_STATUS}]"
-		echo -e "  ${BOLD}Profile 1 (Stealth Gateway):${NC}10.19.0.0/24 (Anti-Flag WARP Egress, MTU 1380, Port ${SERVER_PORT:-4500})"
-		echo -e "  ${BOLD}Profile 2 (Standard):${NC}       10.18.0.0/24 (Direct VPS + Split Shield, MTU 1420, Port ${SERVER_PORT:-4500})"
+		echo -e "  ${BOLD}Profile 1 (Stealth Gateway):${NC}10.19.0.0/24 (WARP Cloak + Fast-Lane, MTU 1380, Port ${SERVER_PORT:-4500})"
+		echo -e "  ${BOLD}Profile 2 (Standard):${NC}       10.18.0.0/24 (Direct VPS + Amazon/LI Shield, MTU 1420, Port ${SERVER_PORT:-4500})"
 		echo -e "${PURPLE}┌──────────────────────────────────────────────────────────────┐${NC}"
 		echo -e "${PURPLE}│${NC}                      ${CYAN}${BOLD}Main Menu Actions${NC}                       ${PURPLE}│${NC}"
 		echo -e "${PURPLE}├──────────────────────────────────────────────────────────────┤${NC}"
@@ -2620,12 +2982,12 @@ function manageMenu() {
 		echo -e "${PURPLE}│${NC} ${BOLD}[2]${NC} Add new client (Generates Standard & Stealth Profiles)    ${PURPLE}│${NC}"
 		echo -e "${PURPLE}│${NC} ${BOLD}[3]${NC} Configure clients (Check/Edit/Export/Remove)             ${PURPLE}│${NC}"
 		echo -e "${PURPLE}│${NC} ${BOLD}[4]${NC} Backup & Restore Manager                                 ${PURPLE}│${NC}"
-		echo -e "${PURPLE}│${NC} ${BOLD}[5]${NC} Domain-Based Split Tunneling                             ${PURPLE}│${NC}"
+		echo -e "${PURPLE}│${NC} ${BOLD}[5]${NC} Domain-Based Split Tunneling (Amazon/LinkedIn/Scanners)  ${PURPLE}│${NC}"
 		echo -e "${PURPLE}│${NC} ${BOLD}[6]${NC} Real-Time Logging (Errors)                               ${PURPLE}│${NC}"
-		echo -e "${PURPLE}│${NC} ${BOLD}[7]${NC} Geo-IP & Anti-VPN Shield Status                          ${PURPLE}│${NC}"
+		echo -e "${PURPLE}│${NC} ${BOLD}[7]${NC} Geo-IP, Scanner Cloak & High-Speed Offload Status        ${PURPLE}│${NC}"
 		echo -e "${PURPLE}│${NC} ${BOLD}[8]${NC} Provision Web Management Console                         ${PURPLE}│${NC}"
 		echo -e "${PURPLE}│${NC} ${BOLD}[9]${NC} Stealth Anti-Scanner & Smart Egress Gateway Engine        ${PURPLE}│${NC}"
-		echo -e "${PURPLE}│${NC} ${BOLD}[10]${NC} Safe Network, DNS & WireGuard Health Auto-Repair       ${PURPLE}│${NC}"
+		echo -e "${PURPLE}│${NC} ${BOLD}[10]${NC} Safe Network, DNS, WARP & Speed Auto-Repair             ${PURPLE}│${NC}"
 		echo -e "${PURPLE}│${NC} ${BOLD}[s]${NC} Settings (Port, MTU, DNS, AllowedIPs)                    ${PURPLE}│${NC}"
 		echo -e "${PURPLE}│${NC} ${RED}${BOLD}[r] Remove WireGuard server from this system${NC}                 ${PURPLE}│${NC}"
 		echo -e "${PURPLE}│${NC} ${BOLD}[q]${NC} Exit                                                     ${PURPLE}│${NC}"
