@@ -1689,6 +1689,16 @@ function applyDomainSplitRulesLive() {
 		ipset create wg_direct_clean hash:net family inet 2>/dev/null || true
 	fi
 
+	# Ensure systemd-resolved does not collide on port 53 stub listener
+	if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+		mkdir -p /etc/systemd/resolved.conf.d
+		cat << 'RESOLVED_NO_STUB' > /etc/systemd/resolved.conf.d/no-stub.conf 2>/dev/null || true
+[Resolve]
+DNSStubListener=no
+RESOLVED_NO_STUB
+		systemctl restart systemd-resolved 2>/dev/null || true
+	fi
+
 	# Configure dnsmasq for Location Stealth & EDNS Client Subnet (ECS) Anonymization
 	mkdir -p /etc/dnsmasq.d
 	cat << DNSMASQ_STEALTH_EOF > /etc/dnsmasq.d/00-stealth-privacy.conf
@@ -1702,7 +1712,7 @@ filterwin2k
 interface=${SERVER_WG_NIC:-wg0}
 except-interface=lo
 bind-dynamic
-listen-address=${SERVER_WG_IPV4:-10.18.0.1}
+listen-address=${SERVER_WG_IPV4:-10.18.0.1},10.19.0.1,127.0.0.1
 no-resolv
 server=1.1.1.1
 server=1.0.0.1
@@ -2216,19 +2226,27 @@ RESOLV_CLEAN_EOF
 	rm -f /tmp/resolv.conf.clean
 
 	# 2. Re-enable IP forwarding & kernel networking
-	echo -e "${CYAN}[2/5] Verifying kernel IP forwarding and BBR/MTU probing...${NC}"
+	echo -e "${CYAN}[2/5] Verifying kernel IP forwarding, rp_filter and BBR/MTU probing...${NC}"
 	sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
 	sysctl -w net.ipv4.conf.all.forwarding=1 >/dev/null 2>&1 || true
 	sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || true
+	sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null 2>&1 || true
+	sysctl -w net.ipv4.conf.default.rp_filter=0 >/dev/null 2>&1 || true
 	sysctl -w net.ipv4.tcp_mtu_probing=1 >/dev/null 2>&1 || true
 	sysctl -w net.ipv4.tcp_syncookies=1 >/dev/null 2>&1 || true
 
 	# 3. Resolve any port 53 / dnsmasq conflicts
 	echo -e "${CYAN}[3/5] Checking DNS services for port 53 collisions...${NC}"
 	if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
-		systemctl stop dnsmasq >/dev/null 2>&1 || true
+		mkdir -p /etc/systemd/resolved.conf.d
+		cat << 'RESOLVED_NO_STUB' > /etc/systemd/resolved.conf.d/no-stub.conf 2>/dev/null || true
+[Resolve]
+DNSStubListener=no
+RESOLVED_NO_STUB
 		systemctl restart systemd-resolved >/dev/null 2>&1 || true
 	fi
+	systemctl enable dnsmasq >/dev/null 2>&1 || true
+	systemctl restart dnsmasq >/dev/null 2>&1 || true
 
 	# 4. Safely reset and restore WireGuard interface (wg0)
 	echo -e "${CYAN}[4/5] Restoring Unified WireGuard interface (${SERVER_WG_NIC:-wg0})...${NC}"
