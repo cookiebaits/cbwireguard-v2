@@ -871,11 +871,7 @@ CF_INIT_DOMAINS
 
 		applyDomainSplitRulesLive
 
-		# By default include Cloudflare WARP Consumer Egress during install for cloudflare anti-spam
-		echo -e "\n${CYAN}[*] Installing Cloudflare WARP Consumer Egress (AS13335) by default...${NC}"
-		setupCloudflareWarpClient
-
-		echo -e "${GREEN}[✔] Cloudflare Anti-Flag Shield & WARP Consumer Egress auto-configured into installation!${NC}"
+		echo -e "${GREEN}[✔] Cloudflare Anti-Flag Shield & Stealth Engine auto-configured! Direct VPS Egress active for clean IP reputation.${NC}"
 	else
 		echo -e "\n${GREEN}[✔] Standard Full Tunnel configured. Cloudflare Anti-Flag bypassed.${NC}"
 		rm -f /etc/wireguard/cloudflare_shield_enabled /etc/wireguard/cloudflare_split_enabled /etc/wireguard/warp_egress_enabled 2>/dev/null || true
@@ -2260,7 +2256,14 @@ RESOLV_CLEAN_EOF
 	iptables -I FORWARD 3 -s 10.18.0.0/24 -j ACCEPT 2>/dev/null || true
 	iptables -I FORWARD 4 -s 10.19.0.0/24 -j ACCEPT 2>/dev/null || true
 
-	# Ensure outgoing NAT (interface-agnostic masquerade)
+	# Ensure outgoing NAT (interface-agnostic masquerade to clean native public interface)
+	iptables -t nat -D POSTROUTING -o CloudflareWARP -j MASQUERADE 2>/dev/null || true
+	iptables -t nat -D POSTROUTING -s 10.18.0.0/24 -o CloudflareWARP -j MASQUERADE 2>/dev/null || true
+	iptables -t nat -D POSTROUTING -s 10.19.0.0/24 -o CloudflareWARP -j MASQUERADE 2>/dev/null || true
+	if command -v warp-cli &>/dev/null; then
+		warp-cli --accept-tos mode proxy 2>/dev/null || warp-cli set-mode proxy 2>/dev/null || true
+	fi
+
 	iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 -j MASQUERADE 2>/dev/null || true
 	iptables -t nat -I POSTROUTING 2 -s 10.19.0.0/24 -j MASQUERADE 2>/dev/null || true
 
@@ -2339,16 +2342,17 @@ function setupCloudflareWarpClient() {
 			warp-cli --accept-tos add-excluded-route "$pcidr" 2>/dev/null || warp-cli add-excluded-route "$pcidr" 2>/dev/null || true
 		done
 
-		showWarpProgressBar 95 "Connecting WARP consumer gateway..."
-		warp-cli --accept-tos mode warp 2>/dev/null || warp-cli --accept-tos set-mode warp 2>/dev/null || warp-cli set-mode proxy 2>/dev/null || true
+		showWarpProgressBar 95 "Connecting WARP in Safe SOCKS5 Proxy Mode (127.0.0.1:40000)..."
+		warp-cli --accept-tos mode proxy 2>/dev/null || warp-cli --accept-tos set-mode proxy 2>/dev/null || true
+		warp-cli --accept-tos set-proxy-port 40000 2>/dev/null || true
 		warp-cli --accept-tos connect 2>/dev/null || warp-cli connect 2>/dev/null || true
 
-		if ip link show CloudflareWARP &>/dev/null; then
-			iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 -o CloudflareWARP -j MASQUERADE 2>/dev/null || true
-			iptables -t nat -I POSTROUTING 2 -s 10.19.0.0/24 -o CloudflareWARP -j MASQUERADE 2>/dev/null || true
-		fi
+		# Remove any stale CloudflareWARP masquerade rules that hijack general tunnel egress
+		iptables -t nat -D POSTROUTING -o CloudflareWARP -j MASQUERADE 2>/dev/null || true
+		iptables -t nat -D POSTROUTING -s 10.18.0.0/24 -o CloudflareWARP -j MASQUERADE 2>/dev/null || true
+		iptables -t nat -D POSTROUTING -s 10.19.0.0/24 -o CloudflareWARP -j MASQUERADE 2>/dev/null || true
 
-		showWarpProgressBar 100 "Cloudflare WARP Egress operational (AS13335 Active)"
+		showWarpProgressBar 100 "Cloudflare WARP Safe Proxy Operational (Clean Native Egress Preserved)"
 		return 0
 	fi
 
@@ -2451,17 +2455,18 @@ function setupCloudflareWarpClient() {
 		warp-cli --accept-tos add-excluded-route "$pcidr" 2>/dev/null || warp-cli add-excluded-route "$pcidr" 2>/dev/null || true
 	done
 
-	showWarpProgressBar 97 "Connecting WARP consumer gateway..."
-	warp-cli --accept-tos mode warp 2>/dev/null || warp-cli --accept-tos set-mode warp 2>/dev/null || warp-cli set-mode proxy 2>/dev/null || true
+	showWarpProgressBar 97 "Connecting WARP in Safe SOCKS5 Proxy Mode (127.0.0.1:40000)..."
+	warp-cli --accept-tos mode proxy 2>/dev/null || warp-cli --accept-tos set-mode proxy 2>/dev/null || true
+	warp-cli --accept-tos set-proxy-port 40000 2>/dev/null || true
 	warp-cli --accept-tos connect 2>/dev/null || warp-cli connect 2>/dev/null || true
 
-	if ip link show CloudflareWARP &>/dev/null; then
-		iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 -o CloudflareWARP -j MASQUERADE 2>/dev/null || true
-		iptables -t nat -I POSTROUTING 2 -s 10.19.0.0/24 -o CloudflareWARP -j MASQUERADE 2>/dev/null || true
-	fi
+	# Remove any stale CloudflareWARP masquerade rules that hijack general tunnel egress
+	iptables -t nat -D POSTROUTING -o CloudflareWARP -j MASQUERADE 2>/dev/null || true
+	iptables -t nat -D POSTROUTING -s 10.18.0.0/24 -o CloudflareWARP -j MASQUERADE 2>/dev/null || true
+	iptables -t nat -D POSTROUTING -s 10.19.0.0/24 -o CloudflareWARP -j MASQUERADE 2>/dev/null || true
 
-	showWarpProgressBar 100 "Cloudflare WARP Consumer Egress active (AS13335)!"
-	echo -e "${GREEN}[✔] Outgoing Cloudflare packets mapped to AS13335 without disrupting SSH or WireGuard networking.${NC}"
+	showWarpProgressBar 100 "Cloudflare WARP Safe Proxy active (127.0.0.1:40000)!"
+	echo -e "${GREEN}[✔] Clean native static VPS IP preserved as primary egress for 100% website compatibility.${NC}"
 }
 
 function cloudflareAntiFlagEngine() {

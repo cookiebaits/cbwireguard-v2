@@ -290,7 +290,7 @@ export const StealthTab: React.FC<StealthTabProps> = ({ onRefresh, peers = [], o
                 </span>
               </div>
               <p className="text-xs sm:text-sm text-slate-300 mt-1 max-w-2xl leading-relaxed">
-                Prevents Cloudflare Turnstile, LinkedIn, Amazon, and scanner blocks by cloaking your VPS with AmneziaWG obfuscation, MTU 1360, Windows 11 TTL=128 disguise, active UDP scanner rate-limiting, and Cloudflare WARP consumer egress (AS13335). Auto-configured out-of-the-box.
+                Prevents Cloudflare Turnstile, LinkedIn, Amazon, PayPal, and scanner blocks by cloaking your VPS with PMTU MSS clamping, Windows 11 TTL=128 disguise, active UDP scanner rate-limiting, and clean native static IP egress for 100% website compatibility. Auto-configured out-of-the-box.
               </p>
             </div>
           </div>

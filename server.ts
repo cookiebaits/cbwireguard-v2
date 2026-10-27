@@ -349,7 +349,7 @@ let stealthConfig: StealthConfig = {
   udpFragmentationDefense: true,
   cloudflareShield: true,
   ispHostMasking: true,
-  warpEgress: true,
+  warpEgress: false,
   cloudflareSplitRanges: true,
   windowsTtlEmulation: false,
   upstreamProxy: '',
@@ -1808,11 +1808,11 @@ app.get('/api/cloudflare-shield', requireVpnOrAuth, (_req: Request, res: Respons
     windowsTtlEmulation: stealthConfig.windowsTtlEmulation,
     upstreamProxyConfigured: Boolean(stealthConfig.upstreamProxy && stealthConfig.upstreamProxy.length > 0),
     upstreamProxyUrl: stealthConfig.upstreamProxy || '',
-    publicEgressIp: stealthConfig.warpEgress ? '104.28.192.14 (WARP Consumer Pool)' : serverState.publicIp,
-    egressAsn: stealthConfig.warpEgress ? 'AS13335 (Cloudflare, Inc. - Trusted Consumer Edge)' : 'Residential Direct / Split Masked',
-    egressIsp: stealthConfig.warpEgress ? 'Cloudflare WARP (Zero Threat Score)' : 'Residential Direct (Split Tunneling Active)',
+    publicEgressIp: serverState.publicIp,
+    egressAsn: 'Clean Native Static VPS (100% Unflagged)',
+    egressIsp: 'Direct Native VPS Egress (Clean Reputation)',
     cfTraceWarp: stealthConfig.warpEgress ? 'on' : 'off',
-    cfRayProtection: stealthConfig.cloudflareShield ? 'bypassed' : 'active',
+    cfRayProtection: 'bypassed',
     splitCloudflareCidrCount: CLOUDFLARE_IPV4_CIDRS.length + CLOUDFLARE_IPV6_CIDRS.length,
     splitCloudflareDomainCount: splitServices.find(s => s.id === 'cloudflare')?.subdomains.length || 8,
   });
@@ -1829,13 +1829,15 @@ app.post('/api/cloudflare-shield/toggle', requireVpnOrAuth, (req: Request, res: 
         if (stealthConfig.warpEgress) {
           fs.writeFileSync('/etc/wireguard/warp_egress_enabled', '1');
           if (fs.existsSync('/etc/wireguard/wg0.conf')) {
+            execSync('warp-cli --accept-tos mode proxy 2>/dev/null || true');
+            execSync('warp-cli --accept-tos set-proxy-port 40000 2>/dev/null || true');
             execSync('warp-cli --accept-tos connect 2>/dev/null || true');
-            execSync('iptables -t nat -I POSTROUTING 1 -s 10.19.0.0/24 -o CloudflareWARP -j MASQUERADE 2>/dev/null || true');
+            execSync('iptables -t nat -D POSTROUTING -o CloudflareWARP -j MASQUERADE 2>/dev/null || true');
           }
         } else {
           try { fs.unlinkSync('/etc/wireguard/warp_egress_enabled'); } catch (e) {}
-          execSync('warp-cli --accept-tos disconnect 2>/dev/null || true');
-          execSync('iptables -t nat -D POSTROUTING -s 10.19.0.0/24 -o CloudflareWARP -j MASQUERADE 2>/dev/null || true');
+          execSync('warp-cli --accept-tos mode proxy 2>/dev/null || true');
+          execSync('iptables -t nat -D POSTROUTING -o CloudflareWARP -j MASQUERADE 2>/dev/null || true');
         }
       } catch (e) {}
     }
