@@ -1,6 +1,8 @@
 #!/bin/bash
 # ==============================================================================
-# 🍪 Cookie's Easy WireGuard Manager & VPS Stealth Server v4.2 (Full-Speed WARP)
+# 🍪 Cookie's Easy WireGuard Manager & VPS Stealth Server v4.5
+# Direct full-speed default egress + Clean-domain routing (Direct VPS / Residential)
+# + Safe DNS Split Tunneling with automatic direct passthrough fallback
 # ==============================================================================
 
 RED='\033[0;31m'
@@ -12,6 +14,34 @@ YELLOW='\033[1;33m'
 WHITE='\033[1;37m'
 BOLD='\033[1m'
 NC='\033[0m'
+
+# ------------------------------------------------------------------------------
+# 0. Safe Params Loader (Repairs unquoted legacy /etc/wireguard/params files)
+# ------------------------------------------------------------------------------
+function sanitizeAndLoadParams() {
+	local PFILE="/etc/wireguard/params"
+	[[ ! -f "$PFILE" ]] && return 0
+
+	local TMP_P
+	TMP_P=$(mktemp /tmp/wg_params.XXXXXX)
+	while IFS= read -r line || [[ -n "$line" ]]; do
+		[[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+		if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+			local key="${BASH_REMATCH[1]}"
+			local val="${BASH_REMATCH[2]}"
+			# Strip surrounding single or double quotes if already present
+			val=$(echo "$val" | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
+			# Escape any single quotes inside value and wrap in single quotes
+			val="${val//\'/\'\\\'\'}"
+			echo "${key}='${val}'" >> "$TMP_P"
+		fi
+	done < "$PFILE"
+
+	mv "$TMP_P" "$PFILE"
+	chmod 600 "$PFILE" 2>/dev/null || true
+	# shellcheck disable=SC1090
+	source "$PFILE"
+}
 
 # ------------------------------------------------------------------------------
 # 1. System & Root Verification Checks
@@ -93,7 +123,54 @@ function ipt_ensure_append() {
 	fi
 }
 
-# Re-enable physical NIC hardware offloads while disabling only buggy UDP GRO forwarding
+# ------------------------------------------------------------------------------
+# 1b. Routing Mode Helpers
+# ------------------------------------------------------------------------------
+function getSplitMode() {
+	local MODE
+	MODE=$(cat /etc/wireguard/split_mode.txt 2>/dev/null | tr -d ' \r\n')
+	[[ "$MODE" != "BYPASS" && "$MODE" != "TUNNEL" ]] && MODE="TUNNEL"
+	echo "$MODE"
+}
+
+function getCleanEgress() {
+	local EGRESS
+	EGRESS=$(cat /etc/wireguard/clean_egress.txt 2>/dev/null | tr -d ' \r\n')
+	[[ "$EGRESS" != "RESIDENTIAL" ]] && EGRESS="DIRECT"
+	echo "$EGRESS"
+}
+
+function getCleanEgressTable() {
+	if [[ "$(getCleanEgress)" == "RESIDENTIAL" ]] && ip link show wgres &>/dev/null; then
+		echo "52000"
+	else
+		echo "main"
+	fi
+}
+
+function normalizeDomain() {
+	echo "$1" | sed -e 's|^https*://||' -e 's|/.*$||' | tr '[:upper:]' '[:lower:]' | xargs
+}
+
+function migrateToV45() {
+	[[ -d /etc/wireguard ]] || return 0
+	[[ -f /etc/wireguard/.v45_migrated ]] && return 0
+	echo "TUNNEL" > /etc/wireguard/split_mode.txt
+	touch /etc/wireguard/warp_domains.txt
+	touch /etc/wireguard/.v45_migrated
+}
+
+function disableRpFilterAll() {
+	sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+	sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || true
+	for i in /proc/sys/net/ipv4/conf/*/rp_filter; do
+		[[ -w "$i" ]] && echo 0 > "$i" 2>/dev/null || true
+	done
+	for i in /proc/sys/net/ipv4/conf/*/forwarding; do
+		[[ -w "$i" ]] && echo 1 > "$i" 2>/dev/null || true
+	done
+}
+
 function optimizeNicQueuesAndRPS() {
 	local cpu_count
 	cpu_count=$(nproc 2>/dev/null || echo 1)
@@ -105,32 +182,58 @@ function optimizeNicQueuesAndRPS() {
 		PUB_NIC=$(ip -4 route show table main default 2>/dev/null | awk '/dev/ {for (i=1; i<=NF; i++) if ($i == "dev") print $(i+1)}' | grep -vE '^(wg|Cloudflare|tun)' | head -n1 || echo "eth0")
 	fi
 
-	# Restore hardware TSO/GSO/GRO on physical NIC (disabled in v4.1) and only disable buggy UDP GRO list forwarding
-	if command -v ethtool &>/dev/null && [[ -n "$PUB_NIC" ]]; then
-		ethtool -K "$PUB_NIC" gro on gso on tso on 2>/dev/null || true
-		ethtool -K "$PUB_NIC" rx-gro-list off 2>/dev/null || true
-		ethtool -K "$PUB_NIC" rx-udp-gro-forwarding off 2>/dev/null || true
+	for gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+		[[ -w "$gov" ]] && echo "performance" > "$gov" 2>/dev/null || true
+	done
+
+	if ip link show "$PUB_NIC" &>/dev/null; then
+		ip link set dev "$PUB_NIC" txqueuelen 10000 2>/dev/null || true
+		if command -v tc &>/dev/null; then
+			local txq
+			txq=$(find /sys/class/net/"$PUB_NIC"/queues -maxdepth 1 -name 'tx-*' 2>/dev/null | wc -l)
+			if (( txq > 1 )); then
+				tc qdisc show dev "$PUB_NIC" root 2>/dev/null | grep -q "qdisc mq" || tc qdisc replace dev "$PUB_NIC" root mq 2>/dev/null || true
+			else
+				tc qdisc show dev "$PUB_NIC" root 2>/dev/null | grep -q "qdisc fq " || tc qdisc replace dev "$PUB_NIC" root fq 2>/dev/null || true
+			fi
+		fi
+		if command -v ethtool &>/dev/null; then
+			ethtool -K "$PUB_NIC" gro on gso on tso on 2>/dev/null || true
+			ethtool -K "$PUB_NIC" rx-gro-list off 2>/dev/null || true
+			ethtool -K "$PUB_NIC" rx-udp-gro-forwarding on 2>/dev/null || true
+		fi
 	fi
 
-	for nic in "$PUB_NIC" "${SERVER_WG_NIC:-wg0}" "wgwarp" "CloudflareWARP"; do
+	for wgnic in "${SERVER_WG_NIC:-wg0}" "wgwarp" "wgres"; do
+		if ip link show "$wgnic" &>/dev/null; then
+			ip link set dev "$wgnic" txqueuelen 10000 2>/dev/null || true
+			if command -v tc &>/dev/null; then
+				tc qdisc del dev "$wgnic" root 2>/dev/null || true
+			fi
+		fi
+	done
+
+	for nic in "$PUB_NIC" "${SERVER_WG_NIC:-wg0}" "wgwarp" "wgres"; do
 		if ip link show "$nic" &>/dev/null; then
-			ip link set dev "$nic" txqueuelen 10000 2>/dev/null || true
 			for rps_file in /sys/class/net/"$nic"/queues/rx-*/rps_cpus; do
 				[[ -w "$rps_file" ]] && echo "$rps_mask" > "$rps_file" 2>/dev/null || true
 			done
 			for flow_file in /sys/class/net/"$nic"/queues/rx-*/rps_flow_cnt; do
-				[[ -w "$flow_file" ]] && echo 4096 > "$flow_file" 2>/dev/null || true
+				[[ -w "$flow_file" ]] && echo 8192 > "$flow_file" 2>/dev/null || true
+			done
+			for xps_file in /sys/class/net/"$nic"/queues/tx-*/xps_cpus; do
+				[[ -w "$xps_file" ]] && echo "$rps_mask" > "$xps_file" 2>/dev/null || true
 			done
 		fi
 	done
 
-	# Keep wg0 at 1420 (accepts full frames from existing clients) and wgwarp at 1280 (Cloudflare WARP edge limit)
 	ip link set dev "${SERVER_WG_NIC:-wg0}" mtu 1420 2>/dev/null || true
-	ip link set dev wgwarp mtu 1280 2>/dev/null || true
+	ip link set dev wgwarp mtu "${WARP_OPTIMAL_MTU:-1420}" 2>/dev/null || true
 
 	if [[ -w /proc/sys/net/core/rps_sock_flow_entries ]]; then
-		echo 32768 > /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null || true
+		echo 65536 > /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null || true
 	fi
+	disableRpFilterAll
 }
 
 function getHomeDirForClient() {
@@ -164,13 +267,13 @@ function getMasterPasskey() {
 		PASS=$(cat /etc/wireguard/admin.key 2>/dev/null | tr -d '\r\n')
 	fi
 	if [[ -z "$PASS" && -f /etc/wireguard/manager.env ]]; then
-		PASS=$(grep -E '^ADMIN_PASSKEY=' /etc/wireguard/manager.env 2>/dev/null | cut -d'=' -f2- | tr -d '"\r\n')
+		PASS=$(grep -E '^ADMIN_PASSKEY=' /etc/wireguard/manager.env 2>/dev/null | cut -d'=' -f2- | tr -d "'\"\r\n")
 	fi
 	if [[ -z "$PASS" && -f /etc/wireguard/params ]]; then
-		PASS=$(grep -E '^ADMIN_PASSKEY=' /etc/wireguard/params 2>/dev/null | cut -d'=' -f2- | tr -d '"\r\n')
+		PASS=$(grep -E '^ADMIN_PASSKEY=' /etc/wireguard/params 2>/dev/null | cut -d'=' -f2- | tr -d "'\"\r\n")
 	fi
 	if [[ -z "$PASS" ]]; then
-		PASS="${ADMIN_PASSKEY:-CookieWireGuardSec2026!#Key}"
+		PASS="${ADMIN_PASSKEY:-CookieWireGuardSec2026Key}"
 	fi
 	echo "$PASS"
 }
@@ -265,25 +368,6 @@ function isSensitivePort() {
 	return 1
 }
 
-function isPortInUse() {
-	local port="$1"
-	local proto="${2:-udp}"
-	if command -v ss &>/dev/null; then
-		if [[ "$proto" == "udp" ]]; then
-			ss -uln 2>/dev/null | grep -qE "(:|\])${port}\s" && return 0
-		else
-			ss -tln 2>/dev/null | grep -qE "(:|\])${port}\s" && return 0
-		fi
-	elif command -v netstat &>/dev/null; then
-		if [[ "$proto" == "udp" ]]; then
-			netstat -uln 2>/dev/null | grep -qE "(:|\])${port}\s" && return 0
-		else
-			netstat -tln 2>/dev/null | grep -qE "(:|\])${port}\s" && return 0
-		fi
-	fi
-	return 1
-}
-
 function cleanupOldWireguard() {
 	echo -e "\n${CYAN}[*] Scanning for old/conflicting WireGuard instances & services...${NC}"
 
@@ -308,10 +392,6 @@ function cleanupOldWireguard() {
 	while iptables -D FORWARD -o wg0 -j ACCEPT 2>/dev/null; do :; done
 	while iptables -t nat -D POSTROUTING -s 10.18.0.0/24 -j MASQUERADE 2>/dev/null; do :; done
 	while iptables -t nat -D POSTROUTING -s 10.19.0.0/24 -j MASQUERADE 2>/dev/null; do :; done
-	while iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
-	while iptables -t mangle -D POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
-	while iptables -t mangle -D POSTROUTING -j TTL --ttl-set 64 2>/dev/null; do :; done
-	while iptables -t mangle -D POSTROUTING -j TTL --ttl-set 128 2>/dev/null; do :; done
 
 	echo -e "${GREEN}[✔] Cleaned old WireGuard instances.${NC}"
 }
@@ -321,27 +401,25 @@ function cleanupOldWireguard() {
 # ------------------------------------------------------------------------------
 function selectDNSResolvers() {
 	echo -e "\n${CYAN}${BOLD}Select DNS Resolvers for Clients:${NC}"
-	echo -e "   1) ${GREEN}Cloudflare Anycast Anti-Flag${NC} (1.1.1.1, 1.0.0.1) ${PURPLE}[RECOMMENDED SPEED]${NC}"
-	echo -e "   2) ${GREEN}AdGuard Stealth${NC} (94.140.14.14, 94.140.15.15)"
-	echo -e "   3) ${GREEN}Mullvad Privacy${NC} (194.242.2.2, 194.242.2.3)"
-	echo -e "   4) ${GREEN}Quad9 Swiss Shield${NC} (9.9.9.9, 149.112.112.112)"
-	echo -e "   5) ${GREEN}Control D Stealth${NC} (76.76.2.0, 76.76.10.0)"
-	echo -e "   6) ${GREEN}Local Server Resolver${NC} (${SERVER_WG_IPV4:-10.18.0.1})"
-	echo -e "   7) ${GREEN}Google Public DNS${NC} (8.8.8.8, 8.8.4.4)"
-	echo -e "   8) ${GREEN}OpenDNS${NC} (208.67.222.222, 208.67.220.220)"
-	echo -e "   9) Custom Primary & Secondary DNS Resolvers"
+	echo -e "   1) ${GREEN}Cloudflare${NC} (1.1.1.1, 1.0.0.1) ${PURPLE}[RECOMMENDED]${NC}"
+	echo -e "   2) ${GREEN}AdGuard${NC} (94.140.14.14, 94.140.15.15)"
+	echo -e "   3) ${GREEN}Mullvad${NC} (194.242.2.2, 194.242.2.3)"
+	echo -e "   4) ${GREEN}Quad9${NC} (9.9.9.9, 149.112.112.112)"
+	echo -e "   5) ${GREEN}Control D${NC} (76.76.2.0, 76.76.10.0)"
+	echo -e "   6) ${GREEN}Google Public DNS${NC} (8.8.8.8, 8.8.4.4)"
+	echo -e "   7) ${GREEN}OpenDNS${NC} (208.67.222.222, 208.67.220.220)"
+	echo -e "   8) Custom Primary & Secondary DNS Resolvers"
 
-	read -rp "Select DNS Resolver option [1-9, default 1]: " DNS_OPTION
+	read -rp "Select DNS Resolver option [1-8, default 1]: " DNS_OPTION
 	DNS_OPTION=${DNS_OPTION:-1}
 	case "${DNS_OPTION}" in
 		2) CLIENT_DNS_1="94.140.14.14"; CLIENT_DNS_2="94.140.15.15" ;;
 		3) CLIENT_DNS_1="194.242.2.2"; CLIENT_DNS_2="194.242.2.3" ;;
 		4) CLIENT_DNS_1="9.9.9.9"; CLIENT_DNS_2="149.112.112.112" ;;
 		5) CLIENT_DNS_1="76.76.2.0"; CLIENT_DNS_2="76.76.10.0" ;;
-		6) CLIENT_DNS_1="${SERVER_WG_IPV4:-10.18.0.1}"; CLIENT_DNS_2="1.1.1.1" ;;
-		7) CLIENT_DNS_1="8.8.8.8"; CLIENT_DNS_2="8.8.4.4" ;;
-		8) CLIENT_DNS_1="208.67.222.222"; CLIENT_DNS_2="208.67.220.220" ;;
-		9)
+		6) CLIENT_DNS_1="8.8.8.8"; CLIENT_DNS_2="8.8.4.4" ;;
+		7) CLIENT_DNS_1="208.67.222.222"; CLIENT_DNS_2="208.67.220.220" ;;
+		8)
 			read -rp "Enter Primary DNS resolver: " -e -i "1.1.1.1" CLIENT_DNS_1
 			read -rp "Enter Secondary DNS resolver: " -e -i "1.0.0.1" CLIENT_DNS_2
 			;;
@@ -355,7 +433,7 @@ function selectDNSResolvers() {
 # ------------------------------------------------------------------------------
 function installQuestions() {
 	echo -e "${PURPLE}=================================================================${NC}"
-	echo -e "          ${GREEN}${BOLD}🍪  Cookie's Easy WireGuard Setup & Installer v4.2${NC}"
+	echo -e "          ${GREEN}${BOLD}🍪  Cookie's Easy WireGuard Setup & Installer v4.5${NC}"
 	echo -e "${PURPLE}=================================================================${NC}"
 
 	SERVER_NIC=$(ip -4 route show table main default 2>/dev/null | awk '/dev/ {for (i=1; i<=NF; i++) if ($i == "dev") print $(i+1)}' | grep -vE '^(wg|Cloudflare|tun)' | head -n1 || true)
@@ -448,12 +526,11 @@ function installQuestions() {
 	read -rp "Allowed IPs for generated clients: " -e -i "0.0.0.0/0, ::/0" ALLOWED_IPS
 
 	CF_AUTO_ENABLE="y"
-	WARP_GLOBAL_MODE="full"
 	WEB_PORT=${WEB_PORT:-51821}
 }
 
 # ------------------------------------------------------------------------------
-# 5. Safely Upgrade / Write wg0.conf (Preserving Existing Key & All Peers)
+# 5. Safely Upgrade / Write wg0.conf
 # ------------------------------------------------------------------------------
 function writeUnifiedWg0Config() {
 	local EXISTING_PEERS=""
@@ -469,44 +546,43 @@ function writeUnifiedWg0Config() {
 	[[ -n "$EXISTING_PRIV_KEY" ]] && SERVER_PRIV_KEY="$EXISTING_PRIV_KEY"
 	[[ -n "$EXISTING_PORT" && -z "${SERVER_PORT:-}" ]] && SERVER_PORT="$EXISTING_PORT"
 
-	local WG_SERVER_ADDRESS="${SERVER_WG_IPV4:-10.18.0.1}/24"
-	if [[ "${HAS_IPV6:-0}" -eq 1 ]]; then
-		WG_SERVER_ADDRESS="${SERVER_WG_IPV4:-10.18.0.1}/24,${SERVER_WG_IPV6:-fd42:42:42::1}/64"
-	fi
+	local PUB_NIC="${SERVER_PUB_NIC:-eth0}"
+	local WG_SERVER_ADDRESS="${SERVER_WG_IPV4:-10.18.0.1}/24, 10.19.0.1/24"
 
 	cat << WG_SERVER_EOF > "/etc/wireguard/wg0.conf"
 [Interface]
-Address = ${WG_SERVER_ADDRESS}, 10.19.0.1/24
+Address = ${WG_SERVER_ADDRESS}
 ListenPort = ${SERVER_PORT:-4500}
 PrivateKey = ${SERVER_PRIV_KEY}
 MTU = 1420
 SaveConfig = false
 
-# --- 1. CORE HIGH-SPEED FORWARDING & NAT ---
-PostUp = sysctl -w net.ipv4.ip_forward=1 net.ipv4.conf.all.rp_filter=0 net.ipv4.conf.wg0.rp_filter=0 >/dev/null 2>&1 || true
+PostUp = sysctl -w net.ipv4.ip_forward=1 net.ipv6.conf.all.forwarding=1 net.ipv4.conf.all.rp_filter=0 net.ipv4.conf.default.rp_filter=0 net.ipv4.conf.wg0.rp_filter=0 >/dev/null 2>&1 || true
+PostUp = for i in /proc/sys/net/ipv4/conf/*/rp_filter; do echo 0 > \$i 2>/dev/null || true; done
 PostUp = ip link set dev wg0 txqueuelen 10000 mtu 1420 2>/dev/null || true
-PostUp = iptables -C INPUT -p udp --dport ${SERVER_PORT:-4500} -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p udp --dport ${SERVER_PORT:-4500} -j ACCEPT
-PostUp = iptables -C INPUT -i wg0 -p udp --dport 53 -j ACCEPT 2>/dev/null || iptables -I INPUT 2 -i wg0 -p udp --dport 53 -j ACCEPT
-PostUp = iptables -C INPUT -i wg0 -p tcp --dport 53 -j ACCEPT 2>/dev/null || iptables -I INPUT 3 -i wg0 -p tcp --dport 53 -j ACCEPT
-PostUp = iptables -C FORWARD -p icmp -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -p icmp -j ACCEPT
+PostUp = tc qdisc del dev wg0 root 2>/dev/null || true
+
+PostUp = iptables -P FORWARD ACCEPT 2>/dev/null || true
+PostUp = iptables -C INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+PostUp = iptables -C INPUT -p udp --dport ${SERVER_PORT:-4500} -j ACCEPT 2>/dev/null || iptables -I INPUT 2 -p udp --dport ${SERVER_PORT:-4500} -j ACCEPT
+PostUp = iptables -C INPUT -i wg0 -j ACCEPT 2>/dev/null || iptables -I INPUT 3 -i wg0 -j ACCEPT
+
+PostUp = iptables -C FORWARD -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 PostUp = iptables -C FORWARD -i wg0 -j ACCEPT 2>/dev/null || iptables -I FORWARD 2 -i wg0 -j ACCEPT
 PostUp = iptables -C FORWARD -o wg0 -j ACCEPT 2>/dev/null || iptables -I FORWARD 3 -o wg0 -j ACCEPT
+
 PostUp = iptables -t nat -C POSTROUTING -s 10.18.0.0/24 ! -o wg0 -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 ! -o wg0 -j MASQUERADE
 PostUp = iptables -t nat -C POSTROUTING -s 10.19.0.0/24 ! -o wg0 -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING 2 -s 10.19.0.0/24 ! -o wg0 -j MASQUERADE
+PostUp = iptables -t nat -C POSTROUTING -o ${PUB_NIC} -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o ${PUB_NIC} -j MASQUERADE
 
-# --- 2. BIDIRECTIONAL MSS=1200 CLAMPING (Fits inside 1280 MTU WARP with Zero Drops) ---
-PostUp = iptables -t mangle -C FORWARD -i wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || iptables -t mangle -I FORWARD 1 -i wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200
-PostUp = iptables -t mangle -C FORWARD -o wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || iptables -t mangle -I FORWARD 2 -o wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200
-PostUp = iptables -t mangle -C POSTROUTING -s 10.19.0.0/24 ! -o wg0 -j TTL --ttl-set 128 2>/dev/null || iptables -t mangle -I POSTROUTING 1 -s 10.19.0.0/24 ! -o wg0 -j TTL --ttl-set 128
+PostUp = iptables -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 
 PostDown = iptables -D INPUT -p udp --dport ${SERVER_PORT:-4500} -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D INPUT -i wg0 -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -i wg0 -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -o wg0 -j ACCEPT 2>/dev/null || true
 PostDown = iptables -t nat -D POSTROUTING -s 10.18.0.0/24 ! -o wg0 -j MASQUERADE 2>/dev/null || true
 PostDown = iptables -t nat -D POSTROUTING -s 10.19.0.0/24 ! -o wg0 -j MASQUERADE 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -i wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -o wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || true
-PostDown = iptables -t mangle -D POSTROUTING -s 10.19.0.0/24 ! -o wg0 -j TTL --ttl-set 128 2>/dev/null || true
 WG_SERVER_EOF
 
 	if [[ -n "$EXISTING_PEERS" ]]; then
@@ -530,7 +606,7 @@ function installWireGuard() {
 
 	if [[ "${OS}" == "ubuntu" || "${OS}" == "debian" ]]; then
 		local MISSING_PKGS=()
-		for pkg in wireguard wireguard-tools iptables qrencode curl jq iproute2 iptables-persistent net-tools ipset dnsmasq ethtool; do
+		for pkg in wireguard wireguard-tools iptables qrencode curl jq iproute2 iptables-persistent net-tools ipset dnsmasq ethtool dnsutils; do
 			if ! dpkg -s "$pkg" &>/dev/null; then
 				MISSING_PKGS+=("$pkg")
 			fi
@@ -540,11 +616,11 @@ function installWireGuard() {
 			apt-get install -y -q -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" "${MISSING_PKGS[@]}" || true
 		fi
 	elif [[ "${OS}" == "fedora" || "${OS}" == "centos" || "${OS}" == "almalinux" || "${OS}" == "rocky" ]]; then
-		yum install -y wireguard-tools iptables qrencode curl jq ipset dnsmasq ethtool || true
+		yum install -y wireguard-tools iptables qrencode curl jq ipset dnsmasq ethtool bind-utils || true
 	elif [[ "${OS}" == "arch" ]]; then
-		pacman -S --needed --noconfirm wireguard-tools qrencode iptables curl jq ipset dnsmasq ethtool || true
+		pacman -S --needed --noconfirm wireguard-tools qrencode iptables curl jq ipset dnsmasq ethtool bind || true
 	elif [[ "${OS}" == "alpine" ]]; then
-		apk update && apk add wireguard-tools iptables libqrencode-tools curl jq ipset dnsmasq ethtool || true
+		apk update && apk add wireguard-tools iptables libqrencode-tools curl jq ipset dnsmasq ethtool bind-tools || true
 	fi
 
 	modprobe wireguard >/dev/null 2>&1 || true
@@ -552,19 +628,14 @@ function installWireGuard() {
 	modprobe iptable_nat >/dev/null 2>&1 || true
 	modprobe iptable_mangle >/dev/null 2>&1 || true
 	modprobe xt_mark >/dev/null 2>&1 || true
-	modprobe ipt_TTL >/dev/null 2>&1 || true
+	modprobe xt_connmark >/dev/null 2>&1 || true
+	modprobe xt_set >/dev/null 2>&1 || true
 	modprobe tcp_bbr >/dev/null 2>&1 || true
-
-	local HAS_IPV6=0
-	if [[ -f /proc/net/if_inet6 ]] && [[ $(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || echo 1) -eq 0 ]]; then
-		if ip -6 route show default 2>/dev/null | grep -q "default"; then
-			HAS_IPV6=1
-		fi
-	fi
 
 	SYSCTL_CONF="/etc/sysctl.d/99-wireguard-stealth.conf"
 	cat << 'SYSCTL_EOF' > "$SYSCTL_CONF"
 net.ipv4.ip_forward = 1
+net.ipv6.conf.all.forwarding = 1
 net.ipv4.tcp_mtu_probing = 1
 net.ipv4.conf.all.rp_filter = 0
 net.ipv4.conf.default.rp_filter = 0
@@ -594,6 +665,7 @@ SYSCTL_EOF
 		echo "net.ipv4.tcp_congestion_control = bbr" >> "$SYSCTL_CONF"
 	fi
 	sysctl --system -q >/dev/null 2>&1 || sysctl -p "$SYSCTL_CONF" >/dev/null 2>&1 || true
+	disableRpFilterAll
 
 	mkdir -p /etc/wireguard
 	chmod 700 /etc/wireguard
@@ -603,28 +675,27 @@ SYSCTL_EOF
 	SERVER_PRIV_KEY=$(wg genkey)
 	SERVER_PUB_KEY=$(echo "${SERVER_PRIV_KEY}" | wg pubkey)
 
-	ADMIN_PASSKEY=$(tr -dc 'A-Za-z0-9!@#$%^&*' < /dev/urandom | head -c 24)
+	# Use strictly bash-safe alphanumeric characters for ADMIN_PASSKEY
+	ADMIN_PASSKEY=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 24)
 	echo "$ADMIN_PASSKEY" > /etc/wireguard/admin.key
 	chmod 600 /etc/wireguard/admin.key
 
 	cat << PARAMS_EOF > /etc/wireguard/params
-SERVER_PUB_IP=${SERVER_PUB_IP}
-SERVER_PUB_NIC=${SERVER_PUB_NIC}
-SERVER_WG_NIC=${SERVER_WG_NIC}
-SERVER_WG_IPV4=${SERVER_WG_IPV4}
-SERVER_WG_IPV6=${SERVER_WG_IPV6}
-SERVER_PORT=${SERVER_PORT}
-SERVER_PORT_CF=${SERVER_PORT}
-SERVER_PRIV_KEY=${SERVER_PRIV_KEY}
-SERVER_PUB_KEY=${SERVER_PUB_KEY}
-CLIENT_DNS_1=${CLIENT_DNS_1}
-CLIENT_DNS_2=${CLIENT_DNS_2}
-ALLOWED_IPS=${ALLOWED_IPS}
-WEB_PORT=${WEB_PORT:-51821}
-ADMIN_PASSKEY=${ADMIN_PASSKEY}
-HAS_IPV6=${HAS_IPV6}
-CF_AUTO_ENABLE=${CF_AUTO_ENABLE:-y}
-WARP_GLOBAL_MODE=${WARP_GLOBAL_MODE:-full}
+SERVER_PUB_IP='${SERVER_PUB_IP}'
+SERVER_PUB_NIC='${SERVER_PUB_NIC}'
+SERVER_WG_NIC='${SERVER_WG_NIC}'
+SERVER_WG_IPV4='${SERVER_WG_IPV4}'
+SERVER_WG_IPV6='${SERVER_WG_IPV6}'
+SERVER_PORT='${SERVER_PORT}'
+SERVER_PORT_CF='${SERVER_PORT}'
+SERVER_PRIV_KEY='${SERVER_PRIV_KEY}'
+SERVER_PUB_KEY='${SERVER_PUB_KEY}'
+CLIENT_DNS_1='${CLIENT_DNS_1}'
+CLIENT_DNS_2='${CLIENT_DNS_2}'
+ALLOWED_IPS='${ALLOWED_IPS}'
+WEB_PORT='${WEB_PORT:-51821}'
+ADMIN_PASSKEY='${ADMIN_PASSKEY}'
+CF_AUTO_ENABLE='${CF_AUTO_ENABLE:-y}'
 PARAMS_EOF
 	chmod 600 /etc/wireguard/params
 
@@ -637,32 +708,88 @@ PARAMS_EOF
 	touch /etc/wireguard/cloudflare_shield_enabled
 	touch /etc/wireguard/cloudflare_split_enabled
 	touch /etc/wireguard/warp_egress_enabled
-	echo "BYPASS" > /etc/wireguard/split_mode.txt
+	touch /etc/wireguard/warp_domains.txt
+	touch /etc/wireguard/.v45_migrated
+	echo "TUNNEL" > /etc/wireguard/split_mode.txt
+	echo "DIRECT" > /etc/wireguard/clean_egress.txt
 
-	cat << 'CF_INIT_DOMAINS' > /etc/wireguard/split_domains.txt
-challenges.cloudflare.com
-cloudflare.com
-turnstile.com
-amazon.com
-www.amazon.com
-linkedin.com
-www.linkedin.com
-licdn.com
-paypal.com
-www.paypal.com
-paypalobjects.com
-cardinalcommerce.com
-braintreegateway.com
-stripe.com
-CF_INIT_DOMAINS
+	ensureDefaultSplitDomainsFile
 
 	setupCloudflareWarpClient
 	applyDomainSplitRulesLive
+	installSplitPersistence
 	newClientInternal "${CLIENT_NAME}" "${CLIENT_PASSWORD}"
 }
 
+function ensureDefaultSplitDomainsFile() {
+	mkdir -p /etc/wireguard
+	touch /etc/wireguard/split_domains.txt
+	local REQUIRED_DOMAINS=(
+		"linkedin.com"
+		"www.linkedin.com"
+		"licdn.com"
+		"static.licdn.com"
+		"media.licdn.com"
+		"dms.licdn.com"
+		"voyager.linkedin.com"
+		"lnkd.in"
+		"paypal.com"
+		"www.paypal.com"
+		"paypalobjects.com"
+		"cardinalcommerce.com"
+		"braintreegateway.com"
+		"stripe.com"
+		"amazon.com"
+		"www.amazon.com"
+		"speedtest.net"
+		"www.speedtest.net"
+		"ooklaserver.net"
+		"speedtestcustom.com"
+		"fast.com"
+		"nflxvideo.net"
+		"challenges.cloudflare.com"
+	)
+	for d in "${REQUIRED_DOMAINS[@]}"; do
+		grep -q -i "^${d}\$" /etc/wireguard/split_domains.txt 2>/dev/null || echo "$d" >> /etc/wireguard/split_domains.txt
+	done
+}
+
+function addDomainsToList() {
+	local FILE="$1"
+	shift
+	local d
+	touch "$FILE"
+	for d in "$@"; do
+		d=$(normalizeDomain "$d")
+		[[ -z "$d" ]] && continue
+		grep -qixF "$d" "$FILE" 2>/dev/null || echo "$d" >> "$FILE"
+	done
+}
+
+function removeDomainFromList() {
+	local FILE="$1"
+	local COUNT
+	COUNT=$(grep -c -v -E '^(#|$)' "$FILE" 2>/dev/null)
+	if [[ "${COUNT:-0}" -eq 0 ]]; then
+		echo -e "${YELLOW}No domains in this list.${NC}\n"
+		return 1
+	fi
+	echo -e "\nSelect domain to remove:"
+	grep -v -E '^(#|$)' "$FILE" | nl -s ') '
+	read -rp "Select domain number to remove [1-${COUNT}]: " DEL_NUM
+	if [[ "$DEL_NUM" =~ ^[0-9]+$ ]] && (( DEL_NUM >= 1 && DEL_NUM <= COUNT )); then
+		local TARGET_DOM
+		TARGET_DOM=$(grep -v -E '^(#|$)' "$FILE" | sed -n "${DEL_NUM}p")
+		grep -vxF "$TARGET_DOM" "$FILE" > "${FILE}.tmp"
+		mv "${FILE}.tmp" "$FILE"
+		echo -e "${GREEN}[✔] Removed '${TARGET_DOM}'.${NC}"
+		return 0
+	fi
+	return 1
+}
+
 # ------------------------------------------------------------------------------
-# 7. Client Management (MTU 1280 for Zero-Fragmentation WARP + Keepalive 15)
+# 7. Client Management
 # ------------------------------------------------------------------------------
 function newClientInternal() {
 	local CLIENT_NAME="$1"
@@ -705,14 +832,14 @@ function newClientInternal() {
 PrivateKey = ${CLIENT_CF_PRIV_KEY}
 Address = ${CLIENT_WG_CF_IPV4}/32
 DNS = ${CLIENT_DNS_LINE}
-MTU = 1280
+MTU = 1420
 
 [Peer]
 PublicKey = ${SERVER_PUB_KEY}
 PresharedKey = ${CLIENT_PRE_SHARED_KEY}
 Endpoint = ${ENDPOINT_WG0}
 AllowedIPs = 0.0.0.0/0
-PersistentKeepalive = 15
+PersistentKeepalive = 25
 CF_CLIENT_EOF
 )
 
@@ -722,14 +849,14 @@ CF_CLIENT_EOF
 PrivateKey = ${CLIENT_PRIV_KEY}
 Address = ${CLIENT_WG_IPV4}/32
 DNS = ${CLIENT_DNS_LINE}
-MTU = 1280
+MTU = 1420
 
 [Peer]
 PublicKey = ${SERVER_PUB_KEY}
 PresharedKey = ${CLIENT_PRE_SHARED_KEY}
 Endpoint = ${ENDPOINT_WG0}
 AllowedIPs = 0.0.0.0/0
-PersistentKeepalive = 15
+PersistentKeepalive = 25
 CLIENT_EOF
 )
 
@@ -756,16 +883,32 @@ PresharedKey = ${CLIENT_PRE_SHARED_KEY}
 AllowedIPs = ${CLIENT_WG_IPV4}/32
 PEER_EOF
 
-	wg syncconf wg0 <(wg-quick strip wg0) 2>/dev/null || true
+	wg syncconf wg0 <(wg-quick strip wg0) 2>/dev/null || systemctl restart "wg-quick@wg0" 2>/dev/null || true
 
-	echo -e "\n${CYAN}${BOLD}📋 [1/2] PROFILE 1: WARP & STEALTH (${CLIENT_NAME}-cloudflare-shield.conf):${NC}"
+	echo -e "\n# =============================================================================="
+	echo -e "${CYAN}${BOLD}📋 [1/2] PROFILE 1: WARP DEFAULT (${CLIENT_NAME}-cloudflare-shield.conf):${NC}"
+	echo -e "# =============================================================================="
 	echo "$CF_CONF_CONTENT"
-	echo -e "\n${GREEN}${BOLD}📋 [2/2] PROFILE 2: STANDARD (${CLIENT_NAME}-standard.conf):${NC}"
+
+	echo -e "\n# =============================================================================="
+	echo -e "${GREEN}${BOLD}📋 [2/2] PROFILE 2: STANDARD FULL-SPEED (${CLIENT_NAME}-standard.conf):${NC}"
+	echo -e "# =============================================================================="
 	echo "$STD_CONF_CONTENT"
+	echo -e "# ==============================================================================\n"
 
 	if command -v qrencode &>/dev/null; then
-		echo "$CF_CONF_CONTENT" | qrencode -t ansiutf8
-		echo "$STD_CONF_CONTENT" | qrencode -t ansiutf8
+		local WANT_QR=""
+		read -rp "Would you like to generate the QR codes now? [y/N]: " WANT_QR
+		if [[ "$WANT_QR" =~ ^[Yy] ]]; then
+			echo -e "\n# =============================================================================="
+			echo -e "${CYAN}${BOLD}📱 QR CODE - PROFILE 1 (${CLIENT_NAME}-cloudflare-shield.conf):${NC}"
+			echo "$CF_CONF_CONTENT" | qrencode -t ansiutf8
+			echo -e "\n# =============================================================================="
+			echo -e "${GREEN}${BOLD}📱 QR CODE - PROFILE 2 (${CLIENT_NAME}-standard.conf):${NC}"
+			echo "$STD_CONF_CONTENT" | qrencode -t ansiutf8
+		else
+			echo -e "${YELLOW}[i] QR code generation skipped. You can view it later via [3] Configure Clients.${NC}"
+		fi
 	fi
 }
 
@@ -827,10 +970,24 @@ function showClientQr() {
 	local CF_TEXT STD_TEXT
 	CF_TEXT=$(decryptConfigToString "${EASY_DIR}/${TARGET_CLIENT}-cloudflare-shield.conf.enc" "$ATTEMPT_PASS")
 	STD_TEXT=$(decryptConfigToString "${EASY_DIR}/${TARGET_CLIENT}-standard.conf.enc" "$ATTEMPT_PASS")
+	echo -e "\n# =============================================================================="
+	echo -e "${CYAN}${BOLD}📋 [1/2] PROFILE 1: WARP DEFAULT (${TARGET_CLIENT}-cloudflare-shield.conf):${NC}"
+	echo -e "# =============================================================================="
 	echo "$CF_TEXT"
-	command -v qrencode &>/dev/null && echo "$CF_TEXT" | qrencode -t ansiutf8
+	echo -e "\n# =============================================================================="
+	echo -e "${GREEN}${BOLD}📋 [2/2] PROFILE 2: STANDARD FULL-SPEED (${TARGET_CLIENT}-standard.conf):${NC}"
+	echo -e "# =============================================================================="
 	echo "$STD_TEXT"
-	command -v qrencode &>/dev/null && echo "$STD_TEXT" | qrencode -t ansiutf8
+	echo -e "# ==============================================================================\n"
+	if command -v qrencode &>/dev/null; then
+		local WANT_QR=""
+		read -rp "Would you like to generate the QR codes now? [y/N]: " WANT_QR
+		if [[ "$WANT_QR" =~ ^[Yy] ]]; then
+			echo "$CF_TEXT" | qrencode -t ansiutf8
+			echo -e "\n# ==============================================================================\n"
+			echo "$STD_TEXT" | qrencode -t ansiutf8
+		fi
+	fi
 }
 
 function exportDecryptedClientConfig() {
@@ -863,7 +1020,7 @@ function backupRestoreManager() {
 }
 
 # ------------------------------------------------------------------------------
-# 8. Policy Routing Protection: Lock Host Public IP, Return Subnets & wgwarp IP
+# 8. Policy Routing
 # ------------------------------------------------------------------------------
 function ensureHostPublicIpBypassRules() {
 	local DEF_NIC="${SERVER_PUB_NIC:-}"
@@ -876,14 +1033,12 @@ function ensureHostPublicIpBypassRules() {
 		PUB_IP=$(ip -4 addr show dev "$DEF_NIC" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1 || true)
 	fi
 
-	# Clean up any broken table 200 rules or warp-svc nftables killswitches from earlier runs
 	while ip rule del lookup 200 2>/dev/null; do :; done
 	ip route flush table 200 2>/dev/null || true
 	if command -v nft &>/dev/null; then
 		nft delete table inet cloudflare-warp 2>/dev/null || true
 	fi
 
-	# Priority 25-30: Outer WARP UDP transport (FwMark 0x51888) & Cloudflare WARP Endpoint IPs stay on physical NIC (table main)
 	while ip rule del fwmark 0x51888 lookup main priority 25 2>/dev/null; do :; done
 	ip rule add fwmark 0x51888 lookup main priority 25 2>/dev/null || true
 
@@ -892,59 +1047,126 @@ function ensureHostPublicIpBypassRules() {
 		ip rule add to "$warp_ep" lookup main priority 30 2>/dev/null || true
 	done
 
-	# Priority 40-41: Return packets to VPN clients ALWAYS route to wg0 (table main)
 	while ip rule del to 10.18.0.0/24 lookup main priority 40 2>/dev/null; do :; done
 	while ip rule del to 10.19.0.0/24 lookup main priority 41 2>/dev/null; do :; done
 	ip rule add to 10.18.0.0/24 lookup main priority 40 2>/dev/null || true
 	ip rule add to 10.19.0.0/24 lookup main priority 41 2>/dev/null || true
 
-	# Priority 50: VPS Public IP (SSH, WireGuard listen port, Web Console) uses native table main
 	if [[ -n "$PUB_IP" && "$PUB_IP" != "127.0.0.1" ]]; then
 		while ip rule del from "${PUB_IP}/32" lookup main priority 50 2>/dev/null; do :; done
-		while ip rule del from "${PUB_IP}/32" lookup main priority 51 2>/dev/null; do :; done
 		ip rule add from "${PUB_IP}/32" lookup main priority 50 2>/dev/null || true
 	fi
 
-	# Priority 60: Direct-Clean Bypass (PayPal / Banking marked 0x100)
-	while ip rule del fwmark 0x100 lookup main priority 60 2>/dev/null; do :; done
-	ip rule add fwmark 0x100 lookup main priority 60 2>/dev/null || true
+	while ip rule del fwmark 0x100 priority 60 2>/dev/null; do :; done
+	ip rule add fwmark 0x100 lookup "$(getCleanEgressTable)" priority 60 2>/dev/null || true
 
-	# Priority 100-101: Route wgwarp's own interface IP (172.16.0.x) & oif wgwarp via table 51820 so curl --interface wgwarp works!
+	while ip rule del fwmark 0x51820 table 51820 priority 85 2>/dev/null; do :; done
+	while ip rule del fwmark 0x51820 table 51820 priority 1000 2>/dev/null; do :; done
+	while ip rule del table 51820 priority 100 2>/dev/null; do :; done
+	while ip rule del table 51820 priority 101 2>/dev/null; do :; done
+
 	local WARP_LOCAL_IP=""
 	if ip link show wgwarp &>/dev/null; then
 		WARP_LOCAL_IP=$(ip -4 addr show dev wgwarp 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1 || true)
 		ip route replace default dev wgwarp table 51820 2>/dev/null || true
+		if [[ -n "$WARP_LOCAL_IP" ]]; then
+			ip rule add from "${WARP_LOCAL_IP}/32" table 51820 priority 100 2>/dev/null || true
+		fi
+		ip rule add oif wgwarp table 51820 priority 101 2>/dev/null || true
 	fi
-	if [[ -z "$WARP_LOCAL_IP" && -f /etc/wireguard/wgwarp.conf ]]; then
-		WARP_LOCAL_IP=$(grep -E '^\s*Address\s*=' /etc/wireguard/wgwarp.conf 2>/dev/null | head -n1 | cut -d'=' -f2 | cut -d'/' -f1 | tr -d ' \r\n' || true)
+
+	while ip rule del table 52000 priority 102 2>/dev/null; do :; done
+	if ip link show wgres &>/dev/null; then
+		ip route replace default dev wgres table 52000 2>/dev/null || true
+		ip rule add oif wgres table 52000 priority 102 2>/dev/null || true
 	fi
-	while ip rule del table 51820 priority 100 2>/dev/null; do :; done
-	while ip rule del table 51820 priority 101 2>/dev/null; do :; done
-	if [[ -n "$WARP_LOCAL_IP" ]]; then
-		ip rule add from "${WARP_LOCAL_IP}/32" table 51820 priority 100 2>/dev/null || true
-	fi
-	ip rule add oif wgwarp table 51820 priority 101 2>/dev/null || true
 }
 
 # ------------------------------------------------------------------------------
-# 9. High-Speed Split Tunneling, QUIC Blackhole Fix & Fail-Safe WARP Routing
+# 9. Dnsmasq + IPSet Split Tunneling & Connmark Fastpath
 # ------------------------------------------------------------------------------
+function expandSplitDomain() {
+	local base_domain="$1"
+	echo "$base_domain"
+	if [[ "$base_domain" == *"linkedin"* || "$base_domain" == *"licdn"* || "$base_domain" == *"lnkd.in"* ]]; then
+		printf '%s\n' linkedin.com www.linkedin.com licdn.com static.licdn.com media.licdn.com dms.licdn.com voyager.linkedin.com platform.linkedin.com lnkd.in snap.licdn.com px.ads.linkedin.com challenges.cloudflare.com
+	elif [[ "$base_domain" == *"paypal"* ]]; then
+		printf '%s\n' www.paypal.com c.paypal.com b.stats.paypal.com t.paypal.com s.paypal.com m.paypal.com api.paypal.com api-m.paypal.com checkout.paypal.com identity.paypal.com paypalobjects.com www.paypalobjects.com objects.paypal.com c.paypalobjects.com paypal.me cardinalcommerce.com songbird.cardinalcommerce.com centinelapi.cardinalcommerce.com braintreegateway.com braintree-api.com
+	elif [[ "$base_domain" == *"speedtest"* || "$base_domain" == *"ookla"* ]]; then
+		printf '%s\n' speedtest.net www.speedtest.net ooklaserver.net speedtestcustom.com c.speedtest.net
+	elif [[ "$base_domain" == *"netflix"* || "$base_domain" == *"fast.com"* ]]; then
+		printf '%s\n' netflix.com www.netflix.com nflxvideo.net nflxso.net nflxext.com nflximg.net fast.com
+	elif [[ "$base_domain" == *"amazon"* || "$base_domain" == *"aws"* ]]; then
+		printf '%s\n' amazon.com www.amazon.com completion.amazon.com images-amazon.com media-amazon.com ssl-images-amazon.com fls-na.amazon.com
+	elif [[ "$base_domain" == *"cloudflare"* || "$base_domain" == *"turnstile"* ]]; then
+		printf '%s\n' challenges.cloudflare.com cdnjs.cloudflare.com cloudflareinsights.com
+	fi
+}
+
 function applyDomainSplitRulesLive() {
-	echo -e "\n${CYAN}[*] Applying Bidirectional MSS=1200, Instant QUIC Fallback & WARP Policy Routing...${NC}"
+	echo -e "\n${CYAN}[*] Applying split tunneling & verifying forwarding path...${NC}"
 
-	mkdir -p /etc/wireguard
-	touch /etc/wireguard/split_domains.txt
+	local WG="${SERVER_WG_NIC:-wg0}"
+	local PUB_NIC="${SERVER_PUB_NIC:-}"
+	if [[ -z "$PUB_NIC" ]]; then
+		PUB_NIC=$(ip -4 route show table main default 2>/dev/null | awk '/dev/ {for (i=1; i<=NF; i++) if ($i == "dev") print $(i+1)}' | grep -vE '^(wg|Cloudflare|tun)' | head -n1 || echo "eth0")
+	fi
 
-	# Clean legacy port 53 redirects and conflicting MSS rules
-	while iptables -t nat -D PREROUTING -i "${SERVER_WG_NIC:-wg0}" -p udp --dport 53 -j REDIRECT --to-ports 53 2>/dev/null; do :; done
-	while iptables -t nat -D PREROUTING -i "${SERVER_WG_NIC:-wg0}" -p tcp --dport 53 -j REDIRECT --to-ports 53 2>/dev/null; do :; done
-	while iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
-	while iptables -t mangle -D FORWARD -i "${SERVER_WG_NIC:-wg0}" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
-	while iptables -t mangle -D FORWARD -o "${SERVER_WG_NIC:-wg0}" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
-	while iptables -t mangle -D FORWARD -i "${SERVER_WG_NIC:-wg0}" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1280 2>/dev/null; do :; done
-	while iptables -t mangle -D FORWARD -o "${SERVER_WG_NIC:-wg0}" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1280 2>/dev/null; do :; done
-	while iptables -t mangle -D FORWARD -o wgwarp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1280 2>/dev/null; do :; done
-	while iptables -t mangle -D FORWARD -i wgwarp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1280 2>/dev/null; do :; done
+	ensureDefaultSplitDomainsFile
+	touch /etc/wireguard/warp_domains.txt
+	local MODE
+	MODE=$(getSplitMode)
+	echo "$MODE" > /etc/wireguard/split_mode.txt
+
+	disableRpFilterAll
+
+	rm -f /etc/dnsmasq.d/00-stealth-privacy.conf /etc/dnsmasq.d/00-stealth-split.conf /etc/dnsmasq.d/00-stealth-dns.conf /etc/dnsmasq.d/00-wireguard-split-dns.conf 2>/dev/null || true
+
+	mkdir -p /etc/dnsmasq.d
+	# Run dnsmasq on port 5353 so it NEVER conflicts with systemd-resolved on port 53
+	cat << DNSMASQ_CLEAN_EOF > /etc/dnsmasq.d/00-wireguard-split-dns.conf
+port=5353
+listen-address=127.0.0.1,${SERVER_WG_IPV4:-10.18.0.1},10.19.0.1
+bind-interfaces
+no-resolv
+all-servers
+cache-size=10000
+dns-forward-max=2048
+bogus-priv
+server=1.1.1.1
+server=1.0.0.1
+server=8.8.8.8
+DNSMASQ_CLEAN_EOF
+
+	echo "# Cookie WireGuard Dynamic Split Tunneling IPSet Map" > /etc/dnsmasq.d/wg_split.conf
+
+	local DIRECT_HOSTS_FILE WARP_HOSTS_FILE
+	DIRECT_HOSTS_FILE=$(mktemp /tmp/wg_direct_hosts.XXXXXX)
+	WARP_HOSTS_FILE=$(mktemp /tmp/wg_warp_hosts.XXXXXX)
+
+	local DOMAIN_COUNT=0 WARP_DOMAIN_COUNT=0 raw_domain base_domain domain
+	while IFS= read -r raw_domain || [[ -n "$raw_domain" ]]; do
+		[[ -z "$raw_domain" || "$raw_domain" =~ ^# ]] && continue
+		base_domain=$(normalizeDomain "$raw_domain")
+		[[ -z "$base_domain" ]] && continue
+		while IFS= read -r domain; do
+			((DOMAIN_COUNT++))
+			echo "ipset=/${domain}/wg_direct_clean" >> /etc/dnsmasq.d/wg_split.conf
+			echo "$domain" >> "$DIRECT_HOSTS_FILE"
+		done < <(expandSplitDomain "$base_domain")
+	done < /etc/wireguard/split_domains.txt
+
+	while IFS= read -r raw_domain || [[ -n "$raw_domain" ]]; do
+		[[ -z "$raw_domain" || "$raw_domain" =~ ^# ]] && continue
+		base_domain=$(normalizeDomain "$raw_domain")
+		[[ -z "$base_domain" ]] && continue
+		grep -qxF "$base_domain" "$DIRECT_HOSTS_FILE" && continue
+		((WARP_DOMAIN_COUNT++))
+		echo "ipset=/${base_domain}/wg_split_v4" >> /etc/dnsmasq.d/wg_split.conf
+		echo "$base_domain" >> "$WARP_HOSTS_FILE"
+	done < /etc/wireguard/warp_domains.txt
+
+	sort -u /etc/dnsmasq.d/wg_split.conf -o /etc/dnsmasq.d/wg_split.conf 2>/dev/null || true
 
 	if command -v ipset &>/dev/null; then
 		local IPSET_BATCH
@@ -952,63 +1174,106 @@ function applyDomainSplitRulesLive() {
 		cat << 'IPSET_HEADER' > "$IPSET_BATCH"
 create wg_split_v4 hash:net family inet hashsize 4096 maxelem 131072 -exist
 create wg_split_v6 hash:net family inet6 hashsize 4096 maxelem 131072 -exist
-create wg_direct_clean hash:net family inet hashsize 2048 maxelem 65536 -exist
+create wg_direct_clean hash:net family inet hashsize 4096 maxelem 131072 -exist
+create wg_doh_block hash:net family inet hashsize 1024 maxelem 4096 -exist
 flush wg_split_v4
 flush wg_split_v6
 flush wg_direct_clean
+flush wg_doh_block
 IPSET_HEADER
+
+		if [[ -s "$DIRECT_HOSTS_FILE" ]]; then
+			sort -u "$DIRECT_HOSTS_FILE" | xargs -P 16 -I {} sh -c 'getent ahostsv4 "{}" 2>/dev/null | awk "{print \$1}"' | sort -u | while read -r dip; do
+				[[ "$dip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && echo "add wg_direct_clean $dip -exist" >> "$IPSET_BATCH"
+			done
+		fi
+
+		if [[ -s "$WARP_HOSTS_FILE" ]]; then
+			sort -u "$WARP_HOSTS_FILE" | xargs -P 16 -I {} sh -c 'getent ahostsv4 "{}" 2>/dev/null | awk "{print \$1}"' | sort -u | while read -r wip; do
+				[[ "$wip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && echo "add wg_split_v4 $wip -exist" >> "$IPSET_BATCH"
+			done
+		fi
 
 		for p in 64.4.240.0/21 66.211.168.0/21 173.0.80.0/20 173.224.160.0/19 185.177.52.0/22 192.148.20.0/23 198.54.120.0/22 216.113.160.0/19; do
 			echo "add wg_direct_clean $p -exist" >> "$IPSET_BATCH"
 		done
 
-		for c in 108.174.0.0/20 144.2.0.0/19 185.63.144.0/22 199.101.160.0/22 216.52.16.0/20 65.156.227.0/24 8.247.168.0/24; do
-			echo "add wg_split_v4 $c -exist" >> "$IPSET_BATCH"
-		done
-
-		for c in 173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 197.234.240.0/22 198.41.128.0/17 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22; do
-			echo "add wg_split_v4 $c -exist" >> "$IPSET_BATCH"
+		for li_cidr in 13.107.42.0/24 13.107.6.0/24 13.107.18.0/24 13.107.21.0/24 108.174.0.0/16 144.2.0.0/16 185.63.144.0/22 199.101.160.0/22 216.52.0.0/16 45.42.64.0/22 103.20.92.0/22 128.242.0.0/16 91.225.248.0/22 65.156.227.0/24 8.247.168.0/24; do
+			echo "add wg_direct_clean ${li_cidr} -exist" >> "$IPSET_BATCH"
 		done
 
 		ipset restore -! < "$IPSET_BATCH" 2>/dev/null || true
 		rm -f "$IPSET_BATCH"
 	fi
+	rm -f "$DIRECT_HOSTS_FILE" "$WARP_HOSTS_FILE"
+
+	# Clean any previous port 53 NAT redirects first
+	while iptables -t nat -D PREROUTING -i "$WG" -p udp --dport 53 -j REDIRECT --to-ports 53 2>/dev/null; do :; done
+	while iptables -t nat -D PREROUTING -i "$WG" -p tcp --dport 53 -j REDIRECT --to-ports 53 2>/dev/null; do :; done
+	while iptables -t nat -D PREROUTING -i "$WG" -p udp --dport 53 -j REDIRECT --to-ports 5353 2>/dev/null; do :; done
+	while iptables -t nat -D PREROUTING -i "$WG" -p tcp --dport 53 -j REDIRECT --to-ports 5353 2>/dev/null; do :; done
+	while iptables -t nat -D PREROUTING -i "$WG" -p udp --dport 53 -j DNAT --to-destination "${SERVER_WG_IPV4:-10.18.0.1}:53" 2>/dev/null; do :; done
+	while iptables -t nat -D PREROUTING -i "$WG" -p tcp --dport 53 -j DNAT --to-destination "${SERVER_WG_IPV4:-10.18.0.1}:53" 2>/dev/null; do :; done
 
 	ensureHostPublicIpBypassRules
 
-	# Core FORWARD, ICMP, DNS & NAT Rules
-	ipt_ensure_top filter INPUT 1 -p udp --dport "${SERVER_PORT:-4500}" -j ACCEPT
-	ipt_ensure_top filter INPUT 2 -i "${SERVER_WG_NIC:-wg0}" -p udp --dport 53 -j ACCEPT
-	ipt_ensure_top filter INPUT 3 -i "${SERVER_WG_NIC:-wg0}" -p tcp --dport 53 -j ACCEPT
+	# Core Firewall & NAT Rules: guarantee forwarding and masquerading work
+	iptables -P FORWARD ACCEPT 2>/dev/null || true
+	ipt_ensure_top filter INPUT 1 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+	ipt_ensure_top filter INPUT 2 -p udp --dport "${SERVER_PORT:-4500}" -j ACCEPT
+	ipt_ensure_top filter INPUT 3 -i "$WG" -j ACCEPT
 
-	# Instant QUIC (>1280B UDP/443) Fallback: prevents 15-second HTTP/3 browser stalls when client MTU is 1420
-	ipt_ensure_top filter FORWARD 1 -i "${SERVER_WG_NIC:-wg0}" -p udp --dport 443 -m length --length 1281:65535 -j REJECT --reject-with icmp-port-unreachable
-	ipt_ensure_top filter FORWARD 2 -p icmp -j ACCEPT
-	ipt_ensure_top filter FORWARD 3 -i "${SERVER_WG_NIC:-wg0}" -j ACCEPT
-	ipt_ensure_top filter FORWARD 4 -o "${SERVER_WG_NIC:-wg0}" -j ACCEPT
+	ipt_ensure_top filter FORWARD 1 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+	ipt_ensure_top filter FORWARD 2 -i "$WG" -j ACCEPT
+	ipt_ensure_top filter FORWARD 3 -o "$WG" -j ACCEPT
 
-	ipt_ensure_top nat POSTROUTING 1 -s 10.18.0.0/24 ! -o "${SERVER_WG_NIC:-wg0}" -j MASQUERADE
-	ipt_ensure_top nat POSTROUTING 2 -s 10.19.0.0/24 ! -o "${SERVER_WG_NIC:-wg0}" -j MASQUERADE
+	# Remove any WG_DOH blocking rules that could break client HTTPS/DNS
+	while iptables -D FORWARD -j WG_DOH 2>/dev/null; do :; done
+	iptables -F WG_DOH 2>/dev/null || true
 
-	# If a client uses Local Server DNS (10.18.0.1 or 10.19.0.1), forward directly to 1.1.1.1 if local dnsmasq isn't bound
-	if ! ss -uln 2>/dev/null | grep -q ":53 "; then
-		ipt_ensure_top nat PREROUTING 1 -i "${SERVER_WG_NIC:-wg0}" -d 10.18.0.1 -p udp --dport 53 -j DNAT --to-destination 1.1.1.1:53
-		ipt_ensure_top nat PREROUTING 2 -i "${SERVER_WG_NIC:-wg0}" -d 10.19.0.1 -p udp --dport 53 -j DNAT --to-destination 1.1.1.1:53
+	# Remove IPv6 reject rule if present so dual-stack apps don't stall
+	if command -v ip6tables &>/dev/null; then
+		while ip6tables -D FORWARD -i "$WG" -j REJECT --reject-with icmp6-adm-prohibited 2>/dev/null; do :; done
 	fi
 
-	# Force TCP MSS to 1200 in BOTH directions on wg0 (1200 MSS = 1240B IP packet <= 1280B WARP MTU)
-	ipt_ensure_top mangle FORWARD 1 -i "${SERVER_WG_NIC:-wg0}" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200
-	ipt_ensure_top mangle FORWARD 2 -o "${SERVER_WG_NIC:-wg0}" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200
+	ipt_ensure_top nat POSTROUTING 1 -s 10.18.0.0/24 ! -o "$WG" -j MASQUERADE
+	ipt_ensure_top nat POSTROUTING 2 -s 10.19.0.0/24 ! -o "$WG" -j MASQUERADE
+	ipt_ensure_append nat POSTROUTING -o "$PUB_NIC" -j MASQUERADE
 
+	iptables -t mangle -F FORWARD 2>/dev/null || true
+	iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+
+	# Start dnsmasq on 5353 and ONLY redirect client DNS if dnsmasq passes a live resolution test
+	if command -v dnsmasq &>/dev/null; then
+		if ! dnsmasq --test >/dev/null 2>&1; then
+			rm -f /etc/dnsmasq.d/wg_split.conf
+		fi
+		systemctl enable dnsmasq >/dev/null 2>&1 || true
+		systemctl restart dnsmasq >/dev/null 2>&1 || true
+		if systemctl is-active --quiet dnsmasq 2>/dev/null; then
+			if ! command -v dig &>/dev/null || dig +short +time=2 +tries=1 @127.0.0.1 -p 5353 cloudflare.com 2>/dev/null | grep -qE '^[0-9]+\.'; then
+				ipt_ensure_top nat PREROUTING 1 -i "$WG" -p udp --dport 53 -j REDIRECT --to-ports 5353
+				ipt_ensure_top nat PREROUTING 2 -i "$WG" -p tcp --dport 53 -j REDIRECT --to-ports 5353
+			fi
+		fi
+	fi
+
+	iptables -t mangle -F PREROUTING 2>/dev/null || true
 	if command -v ipset &>/dev/null; then
-		ipt_ensure_top mangle PREROUTING 1 -i "${SERVER_WG_NIC:-wg0}" -m set --match-set wg_direct_clean dst -j MARK --set-mark 0x100
-		ipt_ensure_top mangle PREROUTING 2 -i "${SERVER_WG_NIC:-wg0}" -m set --match-set wg_direct_clean dst -j RETURN
+		iptables -t mangle -A PREROUTING -i "$WG" -m connmark ! --mark 0 -j CONNMARK --restore-mark 2>/dev/null || true
+		iptables -t mangle -A PREROUTING -i "$WG" -m mark ! --mark 0 -j RETURN 2>/dev/null || true
+
+		iptables -t mangle -A PREROUTING -i "$WG" -m set --match-set wg_direct_clean dst -j MARK --set-mark 0x100 2>/dev/null || true
+		iptables -t mangle -A PREROUTING -i "$WG" -m mark --mark 0x100 -j CONNMARK --save-mark 2>/dev/null || true
+		iptables -t mangle -A PREROUTING -i "$WG" -m mark --mark 0x100 -j RETURN 2>/dev/null || true
+
+		iptables -t mangle -A PREROUTING -i "$WG" -m set --match-set wg_split_v4 dst -j MARK --set-mark 0x51820 2>/dev/null || true
+		iptables -t mangle -A PREROUTING -i "$WG" -m mark --mark 0x51820 -j CONNMARK --save-mark 2>/dev/null || true
 	fi
 
-	# Clear client WARP policy rules before live connectivity verification
 	while ip rule del from 10.19.0.0/24 table 51820 priority 900 2>/dev/null; do :; done
 	while ip rule del from 10.18.0.0/24 table 51820 priority 910 2>/dev/null; do :; done
-	while ip rule del fwmark 0x51820 table 51820 priority 1000 2>/dev/null; do :; done
+	while ip rule del fwmark 0x51820 table 51820 priority 85 2>/dev/null; do :; done
 
 	local WARP_NIC=""
 	if ip link show wgwarp &>/dev/null; then
@@ -1017,34 +1282,314 @@ IPSET_HEADER
 		WARP_NIC="CloudflareWARP"
 	fi
 
+	local STD_DEFAULT="DIRECT VPS IP (full speed)"
 	if [[ -n "$WARP_NIC" ]] && [[ -f /etc/wireguard/warp_egress_enabled ]]; then
 		ip route replace default dev "$WARP_NIC" table 51820 2>/dev/null || ip route add default dev "$WARP_NIC" table 51820 2>/dev/null || true
 		ipt_ensure_top nat POSTROUTING 1 -o "$WARP_NIC" -j MASQUERADE
-		ipt_ensure_top mangle FORWARD 1 -o "$WARP_NIC" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200
-		ipt_ensure_top mangle FORWARD 2 -i "$WARP_NIC" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200
 
-		# FAIL-SAFE GUARD: Verify WARP actually passes traffic before routing clients into table 51820!
 		if curl -4 --interface "$WARP_NIC" -sSf --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | grep -q "warp=on"; then
+			ip rule add fwmark 0x51820 table 51820 priority 85 2>/dev/null || true
 			ip rule add from 10.19.0.0/24 table 51820 priority 900 2>/dev/null || true
-			if [[ "${WARP_GLOBAL_MODE:-full}" == "full" ]]; then
+			if [[ "$MODE" == "BYPASS" ]]; then
 				ip rule add from 10.18.0.0/24 table 51820 priority 910 2>/dev/null || true
+				STD_DEFAULT="Cloudflare WARP (speed limited by WARP)"
 			fi
-			ip rule add fwmark 0x51820 table 51820 priority 1000 2>/dev/null || true
-
-			if command -v ipset &>/dev/null; then
-				ipt_ensure_top mangle PREROUTING 3 -i "${SERVER_WG_NIC:-wg0}" -m set --match-set wg_split_v4 dst -j MARK --set-mark 0x51820
-			fi
-			echo -e "${GREEN}[✔] Verified live WARP tunnel (warp=on)! Client traffic is now warping around ${SERVER_PUB_IP}.${NC}"
 		else
-			echo -e "${YELLOW}[!] Fail-Safe Guard: ${WARP_NIC} handshake pending; keeping clients on direct VPS routing so traffic never blackholes.${NC}"
+			echo -e "${YELLOW}[!] ${WARP_NIC} handshake not active; both profiles safely using Direct VPS IP.${NC}"
 		fi
 	fi
+
+	local CLEAN_DESC="Direct VPS IP"
+	[[ "$(getCleanEgressTable)" == "52000" ]] && CLEAN_DESC="Residential upstream (wgres)"
+	echo -e "${GREEN}[✔] Standard profile default egress: ${STD_DEFAULT}${NC}"
+	echo -e "${GREEN}[✔] Clean domains (${DOMAIN_COUNT} rules, never WARP): ${CLEAN_DESC}${NC}"
+	echo -e "${GREEN}[✔] Forced-WARP domains: ${WARP_DOMAIN_COUNT}${NC}"
 
 	optimizeNicQueuesAndRPS
 }
 
+function installSplitPersistence() {
+	local TARGET="/usr/local/sbin/easy-wireguard"
+	local SELF
+	SELF=$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || true)
+	if [[ -f "$SELF" && "$SELF" != "$TARGET" ]]; then
+		install -m 700 "$SELF" "$TARGET" 2>/dev/null || true
+	fi
+	[[ -x "$TARGET" ]] || return 0
+
+	cat << 'SPLIT_SVC' > /etc/systemd/system/wg-split-tunnel.service
+[Unit]
+Description=Easy WireGuard split tunneling rules
+Wants=network-online.target
+After=network-online.target wg-quick@wg0.service wg-quick@wgwarp.service wg-quick@wgres.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/easy-wireguard --apply
+
+[Install]
+WantedBy=multi-user.target
+SPLIT_SVC
+	systemctl daemon-reload >/dev/null 2>&1 || true
+	systemctl enable wg-split-tunnel.service >/dev/null 2>&1 || true
+}
+
 # ------------------------------------------------------------------------------
-# 10. Self-Healing Kernel Cloudflare WARP Provisioner (MTU 1280 + Multi-Endpoint)
+# 10. Domain-Based Split Tunneling Menu
+# ------------------------------------------------------------------------------
+function domainSplitTunneling() {
+	while true; do
+		ensureDefaultSplitDomainsFile
+		touch /etc/wireguard/warp_domains.txt
+
+		local MODE EGRESS CLEAN_COUNT WARP_COUNT
+		MODE=$(getSplitMode)
+		EGRESS=$(getCleanEgress)
+		CLEAN_COUNT=$(grep -c -v -E '^(#|$)' /etc/wireguard/split_domains.txt 2>/dev/null)
+		WARP_COUNT=$(grep -c -v -E '^(#|$)' /etc/wireguard/warp_domains.txt 2>/dev/null)
+		local DIRECT_MEM_CNT=0 WARP_MEM_CNT=0
+		if command -v ipset &>/dev/null; then
+			DIRECT_MEM_CNT=$(ipset list wg_direct_clean 2>/dev/null | awk '/Number of entries:/ {print $4}')
+			WARP_MEM_CNT=$(ipset list wg_split_v4 2>/dev/null | awk '/Number of entries:/ {print $4}')
+		fi
+
+		echo -e "\n${PURPLE}=================================================================${NC}"
+		echo -e "        ${CYAN}${BOLD}🌐 Domain Split Tunneling (Dnsmasq + IPSet)${NC}"
+		echo -e "${PURPLE}=================================================================${NC}"
+		if [[ "$MODE" == "TUNNEL" ]]; then
+			echo -e "  ${BOLD}Default Egress:${NC}   ${GREEN}DIRECT VPS IP (full speed)${NC}"
+		else
+			echo -e "  ${BOLD}Default Egress:${NC}   ${CYAN}Cloudflare WARP (speed limited)${NC}"
+		fi
+		echo -e "  ${BOLD}Clean Domains:${NC}    ${YELLOW}${CLEAN_COUNT:-0}${NC} -> ${GREEN}${EGRESS}${NC} (never WARP)"
+		echo -e "  ${BOLD}WARP Domains:${NC}     ${YELLOW}${WARP_COUNT:-0}${NC} -> Cloudflare WARP"
+		echo -e "  ${BOLD}Live IPSet Cache:${NC} ${GREEN}${DIRECT_MEM_CNT:-0} clean${NC} | ${CYAN}${WARP_MEM_CNT:-0} WARP${NC}"
+		echo "-----------------------------------------------------------------"
+		echo "1) Add Clean Domain (e.g. linkedin.com, paypal.com)"
+		echo "2) Remove Clean Domain"
+		echo "3) Add Clean Preset Category (LinkedIn, Speedtest/Streaming, Banking, AI, Gaming)"
+		echo "4) Add WARP Domain (forced through Cloudflare WARP)"
+		echo "5) Remove WARP Domain"
+		echo "6) Toggle Default Egress: DIRECT (full speed) <-> WARP"
+		echo "7) View Lists & Live IPSet Members"
+		echo "8) Reset Clean Domains to Recommended Defaults"
+		echo "9) Return to Main Menu"
+		echo ""
+
+		read -rp "Select option [1-9]: " SPLIT_OPT
+		case "$SPLIT_OPT" in
+			1)
+				read -rp "Enter clean domain (e.g. linkedin.com): " NEW_DOMAIN
+				addDomainsToList /etc/wireguard/split_domains.txt "$NEW_DOMAIN"
+				applyDomainSplitRulesLive
+				;;
+			2)
+				removeDomainFromList /etc/wireguard/split_domains.txt && applyDomainSplitRulesLive
+				;;
+			3)
+				echo -e "\nSelect Preset Category to Add:"
+				echo "1) LinkedIn & Professional CDN"
+				echo "2) Speedtest & Streaming"
+				echo "3) Banking & Checkout"
+				echo "4) AI Services"
+				echo "5) Gaming & Low-Latency"
+				read -rp "Select preset [1-5]: " PRESET_OPT
+				case "$PRESET_OPT" in
+					1) addDomainsToList /etc/wireguard/split_domains.txt linkedin.com www.linkedin.com licdn.com static.licdn.com media.licdn.com dms.licdn.com voyager.linkedin.com lnkd.in ;;
+					2) addDomainsToList /etc/wireguard/split_domains.txt speedtest.net www.speedtest.net ooklaserver.net speedtestcustom.com fast.com netflix.com nflxvideo.net nflxso.net nflxext.com ;;
+					3) addDomainsToList /etc/wireguard/split_domains.txt paypal.com www.paypal.com paypalobjects.com cardinalcommerce.com braintreegateway.com stripe.com chase.com bankofamerica.com wellsfargo.com ;;
+					4) addDomainsToList /etc/wireguard/split_domains.txt openai.com chatgpt.com oaistatic.com claude.ai anthropic.com gemini.google.com perplexity.ai ;;
+					5) addDomainsToList /etc/wireguard/split_domains.txt discord.com twitch.tv steampowered.com roblox.com epicgames.com ;;
+					*) continue ;;
+				esac
+				applyDomainSplitRulesLive
+				;;
+			4)
+				read -rp "Enter domain to force through WARP: " NEW_DOMAIN
+				addDomainsToList /etc/wireguard/warp_domains.txt "$NEW_DOMAIN"
+				applyDomainSplitRulesLive
+				;;
+			5)
+				removeDomainFromList /etc/wireguard/warp_domains.txt && applyDomainSplitRulesLive
+				;;
+			6)
+				if [[ "$MODE" == "TUNNEL" ]]; then
+					echo "BYPASS" > /etc/wireguard/split_mode.txt
+					echo -e "${YELLOW}[✔] Default egress is now WARP. Expect lower speeds; clean domains still bypass WARP.${NC}"
+				else
+					echo "TUNNEL" > /etc/wireguard/split_mode.txt
+					echo -e "${GREEN}[✔] Default egress is now the direct VPS IP (full speed).${NC}"
+				fi
+				applyDomainSplitRulesLive
+				;;
+			7)
+				echo -e "\n${CYAN}--- Clean Domains (/etc/wireguard/split_domains.txt) ---${NC}"
+				grep -v -E '^(#|$)' /etc/wireguard/split_domains.txt | nl -s ') '
+				echo -e "\n${CYAN}--- WARP Domains (/etc/wireguard/warp_domains.txt) ---${NC}"
+				grep -v -E '^(#|$)' /etc/wireguard/warp_domains.txt | nl -s ') '
+				echo -e "\n${CYAN}--- Sample Clean IPSet Members (wg_direct_clean -> fwmark 0x100) ---${NC}"
+				ipset list wg_direct_clean 2>/dev/null | head -n 25
+				echo -e "\n${CYAN}--- Sample WARP IPSet Members (wg_split_v4 -> fwmark 0x51820) ---${NC}"
+				ipset list wg_split_v4 2>/dev/null | head -n 20
+				read -n1 -r -p "Press Enter to return..."
+				;;
+			8)
+				> /etc/wireguard/split_domains.txt
+				ensureDefaultSplitDomainsFile
+				applyDomainSplitRulesLive
+				;;
+			9|*)
+				return
+				;;
+		esac
+	done
+}
+
+# ------------------------------------------------------------------------------
+# 11. Residential Upstream
+# ------------------------------------------------------------------------------
+function getConfValue() {
+	echo "$1" | grep -iE "^\s*$2\s*=" | head -n1 | cut -d'=' -f2- | xargs
+}
+
+function importResidentialUpstream() {
+	echo -e "\n${CYAN}Paste the upstream WireGuard config (from your residential VPN provider or home router).${NC}"
+	echo -e "${CYAN}Type END on its own line when finished:${NC}"
+	local RAW="" line
+	while IFS= read -r line; do
+		[[ "$(echo "$line" | tr -d ' \r')" == "END" ]] && break
+		RAW+="${line}"$'\n'
+	done
+
+	local R_PRIV R_ADDR R_PUB R_PSK R_EP
+	R_PRIV=$(getConfValue "$RAW" PrivateKey)
+	R_ADDR=$(getConfValue "$RAW" Address | grep -oE '[0-9]+(\.[0-9]+){3}' | head -n1)
+	R_PUB=$(getConfValue "$RAW" PublicKey)
+	R_PSK=$(getConfValue "$RAW" PresharedKey)
+	R_EP=$(getConfValue "$RAW" Endpoint)
+
+	if [[ -z "$R_PRIV" || -z "$R_ADDR" || -z "$R_PUB" || -z "$R_EP" ]]; then
+		echo -e "${RED}[!] Config is missing PrivateKey, IPv4 Address, PublicKey or Endpoint. Nothing changed.${NC}"
+		return 1
+	fi
+	if [[ "$R_ADDR" == 10.18.0.* || "$R_ADDR" == 10.19.0.* ]]; then
+		echo -e "${RED}[!] Upstream address ${R_ADDR} overlaps this server's client subnets. Nothing changed.${NC}"
+		return 1
+	fi
+
+	local PSK_LINE=""
+	[[ -n "$R_PSK" ]] && PSK_LINE="PresharedKey = ${R_PSK}"
+
+	cat << WGRES_EOF > /etc/wireguard/wgres.conf
+[Interface]
+PrivateKey = ${R_PRIV}
+Address = ${R_ADDR}/32
+MTU = 1280
+Table = 52000
+PostUp = sysctl -w net.ipv4.conf.wgres.rp_filter=0 >/dev/null 2>&1 || true
+
+[Peer]
+PublicKey = ${R_PUB}
+${PSK_LINE}
+AllowedIPs = 0.0.0.0/0
+Endpoint = ${R_EP}
+PersistentKeepalive = 25
+WGRES_EOF
+	chmod 600 /etc/wireguard/wgres.conf
+
+	wg-quick down wgres >/dev/null 2>&1 || true
+	systemctl enable "wg-quick@wgres" >/dev/null 2>&1 || true
+	systemctl restart "wg-quick@wgres" 2>/dev/null || wg-quick up wgres 2>/dev/null || true
+
+	if ! ip link show wgres &>/dev/null; then
+		echo -e "${RED}[!] The upstream interface failed to start. Check the pasted config.${NC}"
+		return 1
+	fi
+	ensureHostPublicIpBypassRules
+
+	local RES_IP
+	RES_IP=$(curl -4 --interface wgres -sS --max-time 8 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/ {print $2}')
+	if [[ -n "$RES_IP" ]]; then
+		echo -e "${GREEN}[✔] Upstream connected. Its public IP is ${RES_IP}.${NC}"
+		echo -e "${GREEN}    Choose option 2 to send clean domains (LinkedIn etc.) through it.${NC}"
+	else
+		echo -e "${YELLOW}[!] Upstream interface is up but no traffic passed yet (no handshake). Verify the provider config.${NC}"
+	fi
+}
+
+function testCleanEgress() {
+	local IFACE="${SERVER_PUB_NIC:-eth0}"
+	[[ "$(getCleanEgressTable)" == "52000" ]] && IFACE="wgres"
+	echo -e "\n${BOLD}Clean-domain egress interface: ${IFACE}${NC}"
+	curl -4 --interface "$IFACE" -sS --max-time 6 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -E '^(ip|loc|warp)=' | sed 's/^/   /' || echo "   Trace failed"
+
+	local CODE
+	CODE=$(curl -4 --interface "$IFACE" -s -o /dev/null -w "%{http_code}" --max-time 8 \
+		-A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36" \
+		-H "Accept-Language: en-US,en;q=0.9" https://www.linkedin.com/login 2>/dev/null)
+	case "$CODE" in
+		200|301|302|303)
+			echo -e "   ${GREEN}LinkedIn accepts this IP (HTTP ${CODE}).${NC}" ;;
+		403|429|999)
+			echo -e "   ${RED}LinkedIn is rejecting this IP (HTTP ${CODE}). It is scored as a datacenter/VPN address.${NC}"
+			echo -e "   ${RED}Fix: menu [7] -> import a residential upstream, then switch clean domains to it.${NC}" ;;
+		*)
+			echo -e "   ${YELLOW}LinkedIn check inconclusive (HTTP ${CODE:-none}).${NC}" ;;
+	esac
+}
+
+function residentialUpstreamMenu() {
+	while true; do
+		local EGRESS STATUS
+		EGRESS=$(getCleanEgress)
+		if ip link show wgres &>/dev/null; then
+			STATUS="${GREEN}CONNECTED${NC}"
+		else
+			STATUS="${YELLOW}NOT CONFIGURED${NC}"
+		fi
+		echo -e "\n${PURPLE}=================================================================${NC}"
+		echo -e "        ${CYAN}${BOLD}🏠 Residential Clean-IP Upstream${NC}"
+		echo -e "${PURPLE}=================================================================${NC}"
+		echo -e "  Clean domains currently exit via: ${GREEN}${EGRESS}${NC} | Upstream: ${STATUS}"
+		echo "1) Import residential/ISP WireGuard upstream"
+		echo "2) Send clean domains through residential upstream"
+		echo "3) Send clean domains through direct VPS IP"
+		echo "4) Test clean-egress IP & LinkedIn acceptance"
+		echo "5) Remove residential upstream"
+		echo "6) Back"
+		read -rp "Select [1-6]: " RES_OPT
+		case "$RES_OPT" in
+			1) importResidentialUpstream ;;
+			2)
+				if ! ip link show wgres &>/dev/null; then
+					echo -e "${RED}[!] Import an upstream first (option 1).${NC}"
+				else
+					echo "RESIDENTIAL" > /etc/wireguard/clean_egress.txt
+					applyDomainSplitRulesLive
+					testCleanEgress
+				fi
+				;;
+			3)
+				echo "DIRECT" > /etc/wireguard/clean_egress.txt
+				applyDomainSplitRulesLive
+				testCleanEgress
+				;;
+			4) testCleanEgress ;;
+			5)
+				systemctl disable --now "wg-quick@wgres" >/dev/null 2>&1 || true
+				wg-quick down wgres >/dev/null 2>&1 || true
+				rm -f /etc/wireguard/wgres.conf
+				echo "DIRECT" > /etc/wireguard/clean_egress.txt
+				applyDomainSplitRulesLive
+				;;
+			*) return ;;
+		esac
+	done
+}
+
+# ------------------------------------------------------------------------------
+# 12. Kernel Cloudflare WARP Provisioner
 # ------------------------------------------------------------------------------
 function installWarpWatchdog() {
 	cat << 'WATCHDOG_SH' > /usr/local/bin/wg-warp-watchdog.sh
@@ -1053,7 +1598,6 @@ if [[ ! -f /etc/wireguard/warp_egress_enabled ]] || ! ip link show wgwarp &>/dev
 	exit 0
 fi
 
-# Ensure wgwarp self-routing rules (priority 100/101) are present before testing curl
 WARP_IP=$(ip -4 addr show dev wgwarp 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1 || true)
 if [[ -n "$WARP_IP" ]] && ! ip rule show | grep -q "from ${WARP_IP} lookup 51820"; then
 	ip rule add from "${WARP_IP}/32" table 51820 priority 100 2>/dev/null || true
@@ -1064,19 +1608,17 @@ if ! curl -4 --interface wgwarp -sSf --max-time 4 https://1.1.1.1/cdn-cgi/trace 
 	PEER_KEY=$(wg show wgwarp peers 2>/dev/null | head -n1)
 	if [[ -n "$PEER_KEY" ]]; then
 		ENDPOINTS=(
+			"162.159.192.1:4500"
+			"162.159.193.1:4500"
+			"188.114.96.1:4500"
 			"162.159.192.1:2408"
 			"162.159.193.1:2408"
-			"188.114.96.1:2408"
 			"162.159.192.1:500"
-			"162.159.192.1:1701"
-			"162.159.192.1:4500"
 		)
 		for ep in "${ENDPOINTS[@]}"; do
-			wg set wgwarp fwmark 0x51888 peer "$PEER_KEY" endpoint "$ep" persistent-keepalive 15 2>/dev/null || true
+			wg set wgwarp fwmark 0x51888 peer "$PEER_KEY" endpoint "$ep" persistent-keepalive 25 2>/dev/null || true
 			sleep 1
 			if curl -4 --interface wgwarp -sSf --max-time 3 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | grep -q "warp=on"; then
-				ip rule show | grep -q "from 10.19.0.0/24 lookup 51820" || ip rule add from 10.19.0.0/24 table 51820 priority 900 2>/dev/null || true
-				ip rule show | grep -q "from 10.18.0.0/24 lookup 51820" || ip rule add from 10.18.0.0/24 table 51820 priority 910 2>/dev/null || true
 				exit 0
 			fi
 		done
@@ -1116,43 +1658,41 @@ function writeWgwarpConfigFile() {
 	local PRIV_KEY="$1"
 	local IPV4_ADDR="$2"
 	local PEER_PUB="$3"
-	local ENDPOINT_ADDR="${4:-162.159.192.1:2408}"
+	local ENDPOINT_ADDR="${4:-162.159.192.1:4500}"
+	local TARGET_MTU="${5:-1420}"
 
 	cat << WGWARP_EOF > /etc/wireguard/wgwarp.conf
 [Interface]
 PrivateKey = ${PRIV_KEY}
 Address = ${IPV4_ADDR}/32
-MTU = 1280
+MTU = ${TARGET_MTU}
 Table = 51820
 FwMark = 0x51888
 
-PostUp = ip link set dev wgwarp txqueuelen 10000 mtu 1280 2>/dev/null || true
+PostUp = ip link set dev wgwarp txqueuelen 10000 mtu ${TARGET_MTU} 2>/dev/null || true
+PostUp = tc qdisc del dev wgwarp root 2>/dev/null || true
 PostUp = sysctl -w net.ipv4.conf.wgwarp.rp_filter=0 >/dev/null 2>&1 || true
 PostUp = ip rule del from ${IPV4_ADDR}/32 table 51820 priority 100 2>/dev/null || true
 PostUp = ip rule add from ${IPV4_ADDR}/32 table 51820 priority 100 2>/dev/null || true
 PostUp = ip rule del oif wgwarp table 51820 priority 101 2>/dev/null || true
 PostUp = ip rule add oif wgwarp table 51820 priority 101 2>/dev/null || true
 PostUp = iptables -t nat -C POSTROUTING -o wgwarp -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING 1 -o wgwarp -j MASQUERADE
-PostUp = iptables -t mangle -C FORWARD -o wgwarp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || iptables -t mangle -I FORWARD 1 -o wgwarp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200
-PostUp = iptables -t mangle -C FORWARD -i wgwarp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || iptables -t mangle -I FORWARD 2 -i wgwarp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200
 
 PostDown = ip rule del from ${IPV4_ADDR}/32 table 51820 priority 100 2>/dev/null || true
 PostDown = ip rule del oif wgwarp table 51820 priority 101 2>/dev/null || true
 PostDown = iptables -t nat -D POSTROUTING -o wgwarp -j MASQUERADE 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -o wgwarp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -i wgwarp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || true
 
 [Peer]
 PublicKey = ${PEER_PUB}
 AllowedIPs = 0.0.0.0/0
 Endpoint = ${ENDPOINT_ADDR}
-PersistentKeepalive = 15
+PersistentKeepalive = 25
 WGWARP_EOF
 	chmod 600 /etc/wireguard/wgwarp.conf
 }
 
 function setupCloudflareWarpClient() {
-	echo -e "\n${CYAN}${BOLD}⚡ Configuring Kernel-Native Cloudflare WARP (MTU 1280 | MSS 1200 | FwMark 0x51888)...${NC}"
+	echo -e "\n${CYAN}${BOLD}⚡ Configuring Kernel Cloudflare WARP...${NC}"
 	mkdir -p /etc/wireguard
 	touch /etc/wireguard/warp_egress_enabled
 
@@ -1168,13 +1708,11 @@ function setupCloudflareWarpClient() {
 	local WARP_IPV4=""
 	local WARP_PEER_PUB="bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
 
-	# 1. Preserve existing registered WARP keypair if present (avoids Cloudflare API 429 rate-limit!)
 	if [[ -f /etc/wireguard/wgwarp.conf ]]; then
 		WARP_PRIV_KEY=$(grep -E '^\s*PrivateKey\s*=' /etc/wireguard/wgwarp.conf 2>/dev/null | head -n1 | cut -d'=' -f2- | tr -d ' \r\n' || true)
 		WARP_IPV4=$(grep -E '^\s*Address\s*=' /etc/wireguard/wgwarp.conf 2>/dev/null | head -n1 | cut -d'=' -f2 | cut -d'/' -f1 | tr -d ' \r\n' || true)
 	fi
 
-	# 2. Only call Cloudflare registration API if we don't already have a keypair
 	if [[ -z "$WARP_PRIV_KEY" || -z "$WARP_IPV4" ]]; then
 		echo -e "${CYAN}[*] Registering new Cloudflare WARP WireGuard keypair...${NC}"
 		WARP_PRIV_KEY=$(wg genkey)
@@ -1203,7 +1741,7 @@ function setupCloudflareWarpClient() {
 	fi
 
 	if [[ -n "$WARP_PRIV_KEY" && -n "$WARP_IPV4" ]]; then
-		writeWgwarpConfigFile "$WARP_PRIV_KEY" "$WARP_IPV4" "$WARP_PEER_PUB" "162.159.192.1:2408"
+		writeWgwarpConfigFile "$WARP_PRIV_KEY" "$WARP_IPV4" "$WARP_PEER_PUB" "162.159.192.1:4500" "1420"
 
 		wg-quick down wgwarp >/dev/null 2>&1 || true
 		ip link delete dev wgwarp >/dev/null 2>&1 || true
@@ -1212,36 +1750,45 @@ function setupCloudflareWarpClient() {
 		systemctl restart "wg-quick@wgwarp" 2>/dev/null || wg-quick up wgwarp 2>/dev/null || true
 
 		ensureHostPublicIpBypassRules
-		optimizeNicQueuesAndRPS
 
-		# Multi-endpoint verification loop (tests 2408, 500, 1701, 4500 until warp=on succeeds)
 		local CANDIDATE_EPS=(
+			"162.159.192.1:4500"
+			"162.159.193.1:4500"
+			"188.114.96.1:4500"
 			"162.159.192.1:2408"
 			"162.159.193.1:2408"
-			"188.114.96.1:2408"
 			"162.159.192.1:500"
-			"162.159.192.1:1701"
-			"162.159.192.1:4500"
 		)
-		local WARP_OK=0
+		local SELECTED_EP="162.159.192.1:4500"
 		for ep in "${CANDIDATE_EPS[@]}"; do
-			wg set wgwarp fwmark 0x51888 peer "$WARP_PEER_PUB" endpoint "$ep" persistent-keepalive 15 2>/dev/null || true
+			wg set wgwarp fwmark 0x51888 peer "$WARP_PEER_PUB" endpoint "$ep" persistent-keepalive 25 2>/dev/null || true
 			if curl -4 --interface wgwarp -sSf --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | grep -q "warp=on"; then
-				sed -i "s|^Endpoint\s*=.*|Endpoint = ${ep}|" /etc/wireguard/wgwarp.conf 2>/dev/null || true
-				echo -e "${GREEN}[✔] Kernel WARP Connected on Endpoint ${ep} (Address: ${WARP_IPV4} | MTU: 1280)!${NC}"
-				WARP_OK=1
+				SELECTED_EP="$ep"
 				break
 			fi
 		done
 
+		WARP_OPTIMAL_MTU=1420
+		for test_mtu in 1420 1400 1380 1360 1280; do
+			local ping_payload=$(( test_mtu - 28 ))
+			if ping -I wgwarp -c 1 -W 1 -M do -s "$ping_payload" 1.1.1.1 >/dev/null 2>&1; then
+				WARP_OPTIMAL_MTU="$test_mtu"
+				break
+			fi
+		done
+
+		ip link set dev wgwarp mtu "$WARP_OPTIMAL_MTU" 2>/dev/null || true
+		writeWgwarpConfigFile "$WARP_PRIV_KEY" "$WARP_IPV4" "$WARP_PEER_PUB" "$SELECTED_EP" "$WARP_OPTIMAL_MTU"
+		optimizeNicQueuesAndRPS
 		installWarpWatchdog
-		[[ $WARP_OK -eq 1 ]] && return 0
+
+		echo -e "${GREEN}[✔] Kernel WARP Active on ${SELECTED_EP} | MTU: ${WARP_OPTIMAL_MTU}${NC}"
+		return 0
 	fi
-	echo -e "${YELLOW}[!] Could not verify WARP handshake yet; watchdog will retry in background.${NC}"
 }
 
 function autoRepairNetwork() {
-	echo -e "\n${CYAN}${BOLD}🛠️ Upgrading & Repairing WireGuard + Cloudflare WARP (v4.2)...${NC}"
+	echo -e "\n${CYAN}${BOLD}🛠️ Running Network Auto-Repair...${NC}"
 
 	cat << 'RESOLV_CLEAN_EOF' > /etc/resolv.conf 2>/dev/null || true
 nameserver 1.1.1.1
@@ -1249,16 +1796,12 @@ nameserver 1.0.0.1
 nameserver 8.8.8.8
 RESOLV_CLEAN_EOF
 
-	sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
-	sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null 2>&1 || true
-	sysctl -w net.ipv4.conf.default.rp_filter=0 >/dev/null 2>&1 || true
-	sysctl -w net.core.rmem_default=33554432 >/dev/null 2>&1 || true
-	sysctl -w net.core.wmem_default=33554432 >/dev/null 2>&1 || true
+	modprobe xt_connmark >/dev/null 2>&1 || true
+	modprobe xt_set >/dev/null 2>&1 || true
+	disableRpFilterAll
 	sysctl --system -q >/dev/null 2>&1 || true
 
-	if [[ -f /etc/wireguard/params ]]; then
-		source /etc/wireguard/params
-	fi
+	sanitizeAndLoadParams
 	writeUnifiedWg0Config
 
 	ensureHostPublicIpBypassRules
@@ -1269,17 +1812,31 @@ RESOLV_CLEAN_EOF
 	touch /etc/wireguard/warp_egress_enabled
 	setupCloudflareWarpClient
 	applyDomainSplitRulesLive
+	installSplitPersistence
 
-	echo -e "${CYAN}--- Live Post-Repair Connectivity Verification ---${NC}"
-	echo -e "${BOLD}1. Physical VPS Interface (${SERVER_PUB_NIC:-eth0}):${NC}"
+	echo -e "\n${CYAN}--- Live Post-Repair Verification ---${NC}"
+	echo -e "${BOLD}1. Direct VPS Interface (${SERVER_PUB_NIC:-eth0}):${NC}"
 	curl -4 --interface "${SERVER_PUB_NIC:-eth0}" -sSf --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | grep -E '^(ip|warp|colo)=' | sed 's/^/   /' || echo "   Direct trace error"
+
 	echo -e "${BOLD}2. Kernel WARP Interface (wgwarp):${NC}"
 	curl -4 --interface wgwarp -sSf --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | grep -E '^(ip|warp|colo)=' | sed 's/^/   /' || echo "   WARP trace pending"
-	echo -e "\n${GREEN}[✔] v4.2 Auto-Repair Complete!${NC}\n"
-}
 
-function domainSplitTunneling() {
-	applyDomainSplitRulesLive
+	local D_CNT W_CNT DNS_STATE
+	D_CNT=$(ipset list wg_direct_clean 2>/dev/null | awk '/Number of entries:/ {print $4}')
+	W_CNT=$(ipset list wg_split_v4 2>/dev/null | awk '/Number of entries:/ {print $4}')
+	if systemctl is-active --quiet dnsmasq 2>/dev/null; then
+		DNS_STATE="${GREEN}ACTIVE (Port 5353 with Direct Passthrough Fallback)${NC}"
+	else
+		DNS_STATE="${YELLOW}BYPASSED (Direct Client DNS Active)${NC}"
+	fi
+	echo -e "${BOLD}3. Split Tunneling Engine:${NC}"
+	echo -e "   Dnsmasq Service: ${DNS_STATE}"
+	echo -e "   Clean IPs/CIDRs: ${GREEN}${D_CNT:-0}${NC} | WARP IPs/CIDRs: ${CYAN}${W_CNT:-0}${NC}"
+	echo -e "   Boot persistence: $(systemctl is-enabled wg-split-tunnel.service 2>/dev/null || echo 'not installed')"
+
+	echo -e "${BOLD}4. Clean-Egress & LinkedIn Acceptance:${NC}"
+	testCleanEgress
+	echo -e "\n${GREEN}[✔] Repair Complete! Reconnect your WireGuard client once to test.${NC}\n"
 }
 
 function realTimeLogging() {
@@ -1288,56 +1845,49 @@ function realTimeLogging() {
 	ip rule show
 }
 
-function geoIpAntiVpnShield() {
-	echo -e "${GREEN}Bidirectional MSS=1200, WARP MTU=1280, QUIC Fallback, and Hardware Offloads ACTIVE.${NC}"
-}
-
-function provisionWebConsole() {
-	echo -e "${YELLOW}Web Console helper ready.${NC}"
-}
-
-function settingsManager() {
-	echo -e "Public IP: ${SERVER_PUB_IP} | Port: ${SERVER_PORT} | Mode: ${WARP_GLOBAL_MODE:-full}"
-}
-
 function cloudflareAntiFlagEngine() {
-	echo "1) Refresh High-Speed Kernel WARP (wgwarp MTU 1280)"
-	echo "2) Toggle WARP Scope (Full WARP vs Split WARP)"
-	echo "3) Run Live Dual-Path Speed & IP Diagnostic"
-	echo "4) Disable WARP (Direct VPS Egress Only)"
+	local MODE
+	MODE=$(getSplitMode)
+	echo "1) Refresh Kernel WARP"
+	echo "2) Toggle Standard-profile default egress (currently: $([[ "$MODE" == "TUNNEL" ]] && echo 'DIRECT full speed' || echo 'WARP'))"
+	echo "3) Run Dual-Path & LinkedIn Diagnostic"
+	echo "4) Disable WARP (100% Direct VPS Egress)"
 	echo "5) Back"
 	read -rp "Select [1-5]: " CF_OPT
 	case "$CF_OPT" in
 		1) setupCloudflareWarpClient; applyDomainSplitRulesLive ;;
 		2)
-			if [[ "${WARP_GLOBAL_MODE:-full}" == "full" ]]; then
-				WARP_GLOBAL_MODE="split"
+			if [[ "$MODE" == "TUNNEL" ]]; then
+				echo "BYPASS" > /etc/wireguard/split_mode.txt
 			else
-				WARP_GLOBAL_MODE="full"
+				echo "TUNNEL" > /etc/wireguard/split_mode.txt
 			fi
-			sed -i "s/^WARP_GLOBAL_MODE=.*/WARP_GLOBAL_MODE=${WARP_GLOBAL_MODE}/" /etc/wireguard/params 2>/dev/null || echo "WARP_GLOBAL_MODE=${WARP_GLOBAL_MODE}" >> /etc/wireguard/params
 			applyDomainSplitRulesLive
 			;;
 		3)
-			echo -e "\n${BOLD}1. Physical VPS Interface (${SERVER_PUB_NIC:-eth0}):${NC}"
-			curl -4 --interface "${SERVER_PUB_NIC:-eth0}" -sSf --max-time 4 https://1.1.1.1/cdn-cgi/trace | grep -E '^(ip|warp|colo)='
+			echo -e "\n${BOLD}1. Direct VPS Interface (${SERVER_PUB_NIC:-eth0}):${NC}"
+			curl -4 --interface "${SERVER_PUB_NIC:-eth0}" -sSf --max-time 4 https://www.cloudflare.com/cdn-cgi/trace | grep -E '^(ip|warp|colo)='
 			echo -e "\n${BOLD}2. Kernel WARP Interface (wgwarp):${NC}"
-			curl -4 --interface wgwarp -sSf --max-time 4 https://1.1.1.1/cdn-cgi/trace | grep -E '^(ip|warp|colo)='
+			curl -4 --interface wgwarp -sSf --max-time 4 https://www.cloudflare.com/cdn-cgi/trace | grep -E '^(ip|warp|colo)='
+			testCleanEgress
 			;;
 		4)
 			rm -f /etc/wireguard/warp_egress_enabled
 			while ip rule del from 10.19.0.0/24 table 51820 priority 900 2>/dev/null; do :; done
 			while ip rule del from 10.18.0.0/24 table 51820 priority 910 2>/dev/null; do :; done
-			while ip rule del fwmark 0x51820 table 51820 priority 1000 2>/dev/null; do :; done
+			while ip rule del fwmark 0x51820 table 51820 priority 85 2>/dev/null; do :; done
 			echo -e "${GREEN}[✔] Reverted to Direct VPS Egress.${NC}"
 			;;
 	esac
 }
 
 function uninstallWg() {
+	systemctl disable --now wg-split-tunnel.service "wg-quick@wgres" 2>/dev/null || true
 	systemctl stop "wg-quick@${SERVER_WG_NIC:-wg0}" "wg-quick@wgwarp" wg-warp-watchdog.timer 2>/dev/null || true
 	wg-quick down "${SERVER_WG_NIC:-wg0}" 2>/dev/null || true
 	wg-quick down wgwarp 2>/dev/null || true
+	wg-quick down wgres 2>/dev/null || true
+	rm -f /etc/systemd/system/wg-split-tunnel.service /usr/local/sbin/easy-wireguard
 	rm -rf /etc/wireguard
 	exit 0
 }
@@ -1345,13 +1895,13 @@ function uninstallWg() {
 function manageMenu() {
 	while true; do
 		echo -e "\n${PURPLE}=================================================================${NC}"
-		echo -e "          ${GREEN}${BOLD}🍪  Cookie's Easy WireGuard Manager v4.2${NC}"
+		echo -e "          ${GREEN}${BOLD}🍪  Cookie's Easy WireGuard Manager v4.5${NC}"
 		echo -e "${PURPLE}=================================================================${NC}"
 		echo " [1] Setup WireGuard Server        [6] Real-Time Logging"
-		echo " [2] Add New Client                [9] Cloudflare WARP Engine"
-		echo " [3] Configure Clients             [10] Full-Speed Auto-Repair"
-		echo " [4] Backup Server                 [r] Uninstall"
-		echo " [5] Re-apply Split/Speed Rules    [q] Exit"
+		echo " [2] Add New Client                [7] Residential Clean-IP Upstream"
+		echo " [3] Configure Clients             [9] Cloudflare WARP Engine"
+		echo " [4] Backup Server                 [10] Full-Speed Auto-Repair"
+		echo " [5] Domain Split Tunneling Menu   [r] Uninstall   [q] Exit"
 		read -rp "Option: " MENU_OPTION
 		case "${MENU_OPTION}" in
 			1) installQuestions; installWireGuard ;;
@@ -1360,6 +1910,7 @@ function manageMenu() {
 			4) backupRestoreManager ;;
 			5) domainSplitTunneling ;;
 			6) realTimeLogging ;;
+			7) residentialUpstreamMenu ;;
 			9) cloudflareAntiFlagEngine ;;
 			10) autoRepairNetwork ;;
 			r|R) uninstallWg ;;
@@ -1370,11 +1921,19 @@ function manageMenu() {
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 	initialCheck
-	[[ -e /etc/wireguard/params ]] && source /etc/wireguard/params
-	if [[ "${1:-}" == "--repair" || "${1:-}" == "-r" || "${1:-}" == "repair" ]]; then
-		autoRepairNetwork
-		exit 0
-	fi
+	sanitizeAndLoadParams
+	migrateToV45
+	case "${1:-}" in
+		--apply)
+			applyDomainSplitRulesLive
+			exit 0
+			;;
+		--repair|-r|repair)
+			autoRepairNetwork
+			exit 0
+			;;
+	esac
+	[[ -f /etc/wireguard/params ]] && installSplitPersistence
 	cleanupAndSecureRootFolder
 	manageMenu
 fi
