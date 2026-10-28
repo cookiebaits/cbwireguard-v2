@@ -2,7 +2,7 @@
 # ==============================================================================
 # 🍪 Cookie's Easy WireGuard Manager & VPS Stealth Server v4.5
 # Direct full-speed default egress + Clean-domain routing (Direct VPS / Residential)
-# + Safe DNS Split Tunneling with automatic direct passthrough fallback
+# + Automated Stealth Port Sweeper & Safe Uninstall
 # ==============================================================================
 
 RED='\033[0;31m'
@@ -14,6 +14,8 @@ YELLOW='\033[1;33m'
 WHITE='\033[1;37m'
 BOLD='\033[1m'
 NC='\033[0m'
+
+RECOMMENDED_STEALTH_PORTS=(4500 3478 500 853 51820 41194)
 
 # ------------------------------------------------------------------------------
 # 0. Safe Params Loader (Repairs unquoted legacy /etc/wireguard/params files)
@@ -29,9 +31,7 @@ function sanitizeAndLoadParams() {
 		if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
 			local key="${BASH_REMATCH[1]}"
 			local val="${BASH_REMATCH[2]}"
-			# Strip surrounding single or double quotes if already present
 			val=$(echo "$val" | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
-			# Escape any single quotes inside value and wrap in single quotes
 			val="${val//\'/\'\\\'\'}"
 			echo "${key}='${val}'" >> "$TMP_P"
 		fi
@@ -355,7 +355,7 @@ function cleanupAndSecureRootFolder() {
 }
 
 # ------------------------------------------------------------------------------
-# 2. Sensitive Port Protection & Safe Cleanup Routines
+# 2. Sensitive Port Protection & Safe Port/Instance Cleanup Routines
 # ------------------------------------------------------------------------------
 function isSensitivePort() {
 	local port="$1"
@@ -368,32 +368,147 @@ function isSensitivePort() {
 	return 1
 }
 
-function cleanupOldWireguard() {
-	echo -e "\n${CYAN}[*] Scanning for old/conflicting WireGuard instances & services...${NC}"
+function clearRecommendedAndOldPorts() {
+	echo -e "${CYAN}[*] Clearing recommended WireGuard ports (4500, 3478, 500, 853, 51820, 41194) & old custom ports...${NC}"
+	local PORTS_TO_CLEAR=("${RECOMMENDED_STEALTH_PORTS[@]}")
 
-	systemctl stop "wg-quick@wg0" >/dev/null 2>&1 || true
-	systemctl disable "wg-quick@wg0" >/dev/null 2>&1 || true
-	systemctl stop "wg-quick@wg1" >/dev/null 2>&1 || true
-	systemctl disable "wg-quick@wg1" >/dev/null 2>&1 || true
+	# Also collect any previously configured custom ports from /etc/wireguard
+	if [[ -f /etc/wireguard/params ]]; then
+		local prev_port
+		prev_port=$(grep -E '^SERVER_PORT=' /etc/wireguard/params 2>/dev/null | cut -d'=' -f2- | tr -d "'\" \r\n" || true)
+		[[ "$prev_port" =~ ^[0-9]+$ ]] && PORTS_TO_CLEAR+=("$prev_port")
+	fi
+	for conf in /etc/wireguard/*.conf; do
+		[[ ! -f "$conf" ]] && continue
+		local cport
+		cport=$(grep -E '^\s*ListenPort\s*=' "$conf" 2>/dev/null | head -n1 | cut -d'=' -f2- | tr -d ' \r\n' || true)
+		[[ "$cport" =~ ^[0-9]+$ ]] && PORTS_TO_CLEAR+=("$cport")
+	done
+
+	local p
+	for p in "${PORTS_TO_CLEAR[@]}"; do
+		[[ -z "$p" || ! "$p" =~ ^[0-9]+$ ]] && continue
+		# Strictly never touch sensitive ports (22, 53, 80, 443, etc.)
+		if isSensitivePort "$p"; then
+			continue
+		fi
+
+		# Remove any old iptables rules on this UDP port
+		while iptables -D INPUT -p udp --dport "$p" -j ACCEPT 2>/dev/null; do :; done
+		if command -v ip6tables &>/dev/null; then
+			while ip6tables -D INPUT -p udp --dport "$p" -j ACCEPT 2>/dev/null; do :; done
+		fi
+
+		# Remove old UFW rules for this UDP port if UFW is installed
+		if command -v ufw &>/dev/null; then
+			ufw delete allow "${p}/udp" >/dev/null 2>&1 || true
+		fi
+
+		# Free the UDP socket if any non-critical daemon is holding it
+		if command -v fuser &>/dev/null; then
+			fuser -k "${p}/udp" >/dev/null 2>&1 || true
+		fi
+	done
+}
+
+function cleanupOldWireguard() {
+	echo -e "\n${CYAN}[*] Scanning for old/conflicting WireGuard instances, services & ports...${NC}"
+
+	# Stop and disable known services and timers
+	local WG_SERVICES=(
+		"wg-quick@wg0"
+		"wg-quick@wg1"
+		"wg-quick@wgwarp"
+		"wg-quick@wgres"
+		"wg-split-tunnel.service"
+		"wg-warp-watchdog.service"
+		"wg-warp-watchdog.timer"
+		"cbwireguard-web"
+	)
+	for svc in "${WG_SERVICES[@]}"; do
+		systemctl stop "$svc" >/dev/null 2>&1 || true
+		systemctl disable "$svc" >/dev/null 2>&1 || true
+	done
+
+	# Also stop any other wg-quick@* units that might be active
+	local unit
+	while IFS= read -r unit; do
+		[[ -z "$unit" ]] && continue
+		systemctl stop "$unit" >/dev/null 2>&1 || true
+		systemctl disable "$unit" >/dev/null 2>&1 || true
+	done < <(systemctl list-units --type=service --all 2>/dev/null | awk '/wg-quick@/ {print $1}')
 
 	if command -v wg-quick >/dev/null 2>&1; then
-		wg-quick down wg0 >/dev/null 2>&1 || true
-		wg-quick down wg1 >/dev/null 2>&1 || true
+		for conf in /etc/wireguard/*.conf; do
+			[[ ! -f "$conf" ]] && continue
+			local ifname
+			ifname=$(basename "$conf" .conf)
+			wg-quick down "$ifname" >/dev/null 2>&1 || true
+		done
 	fi
 
-	ip link delete dev wg0 >/dev/null 2>&1 || true
-	ip link delete dev wg1 >/dev/null 2>&1 || true
-	rm -f /etc/wireguard/wg1.conf 2>/dev/null || true
+	# Delete any remaining wireguard interfaces in the kernel
+	for wgif in wg0 wg1 wgwarp wgres CloudflareWARP; do
+		ip link delete dev "$wgif" >/dev/null 2>&1 || true
+	done
+	while IFS= read -r wgif; do
+		[[ -n "$wgif" ]] && ip link delete dev "$wgif" >/dev/null 2>&1 || true
+	done < <(ip -o link show type wireguard 2>/dev/null | awk -F': ' '{print $2}')
 
-	systemctl stop cbwireguard-web >/dev/null 2>&1 || true
-	systemctl disable cbwireguard-web >/dev/null 2>&1 || true
+	# Clear recommended ports (4500, 3478, 500, 853, 51820, 41194) + custom WG ports safely
+	clearRecommendedAndOldPorts
 
-	while iptables -D FORWARD -i wg0 -j ACCEPT 2>/dev/null; do :; done
-	while iptables -D FORWARD -o wg0 -j ACCEPT 2>/dev/null; do :; done
+	# Clean old iptables forwarding, mangle, nat, and DoH rules
+	while iptables -D FORWARD -j WG_DOH 2>/dev/null; do :; done
+	iptables -F WG_DOH 2>/dev/null || true
+	iptables -X WG_DOH 2>/dev/null || true
+
+	for wgif in wg0 wg1 wgwarp wgres; do
+		while iptables -D INPUT -i "$wgif" -j ACCEPT 2>/dev/null; do :; done
+		while iptables -D INPUT -i "$wgif" -p udp --dport 53 -j ACCEPT 2>/dev/null; do :; done
+		while iptables -D INPUT -i "$wgif" -p tcp --dport 53 -j ACCEPT 2>/dev/null; do :; done
+		while iptables -D FORWARD -i "$wgif" -j ACCEPT 2>/dev/null; do :; done
+		while iptables -D FORWARD -o "$wgif" -j ACCEPT 2>/dev/null; do :; done
+		while iptables -t nat -D PREROUTING -i "$wgif" -p udp --dport 53 -j REDIRECT --to-ports 53 2>/dev/null; do :; done
+		while iptables -t nat -D PREROUTING -i "$wgif" -p tcp --dport 53 -j REDIRECT --to-ports 53 2>/dev/null; do :; done
+		while iptables -t nat -D PREROUTING -i "$wgif" -p udp --dport 53 -j REDIRECT --to-ports 5353 2>/dev/null; do :; done
+		while iptables -t nat -D PREROUTING -i "$wgif" -p tcp --dport 53 -j REDIRECT --to-ports 5353 2>/dev/null; do :; done
+		while iptables -t nat -D POSTROUTING -o "$wgif" -j MASQUERADE 2>/dev/null; do :; done
+	done
+
 	while iptables -t nat -D POSTROUTING -s 10.18.0.0/24 -j MASQUERADE 2>/dev/null; do :; done
 	while iptables -t nat -D POSTROUTING -s 10.19.0.0/24 -j MASQUERADE 2>/dev/null; do :; done
+	while iptables -t nat -D POSTROUTING -s 10.18.0.0/24 ! -o wg0 -j MASQUERADE 2>/dev/null; do :; done
+	while iptables -t nat -D POSTROUTING -s 10.19.0.0/24 ! -o wg0 -j MASQUERADE 2>/dev/null; do :; done
 
-	echo -e "${GREEN}[✔] Cleaned old WireGuard instances.${NC}"
+	iptables -t mangle -F PREROUTING 2>/dev/null || true
+	iptables -t mangle -F FORWARD 2>/dev/null || true
+
+	if command -v ip6tables &>/dev/null; then
+		while ip6tables -D FORWARD -i wg0 -j REJECT --reject-with icmp6-adm-prohibited 2>/dev/null; do :; done
+	fi
+
+	# Clean old ip rules and custom routing tables
+	for prio in 25 30 40 41 50 51 60 85 100 101 102 900 910 1000; do
+		while ip rule del priority "$prio" 2>/dev/null; do :; done
+	done
+	while ip rule del lookup 200 2>/dev/null; do :; done
+	while ip rule del lookup 51820 2>/dev/null; do :; done
+	while ip rule del lookup 52000 2>/dev/null; do :; done
+	ip route flush table 200 2>/dev/null || true
+	ip route flush table 51820 2>/dev/null || true
+	ip route flush table 52000 2>/dev/null || true
+
+	# Clean old dnsmasq split files
+	rm -f /etc/dnsmasq.d/00-stealth-privacy.conf \
+	      /etc/dnsmasq.d/00-stealth-split.conf \
+	      /etc/dnsmasq.d/00-stealth-dns.conf \
+	      /etc/dnsmasq.d/00-wireguard-split-dns.conf \
+	      /etc/dnsmasq.d/wg_split.conf 2>/dev/null || true
+
+	rm -f /etc/wireguard/wg1.conf 2>/dev/null || true
+
+	echo -e "${GREEN}[✔] Cleaned old WireGuard instances, rules, and recommended stealth ports.${NC}"
 }
 
 # ------------------------------------------------------------------------------
@@ -436,6 +551,9 @@ function installQuestions() {
 	echo -e "          ${GREEN}${BOLD}🍪  Cookie's Easy WireGuard Setup & Installer v4.5${NC}"
 	echo -e "${PURPLE}=================================================================${NC}"
 
+	# Always clean old instances and the 6 recommended ports before setup
+	cleanupOldWireguard
+
 	SERVER_NIC=$(ip -4 route show table main default 2>/dev/null | awk '/dev/ {for (i=1; i<=NF; i++) if ($i == "dev") print $(i+1)}' | grep -vE '^(wg|Cloudflare|tun)' | head -n1 || true)
 	if [[ -z "$SERVER_NIC" ]]; then
 		SERVER_NIC=$(ip -o -4 addr show scope global 2>/dev/null | awk '{print $2}' | grep -vE '^(wg|Cloudflare|tun|lo|docker)' | head -n1 || echo "eth0")
@@ -475,7 +593,7 @@ function installQuestions() {
 
 		if [[ "$PORT_OPTION" =~ ^[0-9]+$ ]] && [[ "$PORT_OPTION" -ge 1024 && "$PORT_OPTION" -le 65535 ]]; then
 			if isSensitivePort "$PORT_OPTION"; then
-				echo -e "${RED}[!] Sensitive port. Choose another.${NC}"
+				echo -e "${RED}[!] Sensitive port (${PORT_OPTION}). Choose another.${NC}"
 				continue
 			fi
 			SERVER_PORT="$PORT_OPTION"
@@ -495,6 +613,10 @@ function installQuestions() {
 				;;
 			8)
 				read -rp "Enter Custom WireGuard Port [1024-65535]: " -e -i "8008" SERVER_PORT
+				if isSensitivePort "$SERVER_PORT"; then
+					echo -e "${RED}[!] Sensitive port (${SERVER_PORT}). Choose another.${NC}"
+					continue
+				fi
 				break
 				;;
 			*) continue ;;
@@ -599,14 +721,12 @@ function installWireGuard() {
 		installQuestions
 	fi
 
-	cleanupOldWireguard
-
 	export DEBIAN_FRONTEND=noninteractive
 	export NEEDRESTART_MODE=a
 
 	if [[ "${OS}" == "ubuntu" || "${OS}" == "debian" ]]; then
 		local MISSING_PKGS=()
-		for pkg in wireguard wireguard-tools iptables qrencode curl jq iproute2 iptables-persistent net-tools ipset dnsmasq ethtool dnsutils; do
+		for pkg in wireguard wireguard-tools iptables qrencode curl jq iproute2 iptables-persistent net-tools ipset dnsmasq ethtool dnsutils psmisc; do
 			if ! dpkg -s "$pkg" &>/dev/null; then
 				MISSING_PKGS+=("$pkg")
 			fi
@@ -616,11 +736,11 @@ function installWireGuard() {
 			apt-get install -y -q -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" "${MISSING_PKGS[@]}" || true
 		fi
 	elif [[ "${OS}" == "fedora" || "${OS}" == "centos" || "${OS}" == "almalinux" || "${OS}" == "rocky" ]]; then
-		yum install -y wireguard-tools iptables qrencode curl jq ipset dnsmasq ethtool bind-utils || true
+		yum install -y wireguard-tools iptables qrencode curl jq ipset dnsmasq ethtool bind-utils psmisc || true
 	elif [[ "${OS}" == "arch" ]]; then
-		pacman -S --needed --noconfirm wireguard-tools qrencode iptables curl jq ipset dnsmasq ethtool bind || true
+		pacman -S --needed --noconfirm wireguard-tools qrencode iptables curl jq ipset dnsmasq ethtool bind psmisc || true
 	elif [[ "${OS}" == "alpine" ]]; then
-		apk update && apk add wireguard-tools iptables libqrencode-tools curl jq ipset dnsmasq ethtool bind-tools || true
+		apk update && apk add wireguard-tools iptables libqrencode-tools curl jq ipset dnsmasq ethtool bind-tools psmisc || true
 	fi
 
 	modprobe wireguard >/dev/null 2>&1 || true
@@ -667,15 +787,16 @@ SYSCTL_EOF
 	sysctl --system -q >/dev/null 2>&1 || sysctl -p "$SYSCTL_CONF" >/dev/null 2>&1 || true
 	disableRpFilterAll
 
-	mkdir -p /etc/wireguard
-	chmod 700 /etc/wireguard
-	cd /etc/wireguard
+	# Remove old /etc/wireguard configs so fresh installation is 100% clean
+	rm -rf /etc/wireguard
+	mkdir -p /etc/wireguard/clients
+	chmod 700 /etc/wireguard /etc/wireguard/clients
+	cd /etc/wireguard || exit 1
 
 	umask 077
 	SERVER_PRIV_KEY=$(wg genkey)
 	SERVER_PUB_KEY=$(echo "${SERVER_PRIV_KEY}" | wg pubkey)
 
-	# Use strictly bash-safe alphanumeric characters for ADMIN_PASSKEY
 	ADMIN_PASSKEY=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 24)
 	echo "$ADMIN_PASSKEY" > /etc/wireguard/admin.key
 	chmod 600 /etc/wireguard/admin.key
@@ -1120,14 +1241,22 @@ function applyDomainSplitRulesLive() {
 
 	disableRpFilterAll
 
+	# If UFW is active on the VPS, ensure it allows routed packets and the WireGuard UDP port
+	if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+		sed -i 's/^DEFAULT_FORWARD_POLICY=.*/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw 2>/dev/null || true
+		ufw allow "${SERVER_PORT:-4500}/udp" >/dev/null 2>&1 || true
+		ufw route allow in on "$WG" >/dev/null 2>&1 || true
+		ufw route allow out on "$WG" >/dev/null 2>&1 || true
+		ufw reload >/dev/null 2>&1 || true
+	fi
+
 	rm -f /etc/dnsmasq.d/00-stealth-privacy.conf /etc/dnsmasq.d/00-stealth-split.conf /etc/dnsmasq.d/00-stealth-dns.conf /etc/dnsmasq.d/00-wireguard-split-dns.conf 2>/dev/null || true
 
 	mkdir -p /etc/dnsmasq.d
-	# Run dnsmasq on port 5353 so it NEVER conflicts with systemd-resolved on port 53
 	cat << DNSMASQ_CLEAN_EOF > /etc/dnsmasq.d/00-wireguard-split-dns.conf
 port=5353
 listen-address=127.0.0.1,${SERVER_WG_IPV4:-10.18.0.1},10.19.0.1
-bind-interfaces
+bind-dynamic
 no-resolv
 all-servers
 cache-size=10000
@@ -1207,7 +1336,7 @@ IPSET_HEADER
 	fi
 	rm -f "$DIRECT_HOSTS_FILE" "$WARP_HOSTS_FILE"
 
-	# Clean any previous port 53 NAT redirects first
+	# Clean any previous port 53 NAT redirects so client DNS never gets blackholed
 	while iptables -t nat -D PREROUTING -i "$WG" -p udp --dport 53 -j REDIRECT --to-ports 53 2>/dev/null; do :; done
 	while iptables -t nat -D PREROUTING -i "$WG" -p tcp --dport 53 -j REDIRECT --to-ports 53 2>/dev/null; do :; done
 	while iptables -t nat -D PREROUTING -i "$WG" -p udp --dport 53 -j REDIRECT --to-ports 5353 2>/dev/null; do :; done
@@ -1217,7 +1346,7 @@ IPSET_HEADER
 
 	ensureHostPublicIpBypassRules
 
-	# Core Firewall & NAT Rules: guarantee forwarding and masquerading work
+	# Guarantee INPUT, FORWARD, and NAT MASQUERADE are open for WireGuard clients
 	iptables -P FORWARD ACCEPT 2>/dev/null || true
 	ipt_ensure_top filter INPUT 1 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 	ipt_ensure_top filter INPUT 2 -p udp --dport "${SERVER_PORT:-4500}" -j ACCEPT
@@ -1227,11 +1356,9 @@ IPSET_HEADER
 	ipt_ensure_top filter FORWARD 2 -i "$WG" -j ACCEPT
 	ipt_ensure_top filter FORWARD 3 -o "$WG" -j ACCEPT
 
-	# Remove any WG_DOH blocking rules that could break client HTTPS/DNS
 	while iptables -D FORWARD -j WG_DOH 2>/dev/null; do :; done
 	iptables -F WG_DOH 2>/dev/null || true
 
-	# Remove IPv6 reject rule if present so dual-stack apps don't stall
 	if command -v ip6tables &>/dev/null; then
 		while ip6tables -D FORWARD -i "$WG" -j REJECT --reject-with icmp6-adm-prohibited 2>/dev/null; do :; done
 	fi
@@ -1243,19 +1370,12 @@ IPSET_HEADER
 	iptables -t mangle -F FORWARD 2>/dev/null || true
 	iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 
-	# Start dnsmasq on 5353 and ONLY redirect client DNS if dnsmasq passes a live resolution test
 	if command -v dnsmasq &>/dev/null; then
 		if ! dnsmasq --test >/dev/null 2>&1; then
 			rm -f /etc/dnsmasq.d/wg_split.conf
 		fi
 		systemctl enable dnsmasq >/dev/null 2>&1 || true
 		systemctl restart dnsmasq >/dev/null 2>&1 || true
-		if systemctl is-active --quiet dnsmasq 2>/dev/null; then
-			if ! command -v dig &>/dev/null || dig +short +time=2 +tries=1 @127.0.0.1 -p 5353 cloudflare.com 2>/dev/null | grep -qE '^[0-9]+\.'; then
-				ipt_ensure_top nat PREROUTING 1 -i "$WG" -p udp --dport 53 -j REDIRECT --to-ports 5353
-				ipt_ensure_top nat PREROUTING 2 -i "$WG" -p tcp --dport 53 -j REDIRECT --to-ports 5353
-			fi
-		fi
 	fi
 
 	iptables -t mangle -F PREROUTING 2>/dev/null || true
@@ -1882,14 +2002,44 @@ function cloudflareAntiFlagEngine() {
 }
 
 function uninstallWg() {
-	systemctl disable --now wg-split-tunnel.service "wg-quick@wgres" 2>/dev/null || true
-	systemctl stop "wg-quick@${SERVER_WG_NIC:-wg0}" "wg-quick@wgwarp" wg-warp-watchdog.timer 2>/dev/null || true
-	wg-quick down "${SERVER_WG_NIC:-wg0}" 2>/dev/null || true
-	wg-quick down wgwarp 2>/dev/null || true
-	wg-quick down wgres 2>/dev/null || true
-	rm -f /etc/systemd/system/wg-split-tunnel.service /usr/local/sbin/easy-wireguard
+	echo -e "\n${RED}${BOLD}⚠️  WARNING: This will remove all WireGuard instances, configs, services & clear stealth ports.${NC}"
+	echo -e "${YELLOW}    (Sensitive ports like 22, 53, 80, 443, etc. will NOT be touched.)${NC}"
+	local CONFIRM_UNINSTALL=""
+	read -rp "Are you sure you want to completely uninstall WireGuard instances? [y/N]: " CONFIRM_UNINSTALL
+	if [[ ! "$CONFIRM_UNINSTALL" =~ ^[Yy] ]]; then
+		echo -e "${CYAN}[i] Uninstall cancelled. Returning to main menu.${NC}"
+		return 0
+	fi
+
+	cleanupOldWireguard
+
+	rm -f /etc/systemd/system/wg-split-tunnel.service \
+	      /etc/systemd/system/wg-warp-watchdog.service \
+	      /etc/systemd/system/wg-warp-watchdog.timer \
+	      /usr/local/bin/wg-warp-watchdog.sh \
+	      /usr/local/sbin/easy-wireguard \
+	      /etc/sysctl.d/99-wireguard-stealth.conf 2>/dev/null || true
+
+	systemctl daemon-reload >/dev/null 2>&1 || true
+	systemctl restart dnsmasq >/dev/null 2>&1 || true
+
+	if command -v ipset &>/dev/null; then
+		for setname in wg_split_v4 wg_split_v6 wg_direct_clean wg_doh_block; do
+			ipset flush "$setname" 2>/dev/null || true
+			ipset destroy "$setname" 2>/dev/null || true
+		done
+	fi
+
 	rm -rf /etc/wireguard
-	exit 0
+	local EASY_DIR
+	EASY_DIR=$(getEasyWgDir)
+	rm -rf "$EASY_DIR" 2>/dev/null || true
+
+	unset SERVER_PORT SERVER_PUB_IP SERVER_PUB_NIC SERVER_WG_NIC SERVER_WG_IPV4 SERVER_WG_IPV6 SERVER_PRIV_KEY SERVER_PUB_KEY
+
+	echo -e "\n${GREEN}${BOLD}[✔] Uninstall complete! All WireGuard instances, services, files & stealth ports cleared.${NC}"
+	echo -e "${CYAN}    Returning to main menu so you can set up a new instance...${NC}\n"
+	return 0
 }
 
 function manageMenu() {
@@ -1904,7 +2054,7 @@ function manageMenu() {
 		echo " [5] Domain Split Tunneling Menu   [r] Uninstall   [q] Exit"
 		read -rp "Option: " MENU_OPTION
 		case "${MENU_OPTION}" in
-			1) installQuestions; installWireGuard ;;
+			1) SERVER_PORT=""; installQuestions; installWireGuard ;;
 			2) newClient ;;
 			3) configureClients ;;
 			4) backupRestoreManager ;;
