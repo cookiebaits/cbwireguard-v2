@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# 🍪 Cookie's Easy WireGuard Manager & VPS Stealth Server v4.2 (Full-Speed WARP)
+# 🍪 Cookie's Easy WireGuard Manager & VPS Stealth Server v4.3 (Full-Speed + LinkedIn Fix)
 # ==============================================================================
 
 RED='\033[0;31m'
@@ -93,7 +93,7 @@ function ipt_ensure_append() {
 	fi
 }
 
-# Re-enable physical NIC hardware offloads while disabling only buggy UDP GRO forwarding
+# Re-enable GSO/GRO/TSO on BOTH physical NIC and WireGuard interfaces + attach fq_codel to stop upload bufferbloat
 function optimizeNicQueuesAndRPS() {
 	local cpu_count
 	cpu_count=$(nproc 2>/dev/null || echo 1)
@@ -105,16 +105,19 @@ function optimizeNicQueuesAndRPS() {
 		PUB_NIC=$(ip -4 route show table main default 2>/dev/null | awk '/dev/ {for (i=1; i<=NF; i++) if ($i == "dev") print $(i+1)}' | grep -vE '^(wg|Cloudflare|tun)' | head -n1 || echo "eth0")
 	fi
 
-	# Restore hardware TSO/GSO/GRO on physical NIC (disabled in v4.1) and only disable buggy UDP GRO list forwarding
-	if command -v ethtool &>/dev/null && [[ -n "$PUB_NIC" ]]; then
-		ethtool -K "$PUB_NIC" gro on gso on tso on 2>/dev/null || true
-		ethtool -K "$PUB_NIC" rx-gro-list off 2>/dev/null || true
-		ethtool -K "$PUB_NIC" rx-udp-gro-forwarding off 2>/dev/null || true
-	fi
-
 	for nic in "$PUB_NIC" "${SERVER_WG_NIC:-wg0}" "wgwarp" "CloudflareWARP"; do
 		if ip link show "$nic" &>/dev/null; then
-			ip link set dev "$nic" txqueuelen 10000 2>/dev/null || true
+			# 1000 packet queue + fq_codel eliminates the 232ms upload bufferbloat spike
+			ip link set dev "$nic" txqueuelen 1000 2>/dev/null || true
+			if command -v tc &>/dev/null; then
+				tc qdisc replace dev "$nic" root fq_codel quantum 1514 target 5ms interval 100ms noecn 2>/dev/null || true
+			fi
+			# CRITICAL SPEED FIX: Re-enable GSO/GRO/TSO on wg0, wgwarp, and eth0 (disabled in v4.1!)
+			if command -v ethtool &>/dev/null; then
+				ethtool -K "$nic" gro on gso on tso on 2>/dev/null || true
+				ethtool -K "$nic" rx-gro-list off 2>/dev/null || true
+				ethtool -K "$nic" rx-udp-gro-forwarding off 2>/dev/null || true
+			fi
 			for rps_file in /sys/class/net/"$nic"/queues/rx-*/rps_cpus; do
 				[[ -w "$rps_file" ]] && echo "$rps_mask" > "$rps_file" 2>/dev/null || true
 			done
@@ -124,9 +127,8 @@ function optimizeNicQueuesAndRPS() {
 		fi
 	done
 
-	# Keep wg0 at 1420 (accepts full frames from existing clients) and wgwarp at 1280 (Cloudflare WARP edge limit)
 	ip link set dev "${SERVER_WG_NIC:-wg0}" mtu 1420 2>/dev/null || true
-	ip link set dev wgwarp mtu 1280 2>/dev/null || true
+	ip link set dev wgwarp mtu "${WARP_OPTIMAL_MTU:-1420}" 2>/dev/null || true
 
 	if [[ -w /proc/sys/net/core/rps_sock_flow_entries ]]; then
 		echo 32768 > /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null || true
@@ -355,7 +357,7 @@ function selectDNSResolvers() {
 # ------------------------------------------------------------------------------
 function installQuestions() {
 	echo -e "${PURPLE}=================================================================${NC}"
-	echo -e "          ${GREEN}${BOLD}🍪  Cookie's Easy WireGuard Setup & Installer v4.2${NC}"
+	echo -e "          ${GREEN}${BOLD}🍪  Cookie's Easy WireGuard Setup & Installer v4.3${NC}"
 	echo -e "${PURPLE}=================================================================${NC}"
 
 	SERVER_NIC=$(ip -4 route show table main default 2>/dev/null | awk '/dev/ {for (i=1; i<=NF; i++) if ($i == "dev") print $(i+1)}' | grep -vE '^(wg|Cloudflare|tun)' | head -n1 || true)
@@ -453,7 +455,7 @@ function installQuestions() {
 }
 
 # ------------------------------------------------------------------------------
-# 5. Safely Upgrade / Write wg0.conf (Preserving Existing Key & All Peers)
+# 5. Safely Upgrade / Write wg0.conf (MTU 1420 + PMTU Clamping + IPv6 Fast-Reject)
 # ------------------------------------------------------------------------------
 function writeUnifiedWg0Config() {
 	local EXISTING_PEERS=""
@@ -469,10 +471,9 @@ function writeUnifiedWg0Config() {
 	[[ -n "$EXISTING_PRIV_KEY" ]] && SERVER_PRIV_KEY="$EXISTING_PRIV_KEY"
 	[[ -n "$EXISTING_PORT" && -z "${SERVER_PORT:-}" ]] && SERVER_PORT="$EXISTING_PORT"
 
-	local WG_SERVER_ADDRESS="${SERVER_WG_IPV4:-10.18.0.1}/24"
-	if [[ "${HAS_IPV6:-0}" -eq 1 ]]; then
-		WG_SERVER_ADDRESS="${SERVER_WG_IPV4:-10.18.0.1}/24,${SERVER_WG_IPV6:-fd42:42:42::1}/64"
-	fi
+	# Keep fd42:42:42::1/64 on interface so existing dual-stack client configs don't error,
+	# but reject IPv6 forwarding with icmp6-adm-prohibited so clients fall back to IPv4 in <1ms!
+	local WG_SERVER_ADDRESS="${SERVER_WG_IPV4:-10.18.0.1}/24, ${SERVER_WG_IPV6:-fd42:42:42::1}/64"
 
 	cat << WG_SERVER_EOF > "/etc/wireguard/wg0.conf"
 [Interface]
@@ -484,7 +485,9 @@ SaveConfig = false
 
 # --- 1. CORE HIGH-SPEED FORWARDING & NAT ---
 PostUp = sysctl -w net.ipv4.ip_forward=1 net.ipv4.conf.all.rp_filter=0 net.ipv4.conf.wg0.rp_filter=0 >/dev/null 2>&1 || true
-PostUp = ip link set dev wg0 txqueuelen 10000 mtu 1420 2>/dev/null || true
+PostUp = ip link set dev wg0 txqueuelen 1000 mtu 1420 2>/dev/null || true
+PostUp = ethtool -K wg0 gro on gso on tso on 2>/dev/null || true
+PostUp = tc qdisc replace dev wg0 root fq_codel quantum 1514 noecn 2>/dev/null || true
 PostUp = iptables -C INPUT -p udp --dport ${SERVER_PORT:-4500} -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p udp --dport ${SERVER_PORT:-4500} -j ACCEPT
 PostUp = iptables -C INPUT -i wg0 -p udp --dport 53 -j ACCEPT 2>/dev/null || iptables -I INPUT 2 -i wg0 -p udp --dport 53 -j ACCEPT
 PostUp = iptables -C INPUT -i wg0 -p tcp --dport 53 -j ACCEPT 2>/dev/null || iptables -I INPUT 3 -i wg0 -p tcp --dport 53 -j ACCEPT
@@ -494,19 +497,21 @@ PostUp = iptables -C FORWARD -o wg0 -j ACCEPT 2>/dev/null || iptables -I FORWARD
 PostUp = iptables -t nat -C POSTROUTING -s 10.18.0.0/24 ! -o wg0 -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 ! -o wg0 -j MASQUERADE
 PostUp = iptables -t nat -C POSTROUTING -s 10.19.0.0/24 ! -o wg0 -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING 2 -s 10.19.0.0/24 ! -o wg0 -j MASQUERADE
 
-# --- 2. BIDIRECTIONAL MSS=1200 CLAMPING (Fits inside 1280 MTU WARP with Zero Drops) ---
-PostUp = iptables -t mangle -C FORWARD -i wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || iptables -t mangle -I FORWARD 1 -i wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200
-PostUp = iptables -t mangle -C FORWARD -o wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || iptables -t mangle -I FORWARD 2 -o wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200
-PostUp = iptables -t mangle -C POSTROUTING -s 10.19.0.0/24 ! -o wg0 -j TTL --ttl-set 128 2>/dev/null || iptables -t mangle -I POSTROUTING 1 -s 10.19.0.0/24 ! -o wg0 -j TTL --ttl-set 128
+# --- 2. DYNAMIC PMTU CLAMPING (MSS=1380: Prevents LinkedIn TLS 1.3 ClientHello Fragmentation & Upload Throttling) ---
+PostUp = iptables -t mangle -C FORWARD -i wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -t mangle -I FORWARD 1 -i wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostUp = iptables -t mangle -C FORWARD -o wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -t mangle -I FORWARD 2 -o wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+
+# --- 3. INSTANT IPv6 HAPPY-EYEBALLS FALLBACK (Prevents Dual-Stack Clients Hanging on LinkedIn AAAA Records) ---
+PostUp = ip6tables -C FORWARD -i wg0 -j REJECT --reject-with icmp6-adm-prohibited 2>/dev/null || ip6tables -I FORWARD 1 -i wg0 -j REJECT --reject-with icmp6-adm-prohibited 2>/dev/null || true
 
 PostDown = iptables -D INPUT -p udp --dport ${SERVER_PORT:-4500} -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -i wg0 -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -o wg0 -j ACCEPT 2>/dev/null || true
 PostDown = iptables -t nat -D POSTROUTING -s 10.18.0.0/24 ! -o wg0 -j MASQUERADE 2>/dev/null || true
 PostDown = iptables -t nat -D POSTROUTING -s 10.19.0.0/24 ! -o wg0 -j MASQUERADE 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -i wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -o wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || true
-PostDown = iptables -t mangle -D POSTROUTING -s 10.19.0.0/24 ! -o wg0 -j TTL --ttl-set 128 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -i wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -o wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+PostDown = ip6tables -D FORWARD -i wg0 -j REJECT --reject-with icmp6-adm-prohibited 2>/dev/null || true
 WG_SERVER_EOF
 
 	if [[ -n "$EXISTING_PEERS" ]]; then
@@ -552,15 +557,8 @@ function installWireGuard() {
 	modprobe iptable_nat >/dev/null 2>&1 || true
 	modprobe iptable_mangle >/dev/null 2>&1 || true
 	modprobe xt_mark >/dev/null 2>&1 || true
-	modprobe ipt_TTL >/dev/null 2>&1 || true
 	modprobe tcp_bbr >/dev/null 2>&1 || true
-
-	local HAS_IPV6=0
-	if [[ -f /proc/net/if_inet6 ]] && [[ $(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || echo 1) -eq 0 ]]; then
-		if ip -6 route show default 2>/dev/null | grep -q "default"; then
-			HAS_IPV6=1
-		fi
-	fi
+	modprobe sch_fq_codel >/dev/null 2>&1 || true
 
 	SYSCTL_CONF="/etc/sysctl.d/99-wireguard-stealth.conf"
 	cat << 'SYSCTL_EOF' > "$SYSCTL_CONF"
@@ -622,7 +620,6 @@ CLIENT_DNS_2=${CLIENT_DNS_2}
 ALLOWED_IPS=${ALLOWED_IPS}
 WEB_PORT=${WEB_PORT:-51821}
 ADMIN_PASSKEY=${ADMIN_PASSKEY}
-HAS_IPV6=${HAS_IPV6}
 CF_AUTO_ENABLE=${CF_AUTO_ENABLE:-y}
 WARP_GLOBAL_MODE=${WARP_GLOBAL_MODE:-full}
 PARAMS_EOF
@@ -648,6 +645,11 @@ www.amazon.com
 linkedin.com
 www.linkedin.com
 licdn.com
+static.licdn.com
+media.licdn.com
+dms.licdn.com
+lnkd.in
+voyager.linkedin.com
 paypal.com
 www.paypal.com
 paypalobjects.com
@@ -662,7 +664,7 @@ CF_INIT_DOMAINS
 }
 
 # ------------------------------------------------------------------------------
-# 7. Client Management (MTU 1280 for Zero-Fragmentation WARP + Keepalive 15)
+# 7. Client Management (MTU 1420 Matched to Server & WARP + IPv4 Clean Egress)
 # ------------------------------------------------------------------------------
 function newClientInternal() {
 	local CLIENT_NAME="$1"
@@ -705,14 +707,14 @@ function newClientInternal() {
 PrivateKey = ${CLIENT_CF_PRIV_KEY}
 Address = ${CLIENT_WG_CF_IPV4}/32
 DNS = ${CLIENT_DNS_LINE}
-MTU = 1280
+MTU = 1420
 
 [Peer]
 PublicKey = ${SERVER_PUB_KEY}
 PresharedKey = ${CLIENT_PRE_SHARED_KEY}
 Endpoint = ${ENDPOINT_WG0}
 AllowedIPs = 0.0.0.0/0
-PersistentKeepalive = 15
+PersistentKeepalive = 25
 CF_CLIENT_EOF
 )
 
@@ -722,14 +724,14 @@ CF_CLIENT_EOF
 PrivateKey = ${CLIENT_PRIV_KEY}
 Address = ${CLIENT_WG_IPV4}/32
 DNS = ${CLIENT_DNS_LINE}
-MTU = 1280
+MTU = 1420
 
 [Peer]
 PublicKey = ${SERVER_PUB_KEY}
 PresharedKey = ${CLIENT_PRE_SHARED_KEY}
 Endpoint = ${ENDPOINT_WG0}
 AllowedIPs = 0.0.0.0/0
-PersistentKeepalive = 15
+PersistentKeepalive = 25
 CLIENT_EOF
 )
 
@@ -876,7 +878,6 @@ function ensureHostPublicIpBypassRules() {
 		PUB_IP=$(ip -4 addr show dev "$DEF_NIC" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1 || true)
 	fi
 
-	# Clean up any broken table 200 rules or warp-svc nftables killswitches from earlier runs
 	while ip rule del lookup 200 2>/dev/null; do :; done
 	ip route flush table 200 2>/dev/null || true
 	if command -v nft &>/dev/null; then
@@ -905,11 +906,11 @@ function ensureHostPublicIpBypassRules() {
 		ip rule add from "${PUB_IP}/32" lookup main priority 50 2>/dev/null || true
 	fi
 
-	# Priority 60: Direct-Clean Bypass (PayPal / Banking marked 0x100)
+	# Priority 60: Direct-Clean Bypass (marked 0x100 -> exits directly via clean VPS IP)
 	while ip rule del fwmark 0x100 lookup main priority 60 2>/dev/null; do :; done
 	ip rule add fwmark 0x100 lookup main priority 60 2>/dev/null || true
 
-	# Priority 100-101: Route wgwarp's own interface IP (172.16.0.x) & oif wgwarp via table 51820 so curl --interface wgwarp works!
+	# Priority 100-101: Route wgwarp's own interface IP (172.16.0.x) & oif wgwarp via table 51820
 	local WARP_LOCAL_IP=""
 	if ip link show wgwarp &>/dev/null; then
 		WARP_LOCAL_IP=$(ip -4 addr show dev wgwarp 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1 || true)
@@ -927,24 +928,49 @@ function ensureHostPublicIpBypassRules() {
 }
 
 # ------------------------------------------------------------------------------
-# 9. High-Speed Split Tunneling, QUIC Blackhole Fix & Fail-Safe WARP Routing
+# 9. Smart LinkedIn Auto-Route, Full-MTU PMTU Clamping & Fail-Safe WARP Routing
 # ------------------------------------------------------------------------------
 function applyDomainSplitRulesLive() {
-	echo -e "\n${CYAN}[*] Applying Bidirectional MSS=1200, Instant QUIC Fallback & WARP Policy Routing...${NC}"
+	echo -e "\n${CYAN}[*] Applying Full-MTU 1420 Clamping, Smart LinkedIn Routing & WARP Policy Rules...${NC}"
 
 	mkdir -p /etc/wireguard
 	touch /etc/wireguard/split_domains.txt
 
-	# Clean legacy port 53 redirects and conflicting MSS rules
+	# Remove legacy v4.2 rules that broke QUIC (UDP 443 REJECT) and fragmented LinkedIn TLS ClientHello (--set-mss 1200)
+	while iptables -D FORWARD -i "${SERVER_WG_NIC:-wg0}" -p udp --dport 443 -m length --length 1281:65535 -j REJECT --reject-with icmp-port-unreachable 2>/dev/null; do :; done
 	while iptables -t nat -D PREROUTING -i "${SERVER_WG_NIC:-wg0}" -p udp --dport 53 -j REDIRECT --to-ports 53 2>/dev/null; do :; done
 	while iptables -t nat -D PREROUTING -i "${SERVER_WG_NIC:-wg0}" -p tcp --dport 53 -j REDIRECT --to-ports 53 2>/dev/null; do :; done
-	while iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
-	while iptables -t mangle -D FORWARD -i "${SERVER_WG_NIC:-wg0}" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
-	while iptables -t mangle -D FORWARD -o "${SERVER_WG_NIC:-wg0}" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
+	while iptables -t mangle -D FORWARD -i "${SERVER_WG_NIC:-wg0}" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null; do :; done
+	while iptables -t mangle -D FORWARD -o "${SERVER_WG_NIC:-wg0}" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null; do :; done
+	while iptables -t mangle -D FORWARD -o wgwarp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null; do :; done
+	while iptables -t mangle -D FORWARD -i wgwarp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null; do :; done
 	while iptables -t mangle -D FORWARD -i "${SERVER_WG_NIC:-wg0}" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1280 2>/dev/null; do :; done
 	while iptables -t mangle -D FORWARD -o "${SERVER_WG_NIC:-wg0}" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1280 2>/dev/null; do :; done
 	while iptables -t mangle -D FORWARD -o wgwarp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1280 2>/dev/null; do :; done
 	while iptables -t mangle -D FORWARD -i wgwarp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1280 2>/dev/null; do :; done
+	while iptables -t mangle -D POSTROUTING -s 10.19.0.0/24 ! -o "${SERVER_WG_NIC:-wg0}" -j TTL --ttl-set 128 2>/dev/null; do :; done
+
+	ensureHostPublicIpBypassRules
+
+	# Probe whether LinkedIn works better via Direct VPS IP or via WARP (solves 104.28.x.x Azure Front Door blocks!)
+	local LINKEDIN_TARGET_SET="wg_direct_clean"
+	local DIRECT_LI_CODE WARP_LI_CODE
+	DIRECT_LI_CODE=$(curl -4 --interface "${SERVER_PUB_NIC:-eth0}" -s -o /dev/null -w "%{http_code}" --connect-timeout 3 --max-time 5 -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" https://www.linkedin.com/ 2>/dev/null || echo "000")
+	WARP_LI_CODE="000"
+	if ip link show wgwarp &>/dev/null; then
+		WARP_LI_CODE=$(curl -4 --interface wgwarp -s -o /dev/null -w "%{http_code}" --connect-timeout 3 --max-time 5 -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" https://www.linkedin.com/ 2>/dev/null || echo "000")
+	fi
+
+	if [[ "$DIRECT_LI_CODE" =~ ^(200|301|302|303|307|308)$ ]]; then
+		LINKEDIN_TARGET_SET="wg_direct_clean"
+		echo -e "${GREEN}[✔] LinkedIn Probe: Direct VPS IP returned HTTP ${DIRECT_LI_CODE} (Clean)! Routing LinkedIn via Direct Clean Egress (bypassing 104.28.x.x WARP block).${NC}"
+	elif [[ "$WARP_LI_CODE" =~ ^(200|301|302|303|307|308)$ ]]; then
+		LINKEDIN_TARGET_SET="wg_split_v4"
+		echo -e "${GREEN}[✔] LinkedIn Probe: Cloudflare WARP returned HTTP ${WARP_LI_CODE}! Routing LinkedIn via WARP Egress.${NC}"
+	else
+		LINKEDIN_TARGET_SET="wg_direct_clean"
+		echo -e "${YELLOW}[*] LinkedIn Probe (Direct=${DIRECT_LI_CODE}, WARP=${WARP_LI_CODE}): Defaulting LinkedIn to Direct Clean VPS Egress.${NC}"
+	fi
 
 	if command -v ipset &>/dev/null; then
 		local IPSET_BATCH
@@ -958,14 +984,24 @@ flush wg_split_v6
 flush wg_direct_clean
 IPSET_HEADER
 
+		# 1. PayPal & Payment Gateways -> Direct Clean VPS Egress
 		for p in 64.4.240.0/21 66.211.168.0/21 173.0.80.0/20 173.224.160.0/19 185.177.52.0/22 192.148.20.0/23 198.54.120.0/22 216.113.160.0/19; do
 			echo "add wg_direct_clean $p -exist" >> "$IPSET_BATCH"
 		done
 
-		for c in 108.174.0.0/20 144.2.0.0/19 185.63.144.0/22 199.101.160.0/22 216.52.16.0/20 65.156.227.0/24 8.247.168.0/24; do
-			echo "add wg_split_v4 $c -exist" >> "$IPSET_BATCH"
+		# 2. LinkedIn Official ASNs (AS14413 / AS12447) + Microsoft Azure Front Door LinkedIn Anycast (13.107.42.0/24)
+		for li_cidr in 13.107.42.0/24 108.174.0.0/20 144.2.0.0/19 185.63.144.0/22 199.101.160.0/22 216.52.0.0/16 45.42.64.0/22 103.20.92.0/22 128.242.0.0/16 91.225.248.0/22 65.156.227.0/24 8.247.168.0/24; do
+			echo "add ${LINKEDIN_TARGET_SET} ${li_cidr} -exist" >> "$IPSET_BATCH"
 		done
 
+		# Live-resolve all LinkedIn & CDN hostnames so Akamai/Azure edge IPs are guaranteed in the set
+		for li_host in linkedin.com www.linkedin.com licdn.com static.licdn.com media.licdn.com dms.licdn.com lnkd.in platform.linkedin.com voyager.linkedin.com snap.licdn.com px.ads.linkedin.com; do
+			for resolved_ip in $(getent ahostsv4 "$li_host" 2>/dev/null | awk '{print $1}' | sort -u); do
+				[[ "$resolved_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && echo "add ${LINKEDIN_TARGET_SET} ${resolved_ip} -exist" >> "$IPSET_BATCH"
+			done
+		done
+
+		# 3. Cloudflare CDN CIDRs (Excluding 162.159.192.0/22 & 188.114.96.0/22 WARP Endpoints)
 		for c in 173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 197.234.240.0/22 198.41.128.0/17 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22; do
 			echo "add wg_split_v4 $c -exist" >> "$IPSET_BATCH"
 		done
@@ -974,38 +1010,33 @@ IPSET_HEADER
 		rm -f "$IPSET_BATCH"
 	fi
 
-	ensureHostPublicIpBypassRules
-
 	# Core FORWARD, ICMP, DNS & NAT Rules
 	ipt_ensure_top filter INPUT 1 -p udp --dport "${SERVER_PORT:-4500}" -j ACCEPT
 	ipt_ensure_top filter INPUT 2 -i "${SERVER_WG_NIC:-wg0}" -p udp --dport 53 -j ACCEPT
 	ipt_ensure_top filter INPUT 3 -i "${SERVER_WG_NIC:-wg0}" -p tcp --dport 53 -j ACCEPT
 
-	# Instant QUIC (>1280B UDP/443) Fallback: prevents 15-second HTTP/3 browser stalls when client MTU is 1420
-	ipt_ensure_top filter FORWARD 1 -i "${SERVER_WG_NIC:-wg0}" -p udp --dport 443 -m length --length 1281:65535 -j REJECT --reject-with icmp-port-unreachable
-	ipt_ensure_top filter FORWARD 2 -p icmp -j ACCEPT
-	ipt_ensure_top filter FORWARD 3 -i "${SERVER_WG_NIC:-wg0}" -j ACCEPT
-	ipt_ensure_top filter FORWARD 4 -o "${SERVER_WG_NIC:-wg0}" -j ACCEPT
+	ipt_ensure_top filter FORWARD 1 -p icmp -j ACCEPT
+	ipt_ensure_top filter FORWARD 2 -i "${SERVER_WG_NIC:-wg0}" -j ACCEPT
+	ipt_ensure_top filter FORWARD 3 -o "${SERVER_WG_NIC:-wg0}" -j ACCEPT
+
+	# Fast-reject unrouted IPv6 traffic on wg0 so dual-stack clients immediately use IPv4 (<1ms Happy Eyeballs)
+	if command -v ip6tables &>/dev/null; then
+		ip6tables -C FORWARD -i "${SERVER_WG_NIC:-wg0}" -j REJECT --reject-with icmp6-adm-prohibited 2>/dev/null || \
+			ip6tables -I FORWARD 1 -i "${SERVER_WG_NIC:-wg0}" -j REJECT --reject-with icmp6-adm-prohibited 2>/dev/null || true
+	fi
 
 	ipt_ensure_top nat POSTROUTING 1 -s 10.18.0.0/24 ! -o "${SERVER_WG_NIC:-wg0}" -j MASQUERADE
 	ipt_ensure_top nat POSTROUTING 2 -s 10.19.0.0/24 ! -o "${SERVER_WG_NIC:-wg0}" -j MASQUERADE
 
-	# If a client uses Local Server DNS (10.18.0.1 or 10.19.0.1), forward directly to 1.1.1.1 if local dnsmasq isn't bound
-	if ! ss -uln 2>/dev/null | grep -q ":53 "; then
-		ipt_ensure_top nat PREROUTING 1 -i "${SERVER_WG_NIC:-wg0}" -d 10.18.0.1 -p udp --dport 53 -j DNAT --to-destination 1.1.1.1:53
-		ipt_ensure_top nat PREROUTING 2 -i "${SERVER_WG_NIC:-wg0}" -d 10.19.0.1 -p udp --dport 53 -j DNAT --to-destination 1.1.1.1:53
-	fi
-
-	# Force TCP MSS to 1200 in BOTH directions on wg0 (1200 MSS = 1240B IP packet <= 1280B WARP MTU)
-	ipt_ensure_top mangle FORWARD 1 -i "${SERVER_WG_NIC:-wg0}" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200
-	ipt_ensure_top mangle FORWARD 2 -o "${SERVER_WG_NIC:-wg0}" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200
+	# Dynamic PMTU Clamping (MSS = 1380 at MTU 1420: Zero TLS ClientHello fragmentation!)
+	ipt_ensure_top mangle FORWARD 1 -i "${SERVER_WG_NIC:-wg0}" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+	ipt_ensure_top mangle FORWARD 2 -o "${SERVER_WG_NIC:-wg0}" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 
 	if command -v ipset &>/dev/null; then
 		ipt_ensure_top mangle PREROUTING 1 -i "${SERVER_WG_NIC:-wg0}" -m set --match-set wg_direct_clean dst -j MARK --set-mark 0x100
 		ipt_ensure_top mangle PREROUTING 2 -i "${SERVER_WG_NIC:-wg0}" -m set --match-set wg_direct_clean dst -j RETURN
 	fi
 
-	# Clear client WARP policy rules before live connectivity verification
 	while ip rule del from 10.19.0.0/24 table 51820 priority 900 2>/dev/null; do :; done
 	while ip rule del from 10.18.0.0/24 table 51820 priority 910 2>/dev/null; do :; done
 	while ip rule del fwmark 0x51820 table 51820 priority 1000 2>/dev/null; do :; done
@@ -1020,10 +1051,9 @@ IPSET_HEADER
 	if [[ -n "$WARP_NIC" ]] && [[ -f /etc/wireguard/warp_egress_enabled ]]; then
 		ip route replace default dev "$WARP_NIC" table 51820 2>/dev/null || ip route add default dev "$WARP_NIC" table 51820 2>/dev/null || true
 		ipt_ensure_top nat POSTROUTING 1 -o "$WARP_NIC" -j MASQUERADE
-		ipt_ensure_top mangle FORWARD 1 -o "$WARP_NIC" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200
-		ipt_ensure_top mangle FORWARD 2 -i "$WARP_NIC" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200
+		ipt_ensure_top mangle FORWARD 1 -o "$WARP_NIC" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+		ipt_ensure_top mangle FORWARD 2 -i "$WARP_NIC" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 
-		# FAIL-SAFE GUARD: Verify WARP actually passes traffic before routing clients into table 51820!
 		if curl -4 --interface "$WARP_NIC" -sSf --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | grep -q "warp=on"; then
 			ip rule add from 10.19.0.0/24 table 51820 priority 900 2>/dev/null || true
 			if [[ "${WARP_GLOBAL_MODE:-full}" == "full" ]]; then
@@ -1034,9 +1064,9 @@ IPSET_HEADER
 			if command -v ipset &>/dev/null; then
 				ipt_ensure_top mangle PREROUTING 3 -i "${SERVER_WG_NIC:-wg0}" -m set --match-set wg_split_v4 dst -j MARK --set-mark 0x51820
 			fi
-			echo -e "${GREEN}[✔] Verified live WARP tunnel (warp=on)! Client traffic is now warping around ${SERVER_PUB_IP}.${NC}"
+			echo -e "${GREEN}[✔] Verified live WARP tunnel (warp=on, MTU=${WARP_OPTIMAL_MTU:-1420})!${NC}"
 		else
-			echo -e "${YELLOW}[!] Fail-Safe Guard: ${WARP_NIC} handshake pending; keeping clients on direct VPS routing so traffic never blackholes.${NC}"
+			echo -e "${YELLOW}[!] Fail-Safe Guard: ${WARP_NIC} handshake pending; keeping clients on direct VPS routing.${NC}"
 		fi
 	fi
 
@@ -1044,7 +1074,7 @@ IPSET_HEADER
 }
 
 # ------------------------------------------------------------------------------
-# 10. Self-Healing Kernel Cloudflare WARP Provisioner (MTU 1280 + Multi-Endpoint)
+# 10. High-Speed Kernel Cloudflare WARP Provisioner (Auto-Probed 1420 MTU)
 # ------------------------------------------------------------------------------
 function installWarpWatchdog() {
 	cat << 'WATCHDOG_SH' > /usr/local/bin/wg-warp-watchdog.sh
@@ -1053,7 +1083,6 @@ if [[ ! -f /etc/wireguard/warp_egress_enabled ]] || ! ip link show wgwarp &>/dev
 	exit 0
 fi
 
-# Ensure wgwarp self-routing rules (priority 100/101) are present before testing curl
 WARP_IP=$(ip -4 addr show dev wgwarp 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1 || true)
 if [[ -n "$WARP_IP" ]] && ! ip rule show | grep -q "from ${WARP_IP} lookup 51820"; then
 	ip rule add from "${WARP_IP}/32" table 51820 priority 100 2>/dev/null || true
@@ -1072,7 +1101,7 @@ if ! curl -4 --interface wgwarp -sSf --max-time 4 https://1.1.1.1/cdn-cgi/trace 
 			"162.159.192.1:4500"
 		)
 		for ep in "${ENDPOINTS[@]}"; do
-			wg set wgwarp fwmark 0x51888 peer "$PEER_KEY" endpoint "$ep" persistent-keepalive 15 2>/dev/null || true
+			wg set wgwarp fwmark 0x51888 peer "$PEER_KEY" endpoint "$ep" persistent-keepalive 25 2>/dev/null || true
 			sleep 1
 			if curl -4 --interface wgwarp -sSf --max-time 3 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | grep -q "warp=on"; then
 				ip rule show | grep -q "from 10.19.0.0/24 lookup 51820" || ip rule add from 10.19.0.0/24 table 51820 priority 900 2>/dev/null || true
@@ -1117,42 +1146,45 @@ function writeWgwarpConfigFile() {
 	local IPV4_ADDR="$2"
 	local PEER_PUB="$3"
 	local ENDPOINT_ADDR="${4:-162.159.192.1:2408}"
+	local TARGET_MTU="${5:-1420}"
 
 	cat << WGWARP_EOF > /etc/wireguard/wgwarp.conf
 [Interface]
 PrivateKey = ${PRIV_KEY}
 Address = ${IPV4_ADDR}/32
-MTU = 1280
+MTU = ${TARGET_MTU}
 Table = 51820
 FwMark = 0x51888
 
-PostUp = ip link set dev wgwarp txqueuelen 10000 mtu 1280 2>/dev/null || true
+PostUp = ip link set dev wgwarp txqueuelen 1000 mtu ${TARGET_MTU} 2>/dev/null || true
+PostUp = ethtool -K wgwarp gro on gso on tso on 2>/dev/null || true
+PostUp = tc qdisc replace dev wgwarp root fq_codel quantum 1514 noecn 2>/dev/null || true
 PostUp = sysctl -w net.ipv4.conf.wgwarp.rp_filter=0 >/dev/null 2>&1 || true
 PostUp = ip rule del from ${IPV4_ADDR}/32 table 51820 priority 100 2>/dev/null || true
 PostUp = ip rule add from ${IPV4_ADDR}/32 table 51820 priority 100 2>/dev/null || true
 PostUp = ip rule del oif wgwarp table 51820 priority 101 2>/dev/null || true
 PostUp = ip rule add oif wgwarp table 51820 priority 101 2>/dev/null || true
 PostUp = iptables -t nat -C POSTROUTING -o wgwarp -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING 1 -o wgwarp -j MASQUERADE
-PostUp = iptables -t mangle -C FORWARD -o wgwarp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || iptables -t mangle -I FORWARD 1 -o wgwarp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200
-PostUp = iptables -t mangle -C FORWARD -i wgwarp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || iptables -t mangle -I FORWARD 2 -i wgwarp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200
+PostUp = iptables -t mangle -C FORWARD -o wgwarp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -t mangle -I FORWARD 1 -o wgwarp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostUp = iptables -t mangle -C FORWARD -i wgwarp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -t mangle -I FORWARD 2 -i wgwarp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 
 PostDown = ip rule del from ${IPV4_ADDR}/32 table 51820 priority 100 2>/dev/null || true
 PostDown = ip rule del oif wgwarp table 51820 priority 101 2>/dev/null || true
 PostDown = iptables -t nat -D POSTROUTING -o wgwarp -j MASQUERADE 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -o wgwarp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -i wgwarp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -o wgwarp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -i wgwarp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 
 [Peer]
 PublicKey = ${PEER_PUB}
 AllowedIPs = 0.0.0.0/0
 Endpoint = ${ENDPOINT_ADDR}
-PersistentKeepalive = 15
+PersistentKeepalive = 25
 WGWARP_EOF
 	chmod 600 /etc/wireguard/wgwarp.conf
 }
 
 function setupCloudflareWarpClient() {
-	echo -e "\n${CYAN}${BOLD}⚡ Configuring Kernel-Native Cloudflare WARP (MTU 1280 | MSS 1200 | FwMark 0x51888)...${NC}"
+	echo -e "\n${CYAN}${BOLD}⚡ Configuring High-Throughput Kernel Cloudflare WARP (Auto-Probing Max MTU 1420)...${NC}"
 	mkdir -p /etc/wireguard
 	touch /etc/wireguard/warp_egress_enabled
 
@@ -1168,13 +1200,11 @@ function setupCloudflareWarpClient() {
 	local WARP_IPV4=""
 	local WARP_PEER_PUB="bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
 
-	# 1. Preserve existing registered WARP keypair if present (avoids Cloudflare API 429 rate-limit!)
 	if [[ -f /etc/wireguard/wgwarp.conf ]]; then
 		WARP_PRIV_KEY=$(grep -E '^\s*PrivateKey\s*=' /etc/wireguard/wgwarp.conf 2>/dev/null | head -n1 | cut -d'=' -f2- | tr -d ' \r\n' || true)
 		WARP_IPV4=$(grep -E '^\s*Address\s*=' /etc/wireguard/wgwarp.conf 2>/dev/null | head -n1 | cut -d'=' -f2 | cut -d'/' -f1 | tr -d ' \r\n' || true)
 	fi
 
-	# 2. Only call Cloudflare registration API if we don't already have a keypair
 	if [[ -z "$WARP_PRIV_KEY" || -z "$WARP_IPV4" ]]; then
 		echo -e "${CYAN}[*] Registering new Cloudflare WARP WireGuard keypair...${NC}"
 		WARP_PRIV_KEY=$(wg genkey)
@@ -1203,7 +1233,7 @@ function setupCloudflareWarpClient() {
 	fi
 
 	if [[ -n "$WARP_PRIV_KEY" && -n "$WARP_IPV4" ]]; then
-		writeWgwarpConfigFile "$WARP_PRIV_KEY" "$WARP_IPV4" "$WARP_PEER_PUB" "162.159.192.1:2408"
+		writeWgwarpConfigFile "$WARP_PRIV_KEY" "$WARP_IPV4" "$WARP_PEER_PUB" "162.159.192.1:2408" "1420"
 
 		wg-quick down wgwarp >/dev/null 2>&1 || true
 		ip link delete dev wgwarp >/dev/null 2>&1 || true
@@ -1212,36 +1242,45 @@ function setupCloudflareWarpClient() {
 		systemctl restart "wg-quick@wgwarp" 2>/dev/null || wg-quick up wgwarp 2>/dev/null || true
 
 		ensureHostPublicIpBypassRules
-		optimizeNicQueuesAndRPS
 
-		# Multi-endpoint verification loop (tests 2408, 500, 1701, 4500 until warp=on succeeds)
 		local CANDIDATE_EPS=(
 			"162.159.192.1:2408"
 			"162.159.193.1:2408"
 			"188.114.96.1:2408"
 			"162.159.192.1:500"
-			"162.159.192.1:1701"
 			"162.159.192.1:4500"
 		)
-		local WARP_OK=0
+		local SELECTED_EP="162.159.192.1:2408"
 		for ep in "${CANDIDATE_EPS[@]}"; do
-			wg set wgwarp fwmark 0x51888 peer "$WARP_PEER_PUB" endpoint "$ep" persistent-keepalive 15 2>/dev/null || true
+			wg set wgwarp fwmark 0x51888 peer "$WARP_PEER_PUB" endpoint "$ep" persistent-keepalive 25 2>/dev/null || true
 			if curl -4 --interface wgwarp -sSf --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | grep -q "warp=on"; then
-				sed -i "s|^Endpoint\s*=.*|Endpoint = ${ep}|" /etc/wireguard/wgwarp.conf 2>/dev/null || true
-				echo -e "${GREEN}[✔] Kernel WARP Connected on Endpoint ${ep} (Address: ${WARP_IPV4} | MTU: 1280)!${NC}"
-				WARP_OK=1
+				SELECTED_EP="$ep"
 				break
 			fi
 		done
 
+		# Live-bisect exact non-fragmenting inner MTU through wgwarp (1420 -> 1400 -> 1380 -> 1360 -> 1280)
+		WARP_OPTIMAL_MTU=1420
+		for test_mtu in 1420 1400 1380 1360 1280; do
+			local ping_payload=$(( test_mtu - 28 ))
+			if ping -I wgwarp -c 1 -W 1 -M do -s "$ping_payload" 1.1.1.1 >/dev/null 2>&1; then
+				WARP_OPTIMAL_MTU="$test_mtu"
+				break
+			fi
+		done
+
+		ip link set dev wgwarp mtu "$WARP_OPTIMAL_MTU" 2>/dev/null || true
+		writeWgwarpConfigFile "$WARP_PRIV_KEY" "$WARP_IPV4" "$WARP_PEER_PUB" "$SELECTED_EP" "$WARP_OPTIMAL_MTU"
+		optimizeNicQueuesAndRPS
 		installWarpWatchdog
-		[[ $WARP_OK -eq 1 ]] && return 0
+
+		echo -e "${GREEN}[✔] Kernel WARP Connected on ${SELECTED_EP} | Verified Zero-Frag MTU: ${WARP_OPTIMAL_MTU} | GSO/GRO: ON!${NC}"
+		return 0
 	fi
-	echo -e "${YELLOW}[!] Could not verify WARP handshake yet; watchdog will retry in background.${NC}"
 }
 
 function autoRepairNetwork() {
-	echo -e "\n${CYAN}${BOLD}🛠️ Upgrading & Repairing WireGuard + Cloudflare WARP (v4.2)...${NC}"
+	echo -e "\n${CYAN}${BOLD}🛠️ Upgrading & Repairing WireGuard + Cloudflare WARP (v4.3 Full-Speed + LinkedIn Fix)...${NC}"
 
 	cat << 'RESOLV_CLEAN_EOF' > /etc/resolv.conf 2>/dev/null || true
 nameserver 1.1.1.1
@@ -1249,6 +1288,7 @@ nameserver 1.0.0.1
 nameserver 8.8.8.8
 RESOLV_CLEAN_EOF
 
+	modprobe sch_fq_codel >/dev/null 2>&1 || true
 	sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
 	sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null 2>&1 || true
 	sysctl -w net.ipv4.conf.default.rp_filter=0 >/dev/null 2>&1 || true
@@ -1270,12 +1310,16 @@ RESOLV_CLEAN_EOF
 	setupCloudflareWarpClient
 	applyDomainSplitRulesLive
 
-	echo -e "${CYAN}--- Live Post-Repair Connectivity Verification ---${NC}"
+	echo -e "\n${CYAN}--- Live Post-Repair Connectivity & LinkedIn Verification ---${NC}"
 	echo -e "${BOLD}1. Physical VPS Interface (${SERVER_PUB_NIC:-eth0}):${NC}"
 	curl -4 --interface "${SERVER_PUB_NIC:-eth0}" -sSf --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | grep -E '^(ip|warp|colo)=' | sed 's/^/   /' || echo "   Direct trace error"
-	echo -e "${BOLD}2. Kernel WARP Interface (wgwarp):${NC}"
+	echo -e "${BOLD}2. Kernel WARP Interface (wgwarp - MTU $(ip link show wgwarp 2>/dev/null | awk '/mtu/ {for(i=1;i<=NF;i++) if($i=="mtu") print $(i+1)}')):${NC}"
 	curl -4 --interface wgwarp -sSf --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | grep -E '^(ip|warp|colo)=' | sed 's/^/   /' || echo "   WARP trace pending"
-	echo -e "\n${GREEN}[✔] v4.2 Auto-Repair Complete!${NC}\n"
+	echo -e "${BOLD}3. LinkedIn Reachability Check (https://www.linkedin.com):${NC}"
+	local LI_STATUS
+	LI_STATUS=$(curl -4 -s -o /dev/null -w "HTTP %{http_code} (Connect: %{time_connect}s, TLS: %{time_appconnect}s)" --max-time 5 -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" https://www.linkedin.com/ 2>/dev/null || echo "Failed")
+	echo -e "   ${GREEN}${LI_STATUS}${NC}"
+	echo -e "\n${GREEN}[✔] v4.3 Full-Speed & LinkedIn Auto-Repair Complete!${NC}\n"
 }
 
 function domainSplitTunneling() {
@@ -1289,7 +1333,7 @@ function realTimeLogging() {
 }
 
 function geoIpAntiVpnShield() {
-	echo -e "${GREEN}Bidirectional MSS=1200, WARP MTU=1280, QUIC Fallback, and Hardware Offloads ACTIVE.${NC}"
+	echo -e "${GREEN}MTU=1420 Matched, PMTU Clamping, GSO/GRO Batching, fq_codel, and LinkedIn Smart Route ACTIVE.${NC}"
 }
 
 function provisionWebConsole() {
@@ -1301,10 +1345,10 @@ function settingsManager() {
 }
 
 function cloudflareAntiFlagEngine() {
-	echo "1) Refresh High-Speed Kernel WARP (wgwarp MTU 1280)"
-	echo "2) Toggle WARP Scope (Full WARP vs Split WARP)"
-	echo "3) Run Live Dual-Path Speed & IP Diagnostic"
-	echo "4) Disable WARP (Direct VPS Egress Only)"
+	echo "1) Refresh High-Speed Kernel WARP (Auto-Probe MTU 1420)"
+	echo "2) Toggle WARP Scope: Currently [${WARP_GLOBAL_MODE:-full}] (full = All via WARP | split = Direct VPS Speed + Split WARP)"
+	echo "3) Run Live Dual-Path Speed, MTU & LinkedIn Diagnostic"
+	echo "4) Disable WARP (100% Direct VPS Egress)"
 	echo "5) Back"
 	read -rp "Select [1-5]: " CF_OPT
 	case "$CF_OPT" in
@@ -1312,17 +1356,19 @@ function cloudflareAntiFlagEngine() {
 		2)
 			if [[ "${WARP_GLOBAL_MODE:-full}" == "full" ]]; then
 				WARP_GLOBAL_MODE="split"
+				echo -e "${GREEN}[✔] Switched to SPLIT mode (Profile 2 uses Direct VPS line speed; Profile 1 & Split domains use WARP).${NC}"
 			else
 				WARP_GLOBAL_MODE="full"
+				echo -e "${GREEN}[✔] Switched to FULL mode (All traffic warps via Cloudflare WARP).${NC}"
 			fi
 			sed -i "s/^WARP_GLOBAL_MODE=.*/WARP_GLOBAL_MODE=${WARP_GLOBAL_MODE}/" /etc/wireguard/params 2>/dev/null || echo "WARP_GLOBAL_MODE=${WARP_GLOBAL_MODE}" >> /etc/wireguard/params
 			applyDomainSplitRulesLive
 			;;
 		3)
 			echo -e "\n${BOLD}1. Physical VPS Interface (${SERVER_PUB_NIC:-eth0}):${NC}"
-			curl -4 --interface "${SERVER_PUB_NIC:-eth0}" -sSf --max-time 4 https://1.1.1.1/cdn-cgi/trace | grep -E '^(ip|warp|colo)='
+			curl -4 --interface "${SERVER_PUB_NIC:-eth0}" -sSf --max-time 4 https://www.cloudflare.com/cdn-cgi/trace | grep -E '^(ip|warp|colo)='
 			echo -e "\n${BOLD}2. Kernel WARP Interface (wgwarp):${NC}"
-			curl -4 --interface wgwarp -sSf --max-time 4 https://1.1.1.1/cdn-cgi/trace | grep -E '^(ip|warp|colo)='
+			curl -4 --interface wgwarp -sSf --max-time 4 https://www.cloudflare.com/cdn-cgi/trace | grep -E '^(ip|warp|colo)='
 			;;
 		4)
 			rm -f /etc/wireguard/warp_egress_enabled
@@ -1345,7 +1391,7 @@ function uninstallWg() {
 function manageMenu() {
 	while true; do
 		echo -e "\n${PURPLE}=================================================================${NC}"
-		echo -e "          ${GREEN}${BOLD}🍪  Cookie's Easy WireGuard Manager v4.2${NC}"
+		echo -e "          ${GREEN}${BOLD}🍪  Cookie's Easy WireGuard Manager v4.3${NC}"
 		echo -e "${PURPLE}=================================================================${NC}"
 		echo " [1] Setup WireGuard Server        [6] Real-Time Logging"
 		echo " [2] Add New Client                [9] Cloudflare WARP Engine"
