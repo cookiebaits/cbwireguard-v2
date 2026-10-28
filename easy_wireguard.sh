@@ -97,10 +97,6 @@ function ipt_ensure_append() {
 
 # ------------------------------------------------------------------------------
 # 1b. Routing Mode Helpers
-#   split_mode.txt : TUNNEL = default egress is the direct VPS IP (full speed)
-#                    BYPASS = default egress is Cloudflare WARP
-#   clean_egress.txt: DIRECT = clean domains leave via the VPS IP
-#                     RESIDENTIAL = clean domains leave via the wgres upstream
 # ------------------------------------------------------------------------------
 function getSplitMode() {
 	local MODE
@@ -128,7 +124,6 @@ function normalizeDomain() {
 	echo "$1" | sed -e 's|^https*://||' -e 's|/.*$||' | tr '[:upper:]' '[:lower:]' | xargs
 }
 
-# v4.4 defaulted every client to WARP, which capped throughput at WARP speed.
 function migrateToV45() {
 	[[ -d /etc/wireguard ]] || return 0
 	[[ -f /etc/wireguard/.v45_migrated ]] && return 0
@@ -137,7 +132,12 @@ function migrateToV45() {
 	touch /etc/wireguard/.v45_migrated
 }
 
-# Lockless 'noqueue' for WireGuard virtual NICs + UDP GRO Forwarding + Multi-Core RPS/XPS
+function disableRpFilterAll() {
+	for i in /proc/sys/net/ipv4/conf/*/rp_filter; do
+		[[ -w "$i" ]] && echo 0 > "$i" 2>/dev/null || true
+	done
+}
+
 function optimizeNicQueuesAndRPS() {
 	local cpu_count
 	cpu_count=$(nproc 2>/dev/null || echo 1)
@@ -156,7 +156,6 @@ function optimizeNicQueuesAndRPS() {
 	if ip link show "$PUB_NIC" &>/dev/null; then
 		ip link set dev "$PUB_NIC" txqueuelen 10000 2>/dev/null || true
 		if command -v tc &>/dev/null; then
-			# A single root fq on a multi-queue NIC funnels every vCPU through one lock; keep mq (children use fq).
 			local txq
 			txq=$(find /sys/class/net/"$PUB_NIC"/queues -maxdepth 1 -name 'tx-*' 2>/dev/null | wc -l)
 			if (( txq > 1 )); then
@@ -201,6 +200,7 @@ function optimizeNicQueuesAndRPS() {
 	if [[ -w /proc/sys/net/core/rps_sock_flow_entries ]]; then
 		echo 65536 > /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null || true
 	fi
+	disableRpFilterAll
 }
 
 function getHomeDirForClient() {
@@ -545,30 +545,36 @@ PrivateKey = ${SERVER_PRIV_KEY}
 MTU = 1420
 SaveConfig = false
 
-PostUp = sysctl -w net.ipv4.ip_forward=1 net.ipv6.conf.all.forwarding=1 net.ipv4.conf.all.rp_filter=0 net.ipv4.conf.wg0.rp_filter=0 >/dev/null 2>&1 || true
+PostUp = sysctl -w net.ipv4.ip_forward=1 net.ipv6.conf.all.forwarding=1 net.ipv4.conf.all.rp_filter=0 net.ipv4.conf.default.rp_filter=0 net.ipv4.conf.wg0.rp_filter=0 >/dev/null 2>&1 || true
+PostUp = for i in /proc/sys/net/ipv4/conf/*/rp_filter; do echo 0 > \$i 2>/dev/null || true; done
 PostUp = ip link set dev wg0 txqueuelen 10000 mtu 1420 2>/dev/null || true
 PostUp = tc qdisc del dev wg0 root 2>/dev/null || true
-PostUp = iptables -C INPUT -p udp --dport ${SERVER_PORT:-4500} -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p udp --dport ${SERVER_PORT:-4500} -j ACCEPT
-PostUp = iptables -C INPUT -i wg0 -p udp --dport 53 -j ACCEPT 2>/dev/null || iptables -I INPUT 2 -i wg0 -p udp --dport 53 -j ACCEPT
-PostUp = iptables -C INPUT -i wg0 -p tcp --dport 53 -j ACCEPT 2>/dev/null || iptables -I INPUT 3 -i wg0 -p tcp --dport 53 -j ACCEPT
-PostUp = iptables -C FORWARD -p icmp -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -p icmp -j ACCEPT
-PostUp = iptables -C FORWARD -i wg0 -j ACCEPT 2>/dev/null || iptables -I FORWARD 2 -i wg0 -j ACCEPT
-PostUp = iptables -C FORWARD -o wg0 -j ACCEPT 2>/dev/null || iptables -I FORWARD 3 -o wg0 -j ACCEPT
+
+PostUp = iptables -C INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+PostUp = iptables -C INPUT -p udp --dport ${SERVER_PORT:-4500} -j ACCEPT 2>/dev/null || iptables -I INPUT 2 -p udp --dport ${SERVER_PORT:-4500} -j ACCEPT
+PostUp = iptables -C INPUT -i wg0 -p udp --dport 53 -j ACCEPT 2>/dev/null || iptables -I INPUT 3 -i wg0 -p udp --dport 53 -j ACCEPT
+PostUp = iptables -C INPUT -i wg0 -p tcp --dport 53 -j ACCEPT 2>/dev/null || iptables -I INPUT 4 -i wg0 -p tcp --dport 53 -j ACCEPT
+
+PostUp = iptables -C FORWARD -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+PostUp = iptables -C FORWARD -p icmp -j ACCEPT 2>/dev/null || iptables -I FORWARD 2 -p icmp -j ACCEPT
+PostUp = iptables -C FORWARD -i wg0 -j ACCEPT 2>/dev/null || iptables -I FORWARD 3 -i wg0 -j ACCEPT
+PostUp = iptables -C FORWARD -o wg0 -j ACCEPT 2>/dev/null || iptables -I FORWARD 4 -o wg0 -j ACCEPT
+
 PostUp = iptables -t nat -C POSTROUTING -s 10.18.0.0/24 ! -o wg0 -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING 1 -s 10.18.0.0/24 ! -o wg0 -j MASQUERADE
 PostUp = iptables -t nat -C POSTROUTING -s 10.19.0.0/24 ! -o wg0 -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING 2 -s 10.19.0.0/24 ! -o wg0 -j MASQUERADE
 
-PostUp = iptables -t mangle -C FORWARD -i wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -t mangle -I FORWARD 1 -i wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-PostUp = iptables -t mangle -C FORWARD -o wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -t mangle -I FORWARD 2 -o wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostUp = iptables -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 
 PostUp = ip6tables -C FORWARD -i wg0 -j REJECT --reject-with icmp6-adm-prohibited 2>/dev/null || ip6tables -I FORWARD 1 -i wg0 -j REJECT --reject-with icmp6-adm-prohibited 2>/dev/null || true
 
 PostDown = iptables -D INPUT -p udp --dport ${SERVER_PORT:-4500} -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D INPUT -i wg0 -p udp --dport 53 -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D INPUT -i wg0 -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -i wg0 -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -o wg0 -j ACCEPT 2>/dev/null || true
 PostDown = iptables -t nat -D POSTROUTING -s 10.18.0.0/24 ! -o wg0 -j MASQUERADE 2>/dev/null || true
 PostDown = iptables -t nat -D POSTROUTING -s 10.19.0.0/24 ! -o wg0 -j MASQUERADE 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -i wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -o wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 PostDown = ip6tables -D FORWARD -i wg0 -j REJECT --reject-with icmp6-adm-prohibited 2>/dev/null || true
 WG_SERVER_EOF
 
@@ -652,6 +658,7 @@ SYSCTL_EOF
 		echo "net.ipv4.tcp_congestion_control = bbr" >> "$SYSCTL_CONF"
 	fi
 	sysctl --system -q >/dev/null 2>&1 || sysctl -p "$SYSCTL_CONF" >/dev/null 2>&1 || true
+	disableRpFilterAll
 
 	mkdir -p /etc/wireguard
 	chmod 700 /etc/wireguard
@@ -706,7 +713,6 @@ PARAMS_EOF
 	newClientInternal "${CLIENT_NAME}" "${CLIENT_PASSWORD}"
 }
 
-# Clean domains: sites that block VPN/WARP ranges. They NEVER go through WARP.
 function ensureDefaultSplitDomainsFile() {
 	mkdir -p /etc/wireguard
 	touch /etc/wireguard/split_domains.txt
@@ -775,7 +781,7 @@ function removeDomainFromList() {
 }
 
 # ------------------------------------------------------------------------------
-# 7. Client Management (client configs stay standard WireGuard)
+# 7. Client Management
 # ------------------------------------------------------------------------------
 function newClientInternal() {
 	local CLIENT_NAME="$1"
@@ -976,9 +982,7 @@ function backupRestoreManager() {
 }
 
 # ------------------------------------------------------------------------------
-# 8. Policy Routing: Host Public IP, Return Subnets & Split Marks
-#   fwmark 0x100   -> clean domains   -> table main (VPS IP) or 52000 (residential)
-#   fwmark 0x51820 -> WARP domains    -> table 51820
+# 8. Policy Routing
 # ------------------------------------------------------------------------------
 function ensureHostPublicIpBypassRules() {
 	local DEF_NIC="${SERVER_PUB_NIC:-}"
@@ -1012,11 +1016,9 @@ function ensureHostPublicIpBypassRules() {
 
 	if [[ -n "$PUB_IP" && "$PUB_IP" != "127.0.0.1" ]]; then
 		while ip rule del from "${PUB_IP}/32" lookup main priority 50 2>/dev/null; do :; done
-		while ip rule del from "${PUB_IP}/32" lookup main priority 51 2>/dev/null; do :; done
 		ip rule add from "${PUB_IP}/32" lookup main priority 50 2>/dev/null || true
 	fi
 
-	# If table 52000 is empty (upstream down) the lookup falls through, so clean traffic never blackholes.
 	while ip rule del fwmark 0x100 priority 60 2>/dev/null; do :; done
 	ip rule add fwmark 0x100 lookup "$(getCleanEgressTable)" priority 60 2>/dev/null || true
 
@@ -1047,7 +1049,7 @@ function ensureHostPublicIpBypassRules() {
 }
 
 # ------------------------------------------------------------------------------
-# 9. Dnsmasq + IPSet Split Tunneling, DoH Capture & CONNMARK Fastpath
+# 9. Dnsmasq + IPSet Split Tunneling & Connmark Fastpath
 # ------------------------------------------------------------------------------
 function expandSplitDomain() {
 	local base_domain="$1"
@@ -1077,6 +1079,8 @@ function applyDomainSplitRulesLive() {
 	MODE=$(getSplitMode)
 	echo "$MODE" > /etc/wireguard/split_mode.txt
 
+	disableRpFilterAll
+
 	rm -f /etc/dnsmasq.d/00-stealth-privacy.conf /etc/dnsmasq.d/00-stealth-split.conf /etc/dnsmasq.d/00-stealth-dns.conf 2>/dev/null || true
 
 	if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
@@ -1090,7 +1094,6 @@ RESOLVED_NO_STUB
 
 	mkdir -p /etc/dnsmasq.d
 	cat << DNSMASQ_CLEAN_EOF > /etc/dnsmasq.d/00-wireguard-split-dns.conf
-# Cookie WireGuard Split-Tunnel DNS Resolver
 port=53
 bind-dynamic
 interface=${WG}
@@ -1103,7 +1106,6 @@ bogus-priv
 server=1.1.1.1
 server=1.0.0.1
 server=8.8.8.8
-# Browser DoH / iCloud Private Relay canaries: NXDOMAIN tells Firefox and Safari to use this resolver
 address=/use-application-dns.net/
 address=/mask.icloud.com/
 address=/mask-h2.icloud.com/
@@ -1169,17 +1171,14 @@ IPSET_HEADER
 			done
 		fi
 
-		# PayPal AS11643
 		for p in 64.4.240.0/21 66.211.168.0/21 173.0.80.0/20 173.224.160.0/19 185.177.52.0/22 192.148.20.0/23 198.54.120.0/22 216.113.160.0/19; do
 			echo "add wg_direct_clean $p -exist" >> "$IPSET_BATCH"
 		done
 
-		# LinkedIn AS14413 / AS12447 + Azure Front Door edges: always clean egress, never WARP
 		for li_cidr in 13.107.42.0/24 13.107.6.0/24 13.107.18.0/24 13.107.21.0/24 108.174.0.0/16 144.2.0.0/16 185.63.144.0/22 199.101.160.0/22 216.52.0.0/16 45.42.64.0/22 103.20.92.0/22 128.242.0.0/16 91.225.248.0/22 65.156.227.0/24 8.247.168.0/24; do
 			echo "add wg_direct_clean ${li_cidr} -exist" >> "$IPSET_BATCH"
 		done
 
-		# Public DoH/DoT resolvers. Blocking them makes browsers fall back to plain DNS, which dnsmasq sees.
 		for doh in 1.1.1.1 1.0.0.1 1.1.1.2 1.0.0.2 1.1.1.3 1.0.0.3 104.16.248.249 104.16.249.249 162.159.61.3 162.159.61.4 172.64.41.3 172.64.41.4 8.8.8.8 8.8.4.4 9.9.9.9 149.112.112.112 9.9.9.11 149.112.112.11 94.140.14.14 94.140.15.15 194.242.2.2 194.242.2.3 76.76.2.0 76.76.10.0 45.90.28.0 45.90.30.0 208.67.222.222 208.67.220.220 146.112.41.2; do
 			echo "add wg_doh_block $doh -exist" >> "$IPSET_BATCH"
 		done
@@ -1198,7 +1197,6 @@ IPSET_HEADER
 	if command -v dnsmasq &>/dev/null; then
 		if ! dnsmasq --test >/dev/null 2>&1; then
 			rm -f /etc/dnsmasq.d/wg_split.conf
-			echo -e "${RED}[!] dnsmasq rejected the split map (built without ipset support?). Only pre-resolved IPs will be split.${NC}"
 		fi
 		systemctl enable dnsmasq >/dev/null 2>&1 || true
 		systemctl restart dnsmasq >/dev/null 2>&1 || true
@@ -1206,8 +1204,6 @@ IPSET_HEADER
 			DNSMASQ_OK=1
 			ipt_ensure_top nat PREROUTING 1 -i "$WG" -p udp --dport 53 -j DNAT --to-destination "${SERVER_WG_IPV4:-10.18.0.1}:53"
 			ipt_ensure_top nat PREROUTING 2 -i "$WG" -p tcp --dport 53 -j DNAT --to-destination "${SERVER_WG_IPV4:-10.18.0.1}:53"
-		else
-			echo -e "${RED}[!] dnsmasq failed to start; clients keep their own DNS and split tunneling will be incomplete.${NC}"
 		fi
 	fi
 
@@ -1226,13 +1222,15 @@ IPSET_HEADER
 		iptables -t mangle -A PREROUTING -i "$WG" -m mark --mark 0x51820 -j CONNMARK --save-mark 2>/dev/null || true
 	fi
 
-	ipt_ensure_top filter INPUT 1 -p udp --dport "${SERVER_PORT:-4500}" -j ACCEPT
-	ipt_ensure_top filter INPUT 2 -i "$WG" -p udp --dport 53 -j ACCEPT
-	ipt_ensure_top filter INPUT 3 -i "$WG" -p tcp --dport 53 -j ACCEPT
+	ipt_ensure_top filter INPUT 1 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+	ipt_ensure_top filter INPUT 2 -p udp --dport "${SERVER_PORT:-4500}" -j ACCEPT
+	ipt_ensure_top filter INPUT 3 -i "$WG" -p udp --dport 53 -j ACCEPT
+	ipt_ensure_top filter INPUT 4 -i "$WG" -p tcp --dport 53 -j ACCEPT
 
-	ipt_ensure_top filter FORWARD 1 -p icmp -j ACCEPT
-	ipt_ensure_top filter FORWARD 2 -i "$WG" -j ACCEPT
-	ipt_ensure_top filter FORWARD 3 -o "$WG" -j ACCEPT
+	ipt_ensure_top filter FORWARD 1 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+	ipt_ensure_top filter FORWARD 2 -p icmp -j ACCEPT
+	ipt_ensure_top filter FORWARD 3 -i "$WG" -j ACCEPT
+	ipt_ensure_top filter FORWARD 4 -o "$WG" -j ACCEPT
 
 	iptables -N WG_DOH 2>/dev/null || true
 	iptables -F WG_DOH 2>/dev/null || true
@@ -1241,7 +1239,7 @@ IPSET_HEADER
 		iptables -A WG_DOH -i "$WG" -p udp -m multiport --dports 443,853 -m set --match-set wg_doh_block dst -j REJECT --reject-with icmp-port-unreachable 2>/dev/null || true
 	fi
 	while iptables -D FORWARD -j WG_DOH 2>/dev/null; do :; done
-	iptables -I FORWARD 1 -j WG_DOH 2>/dev/null || true
+	iptables -I FORWARD 5 -j WG_DOH 2>/dev/null || true
 
 	if command -v ip6tables &>/dev/null; then
 		ip6tables -C FORWARD -i "$WG" -j REJECT --reject-with icmp6-adm-prohibited 2>/dev/null || \
@@ -1275,8 +1273,6 @@ IPSET_HEADER
 				ip rule add from 10.18.0.0/24 table 51820 priority 910 2>/dev/null || true
 				STD_DEFAULT="Cloudflare WARP (speed limited by WARP)"
 			fi
-		else
-			echo -e "${YELLOW}[!] ${WARP_NIC} handshake pending; all clients use the direct VPS IP for now.${NC}"
 		fi
 	fi
 
@@ -1289,7 +1285,6 @@ IPSET_HEADER
 	optimizeNicQueuesAndRPS
 }
 
-# Re-applies ipsets, marks and ip rules at boot (none of them survive a reboot on their own).
 function installSplitPersistence() {
 	local TARGET="/usr/local/sbin/easy-wireguard"
 	local SELF
@@ -1429,10 +1424,7 @@ function domainSplitTunneling() {
 }
 
 # ------------------------------------------------------------------------------
-# 11. Residential / ISP Clean-IP Upstream (server side only)
-#   Datacenter and WARP IP ranges are scored as bots by LinkedIn & Cloudflare.
-#   Clean domains can be chained through a WireGuard upstream with a residential
-#   or ISP IP (commercial residential VPN, or a WireGuard server on a home router).
+# 11. Residential Upstream
 # ------------------------------------------------------------------------------
 function getConfValue() {
 	echo "$1" | grep -iE "^\s*$2\s*=" | head -n1 | cut -d'=' -f2- | xargs
@@ -1773,7 +1765,7 @@ function setupCloudflareWarpClient() {
 }
 
 function autoRepairNetwork() {
-	echo -e "\n${CYAN}${BOLD}🛠️ Upgrading to v4.5 (Direct full-speed default + Clean-domain routing)...${NC}"
+	echo -e "\n${CYAN}${BOLD}🛠️ Running Network Auto-Repair...${NC}"
 
 	cat << 'RESOLV_CLEAN_EOF' > /etc/resolv.conf 2>/dev/null || true
 nameserver 1.1.1.1
@@ -1787,6 +1779,7 @@ RESOLV_CLEAN_EOF
 	sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || true
 	sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null 2>&1 || true
 	sysctl -w net.ipv4.conf.default.rp_filter=0 >/dev/null 2>&1 || true
+	disableRpFilterAll
 	sysctl --system -q >/dev/null 2>&1 || true
 
 	if [[ -f /etc/wireguard/params ]]; then
@@ -1804,7 +1797,7 @@ RESOLV_CLEAN_EOF
 	applyDomainSplitRulesLive
 	installSplitPersistence
 
-	echo -e "\n${CYAN}--- Live v4.5 Post-Repair Verification ---${NC}"
+	echo -e "\n${CYAN}--- Live Post-Repair Verification ---${NC}"
 	echo -e "${BOLD}1. Direct VPS Interface (${SERVER_PUB_NIC:-eth0}):${NC}"
 	curl -4 --interface "${SERVER_PUB_NIC:-eth0}" -sSf --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | grep -E '^(ip|warp|colo)=' | sed 's/^/   /' || echo "   Direct trace error"
 
@@ -1826,25 +1819,13 @@ RESOLV_CLEAN_EOF
 
 	echo -e "${BOLD}4. Clean-Egress & LinkedIn Acceptance:${NC}"
 	testCleanEgress
-	echo -e "\n${GREEN}[✔] v4.5 Upgrade Complete! Reconnect your WireGuard client once to flush its DNS cache.${NC}\n"
+	echo -e "\n${GREEN}[✔] Repair Complete! Reconnect your WireGuard client once to test.${NC}\n"
 }
 
 function realTimeLogging() {
 	wg show
 	echo ""
 	ip rule show
-}
-
-function geoIpAntiVpnShield() {
-	echo -e "${GREEN}Direct default egress, CONNMARK fastpath, DoH capture and dnsmasq split tunneling ACTIVE.${NC}"
-}
-
-function provisionWebConsole() {
-	echo -e "${YELLOW}Web Console helper ready.${NC}"
-}
-
-function settingsManager() {
-	echo -e "Public IP: ${SERVER_PUB_IP} | Port: ${SERVER_PORT} | Default egress: $(getSplitMode) | Clean egress: $(getCleanEgress)"
 }
 
 function cloudflareAntiFlagEngine() {
