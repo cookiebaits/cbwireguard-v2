@@ -673,21 +673,21 @@ SYSCTL_EOF
 	chmod 600 /etc/wireguard/admin.key
 
 	cat << PARAMS_EOF > /etc/wireguard/params
-SERVER_PUB_IP=${SERVER_PUB_IP}
-SERVER_PUB_NIC=${SERVER_PUB_NIC}
-SERVER_WG_NIC=${SERVER_WG_NIC}
-SERVER_WG_IPV4=${SERVER_WG_IPV4}
-SERVER_WG_IPV6=${SERVER_WG_IPV6}
-SERVER_PORT=${SERVER_PORT}
-SERVER_PORT_CF=${SERVER_PORT}
-SERVER_PRIV_KEY=${SERVER_PRIV_KEY}
-SERVER_PUB_KEY=${SERVER_PUB_KEY}
-CLIENT_DNS_1=${CLIENT_DNS_1}
-CLIENT_DNS_2=${CLIENT_DNS_2}
-ALLOWED_IPS=${ALLOWED_IPS}
-WEB_PORT=${WEB_PORT:-51821}
-ADMIN_PASSKEY=${ADMIN_PASSKEY}
-CF_AUTO_ENABLE=${CF_AUTO_ENABLE:-y}
+SERVER_PUB_IP="${SERVER_PUB_IP}"
+SERVER_PUB_NIC="${SERVER_PUB_NIC}"
+SERVER_WG_NIC="${SERVER_WG_NIC}"
+SERVER_WG_IPV4="${SERVER_WG_IPV4}"
+SERVER_WG_IPV6="${SERVER_WG_IPV6}"
+SERVER_PORT="${SERVER_PORT}"
+SERVER_PORT_CF="${SERVER_PORT}"
+SERVER_PRIV_KEY="${SERVER_PRIV_KEY}"
+SERVER_PUB_KEY="${SERVER_PUB_KEY}"
+CLIENT_DNS_1="${CLIENT_DNS_1}"
+CLIENT_DNS_2="${CLIENT_DNS_2}"
+ALLOWED_IPS="${ALLOWED_IPS}"
+WEB_PORT="${WEB_PORT:-51821}"
+ADMIN_PASSKEY="${ADMIN_PASSKEY}"
+CF_AUTO_ENABLE="${CF_AUTO_ENABLE:-y}"
 PARAMS_EOF
 	chmod 600 /etc/wireguard/params
 
@@ -877,14 +877,28 @@ PEER_EOF
 
 	wg syncconf wg0 <(wg-quick strip wg0) 2>/dev/null || true
 
-	echo -e "\n${CYAN}${BOLD}📋 [1/2] PROFILE 1: WARP DEFAULT (${CLIENT_NAME}-cloudflare-shield.conf):${NC}"
+	echo -e "\n${PURPLE}# ==============================================================================${NC}"
+	echo -e "${CYAN}${BOLD}📋 [1/2] PROFILE 1: WARP DEFAULT (${CLIENT_NAME}-cloudflare-shield.conf):${NC}"
+	echo -e "${PURPLE}# ==============================================================================${NC}"
 	echo "$CF_CONF_CONTENT"
-	echo -e "\n${GREEN}${BOLD}📋 [2/2] PROFILE 2: STANDARD FULL-SPEED (${CLIENT_NAME}-standard.conf):${NC}"
+
+	echo -e "\n${PURPLE}# ==============================================================================${NC}"
+	echo -e "${GREEN}${BOLD}📋 [2/2] PROFILE 2: STANDARD FULL-SPEED (${CLIENT_NAME}-standard.conf):${NC}"
+	echo -e "${PURPLE}# ==============================================================================${NC}"
 	echo "$STD_CONF_CONTENT"
 
+	echo -e "\n${PURPLE}# ==============================================================================${NC}"
 	if command -v qrencode &>/dev/null; then
-		echo "$CF_CONF_CONTENT" | qrencode -t ansiutf8
-		echo "$STD_CONF_CONTENT" | qrencode -t ansiutf8
+		local SHOW_QR="n"
+		read -rp "Generate and display terminal QR codes for these profiles now? [y/N]: " SHOW_QR
+		if [[ "$SHOW_QR" =~ ^[Yy]$ ]]; then
+			echo -e "\n${CYAN}--- Profile 1 QR (WARP Default) ---${NC}"
+			echo "$CF_CONF_CONTENT" | qrencode -t ansiutf8
+			echo -e "\n${GREEN}--- Profile 2 QR (Standard Direct) ---${NC}"
+			echo "$STD_CONF_CONTENT" | qrencode -t ansiutf8
+		else
+			echo -e "${YELLOW}[i] Skipped QR display. You can view or export QR codes anytime via the client menu.${NC}"
+		fi
 	fi
 }
 
@@ -1024,7 +1038,9 @@ function ensureHostPublicIpBypassRules() {
 
 	while ip rule del fwmark 0x51820 table 51820 priority 85 2>/dev/null; do :; done
 	while ip rule del fwmark 0x51820 table 51820 priority 1000 2>/dev/null; do :; done
-	ip rule add fwmark 0x51820 table 51820 priority 85 2>/dev/null || true
+	if ip link show wgwarp &>/dev/null; then
+		ip rule add fwmark 0x51820 table 51820 priority 85 2>/dev/null || true
+	fi
 
 	local WARP_LOCAL_IP=""
 	if ip link show wgwarp &>/dev/null; then
@@ -1036,10 +1052,10 @@ function ensureHostPublicIpBypassRules() {
 	fi
 	while ip rule del table 51820 priority 100 2>/dev/null; do :; done
 	while ip rule del table 51820 priority 101 2>/dev/null; do :; done
-	if [[ -n "$WARP_LOCAL_IP" ]]; then
+	if [[ -n "$WARP_LOCAL_IP" ]] && ip link show wgwarp &>/dev/null; then
 		ip rule add from "${WARP_LOCAL_IP}/32" table 51820 priority 100 2>/dev/null || true
+		ip rule add oif wgwarp table 51820 priority 101 2>/dev/null || true
 	fi
-	ip rule add oif wgwarp table 51820 priority 101 2>/dev/null || true
 
 	while ip rule del table 52000 priority 102 2>/dev/null; do :; done
 	if ip link show wgres &>/dev/null; then
